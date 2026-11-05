@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+
+# macOS / Office
+.DS_Store
+~$*
+
+# generated at run time
+docs/eqcache/
+figure_export_presets.json
+
+# data and session files stay out of the repository
+*.arar
+*.ararpt
+*.ararstack
+*.arprob
+*.jflux
+*.xlsx
+*.xls
+*.csv
