@@ -6,7 +6,7 @@ the data folder, the fonts and the launcher.
 
 Run:  QT_QPA_PLATFORM=offscreen python tests/test_tools_open.py
 """
-import importlib.util, json, os, sys, tempfile
+import importlib.util, json, os, subprocess, sys, tempfile
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 DATA = tempfile.mkdtemp()
 os.environ['SIMPLAR_DATA_DIR'] = DATA
@@ -14,7 +14,7 @@ HERE = os.path.dirname(os.path.abspath(__file__)); ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT); sys.path.insert(0, HERE)
 import pandas as pd
 from PyQt5.QtWidgets import QApplication, QMessageBox, QFileDialog
-from PyQt5.QtGui import QFontInfo
+from PyQt5.QtGui import QFontDatabase, QFontInfo
 
 app = QApplication.instance() or QApplication([])
 shown = []
@@ -74,7 +74,8 @@ def test_data_folders():
     assert os.path.dirname(p) == os.path.join(DATA, '4 Plateau & isochron')
     assert os.path.basename(p) == 'Sample_ 1_2 _final__', os.path.basename(p)
     ok('dialogs open in the tool folder; suggested names made safe for Windows')
-    assert dfold.safe_filename('CON.') == 'CON' and dfold.safe_filename('  ') == 'untitled'
+    assert dfold.safe_filename('CON.') == 'CON_' and dfold.safe_filename('nul.final') == 'nul_.final'
+    assert dfold.safe_filename('CONSTANT') == 'CONSTANT' and dfold.safe_filename('  ') == 'untitled'
     dfold.create_all()
     assert sorted(os.listdir(DATA)) == sorted(dfold.TOOL_FOLDERS.values())
     ok('all five tool folders created')
@@ -127,8 +128,33 @@ def test_converter_file_names():
     ok(f'written as {name}')
 
 
+_FONT_CHECK = ('import sys; sys.path.insert(0, sys.argv[1]); import arar_math as am; '
+               'from PyQt5.QtWidgets import QApplication; from PyQt5.QtGui import QFontInfo; '
+               'app = QApplication([]); i = QFontInfo(am.mono_font(9)); '
+               'print(i.fixedPitch(), i.family())')
+
+
 def test_fonts():
     print('Fixed-width font for tables and reports:')
+    # The off-screen platform has no font settings (and on Windows no fonts at
+    # all), so on Windows and macOS ask the platform the tools normally run on.
+    if sys.platform in ('win32', 'darwin'):
+        env = {k: v for k, v in os.environ.items() if k != 'QT_QPA_PLATFORM'}
+        try:
+            r = subprocess.run([sys.executable, '-c', _FONT_CHECK, ROOT], env=env, timeout=120,
+                               capture_output=True, text=True, encoding='utf-8', errors='replace')
+        except subprocess.TimeoutExpired:
+            r = subprocess.CompletedProcess([], 1, '', 'timed out')
+        if r.returncode == 0 and r.stdout.strip():
+            fixed, family = r.stdout.strip().splitlines()[-1].split(' ', 1)
+            assert fixed == 'True', family
+            ok(f'{family} (native platform)')
+            return
+        print('  native platform not available:', r.stderr.strip()[-300:])
+    db = QFontDatabase()
+    if not any(db.isFixedPitch(x) for x in db.families()):
+        print('  skipped: no fixed-width font installed for the off-screen platform')
+        return
     f = am.mono_font(9)
     assert QFontInfo(f).fixedPitch(), QFontInfo(f).family()
     ok(QFontInfo(f).family())

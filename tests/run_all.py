@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 
+sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 HERE = os.path.dirname(os.path.abspath(__file__))
 env = dict(os.environ, QT_QPA_PLATFORM='offscreen', MPLBACKEND='Agg',
            SIMPLAR_DATA_DIR=tempfile.mkdtemp(), PYTHONIOENCODING='utf-8')

@@ -114,12 +114,18 @@ def remember(path, tool=None):
 
 
 _UNSAFE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+_RESERVED = {'CON', 'PRN', 'AUX', 'NUL', *(f'COM{i}' for i in range(1, 10)),
+             *(f'LPT{i}' for i in range(1, 10))}
 
 
 def safe_filename(name, fallback='untitled'):
     """A file name valid on Windows, macOS and Linux: forbidden characters
-    become '_', trailing dots and spaces are dropped."""
+    become '_', trailing dots and spaces are dropped, and Windows device names
+    (CON, NUL, COM1, ...) get a '_' appended."""
     s = _UNSAFE.sub('_', str(name)).strip().rstrip('. ')
+    stem, dot, rest = s.partition('.')
+    if stem.upper() in _RESERVED:
+        s = stem + '_' + dot + rest
     return s or fallback
 
 

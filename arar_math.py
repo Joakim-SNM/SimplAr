@@ -1904,13 +1904,21 @@ def force_light(app):
     )
 
 
+_MONO_FAMILIES = ('Menlo', 'Consolas', 'DejaVu Sans Mono', 'Liberation Mono',
+                  'Courier New', 'Courier')
+
+
 def mono_font(size=9):
-    """The system's fixed-width font at the given point size (Menlo on macOS,
-    Consolas on Windows, DejaVu Sans Mono or similar on Linux)."""
+    """The system's fixed-width font at the given point size; when the platform
+    names none, the first installed of a few common ones."""
     from PyQt5.QtGui import QFont, QFontDatabase, QFontInfo
     f = QFontDatabase.systemFont(QFontDatabase.FixedFont)
-    if not QFontInfo(f).fixedPitch():         # no platform theme: ask by style
-        f = QFont('monospace')
-        f.setStyleHint(QFont.TypeWriter)
+    if not QFontInfo(f).fixedPitch():
+        db = QFontDatabase()
+        families = db.families()
+        family = (next((x for x in _MONO_FAMILIES if x in families), None)
+                  or next((x for x in families if db.isFixedPitch(x)), None))
+        if family:
+            f = QFont(family)
     f.setPointSize(size)
     return f
