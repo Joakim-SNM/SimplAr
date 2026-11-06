@@ -149,17 +149,15 @@ def build_about_html(base_dir):
     toc = """
     <a name="top"></a>
     <h1>SimplAr: Methods &amp; Reference</h1>
-    <p class="lede">A guide to the five tools: what each one is for, the order they
-    are meant to be used in, and the mathematics behind them, set out first in plain
-    language and then written down.</p>
+    <p class="lede">The methods and equations used by the five tools.</p>
 
     <div class="toc">
       <b>Contents</b>
       <ol>
-        <li><a href="#stats">Two ways of combining ages</a></li>
-        <li><a href="#idea">Working in R-values</a></li>
-        <li><a href="#tiers">The three tiers of uncertainty</a></li>
         <li><a href="#workflow">The workflow</a></li>
+        <li><a href="#idea">The age equation</a></li>
+        <li><a href="#tiers">The three uncertainty tiers</a></li>
+        <li><a href="#stats">Combining ages</a></li>
         <li><a href="#converter">Data converter</a></li>
         <li><a href="#wm">Flux monitors</a></li>
         <li><a href="#jcalc">Flux regression</a></li>
@@ -172,280 +170,204 @@ def build_about_html(base_dir):
     """
 
     # ── 1 ────────────────────────────────────────────────────────────────
-    stats = """
-    <a name="stats"></a>
-    <h2>1. Two ways of combining ages</h2>
+    workflow = """
+    <a name="workflow"></a>
+    <h2>1. The workflow</h2>
 
-    <p>The field agrees on the equations that turn argon measurements into ages, but
-    it has never settled on a single way to combine several ages into one. These
-    tools offer two, labelled <b>WM + √MSWD</b> and <b>GLS + ML</b>. It is worth being
-    clear about what actually separates them, because it is narrower than the two
-    names suggest.</p>
-
-    <p>Both build the same covariance structure. Every age carries three tiers:
-    analytical, then plus the neutron-flux (J) uncertainty, then plus the monitor-age
-    and decay-constant uncertainty. The parts that two ages share (J for aliquots that
-    sat in the same irradiation position; the monitor age and λ for aliquots on the
-    same calibration) are correlated, and therefore do not average down when the ages
-    are combined. Both methods encode that identically. The covariance handling is not
-    what distinguishes them.</p>
-
-    <p>What differs is only two things. The first is the mean. <b>WM + √MSWD</b> takes the
-    ordinary inverse-variance weighted mean on the analytical errors. <b>GLS + ML</b>
-    (Vermeesch 2015, Section 13) takes the generalised-least-squares mean on the full
-    covariance, including the overdispersion term ω² described next. When the ages are
-    overdispersed, ω² is added to every age, which evens out the weights, so that a few
-    very precise analyses no longer decide the mean on their own. Without
-    overdispersion and with a single shared J the two means are essentially identical;
-    partial correlations (aliquots in different holes of one disk, with the correlation
-    read from a loaded .jflux file) add a smaller difference.</p>
-
-    <p>The second is overdispersion, the treatment of ages that scatter more than
-    their stated errors allow. <b>WM + √MSWD</b> multiplies the analytical tier by
-    √MSWD when the MSWD exceeds the Wendt &amp; Carl (1991) 95% limit for n, the
-    same trigger in every tool. <b>GLS + ML</b> instead estimates an additive random-effects variance
-    ω² by maximum likelihood and adds it to each age (the IsoplotR / Ar-Ar_Redux
-    random.effects = TRUE model). ω² is fitted on the full covariance, analytical
-    plus J plus calibration, so scatter that independent J errors already explain
-    (ages from different holes or irradiations) is not counted a second time, and
-    all three tiers are the variance of the one GLS mean that is reported.</p>
-
-    <p>Which to use depends on the data. When the analytical errors are similar, or the
-    ages are not overdispersed, the two give practically the same age and uncertainty.
-    When the ages are overdispersed and their analytical errors differ widely, as they
-    often do for single crystals of variable K content, they do not. In simulations with
-    a tenfold range of analytical errors and a true overdispersion of one to two times
-    the typical analytical error, the WM + √MSWD 95% interval contained the true age in
-    about 70&ndash;80% of cases, against about 80&ndash;93% for GLS + ML, whose mean was
-    also closer to the true age. Both fall short of 95% for few ages, ML more so,
-    because a variance estimated from five or ten values is itself uncertain.</p>
-
-    <p>One further choice appears only when stacking several step-heating aliquots.
-    <b>GLS + ML</b> reduces each aliquot to its plateau age first and combines those
-    (n = aliquots); <b>WM + √MSWD</b> does the same by default, or can pool every
-    heating step in ratio space instead (n = steps). When the aliquots agree this
-    makes no difference. When they
-    disagree beyond analytical error, the aliquot is the correct unit: the steps within
-    one aliquot all share that aliquot's single geological offset, so pooling them as
-    independent evidence about the sample age understates the uncertainty, and does so
-    without limit as more steps are added. The aliquot-level combination instead
-    reports the between-aliquot standard error, which is the honest number.</p>
-
-    <p>A note on scope. This is Vermeesch's combination step (his Eqs. 91 to 94), not
-    his full data reduction. Unlike Ar-Ar_Redux, the tools work from already-reduced
-    ages, so the covariance is built only from the J and monitor/λ terms that can be
-    reconstructed downstream, not from the raw-beam correlations (shared blanks,
-    detector calibration, mass fractionation, interference corrections) that require
-    the original isotope data.</p>
+    <p>Each tool runs on its own, but they are normally used in this order:</p>
+    <ol>
+      <li><a href="#converter"><b>Data converter</b></a>: ArArCALC or Mass Spec
+          export (.xlsx) to <code>.arar</code> files.</li>
+      <li><a href="#wm"><b>Flux monitors</b></a>: the Fish Canyon monitor analyses of
+          each irradiation position reduced to one R and J.</li>
+      <li><a href="#jcalc"><b>Flux regression</b></a>: J fitted across the irradiation
+          disk and predicted, with its uncertainty, at the position of each
+          unknown.</li>
+      <li><a href="#plateau"><b>Plateau &amp; isochron</b></a>: plateau and isochron
+          ages of step-heating runs, and combined ages of several aliquots.</li>
+      <li><a href="#prob"><b>Age distribution</b></a>: probability density plots,
+          weighted means and pooled ages of many analyses or samples, and mixture
+          models.</li>
+    </ol>
     """
 
     # ── 2 ────────────────────────────────────────────────────────────────
     idea = """
     <a name="idea"></a>
-    <h2>2. Working in R-values</h2>
+    <h2>2. The age equation</h2>
 
-    <p>A mass spectrometer does not measure an age. It measures how much radiogenic
-    argon a sample produced relative to a monitor mineral, Fish Canyon sanidine, that
-    was irradiated alongside it. That relative quantity is the
-    R-value, and the age follows from it by arithmetic.</p>
-
-    <p>The reason this matters is worth spelling out. Suppose you weigh yourself on a
-    bathroom scale that reads a few percent high or low. Record only your own weight
-    and you inherit the scale's error. Weigh a known reference on the same scale as
-    well, and report your weight as a multiple of the reference, and the error
-    cancels, because it inflates you and the reference by the same factor. The decay
-    constant plays the part of the unreliable scale, and R is your weight expressed
-    relative to the reference. This is why the sizeable uncertainty on the
-    <sup>40</sup>K decay constant does not carry through into a comparably large
-    uncertainty when one Ar/Ar age is compared with another.</p>
-
-    <p>For an analysis with ratio R, irradiation parameter J, and decay constant
-    &lambda;, the age is</p>
+    <p>R is the ratio of radiogenic to potassium-derived argon,
+    <sup>40</sup>Ar*/<sup>39</sup>Ar<sub>K</sub>. With the irradiation parameter J and
+    the decay constant &lambda;, the age is</p>
     """ + E(r't = \frac{1}{\lambda}\,\ln\left(1 + J\,R\right)') + """
-    <p>and J is itself only the monitor's calibration written as a number,</p>
+    <p>J comes from the Fish Canyon sanidine monitor (FCs) irradiated with the sample,
+    with age t<sub>FCs</sub> and measured ratio R<sub>std</sub>:</p>
     """ + E(r'J = \frac{e^{\lambda t_{\mathrm{FCs}}} - 1}{R_{\mathrm{std}}}') + """
-    <p>Substituting one into the other removes J entirely and leaves the age in terms
-    of the ratio and the monitor age alone:</p>
-    """ + E(r't = \frac{1}{\lambda}\,\ln\left[\,1 + R\left(e^{\lambda t_{\mathrm{FCs}}} - 1\right)\right]') + """
-    <p>Because &lambda;t is small (about 0.03 for a 55&nbsp;Ma sample), this is very
-    nearly t&nbsp;&asymp;&nbsp;R&thinsp;&middot;&thinsp;t<sub>FCs</sub>. The age is
-    essentially the ratio multiplied by the monitor's age, with the decay constant
-    almost absent. That near-cancellation is why the uncertainty on &lambda;, whatever
-    its size, does not carry through into a comparably large uncertainty on an Ar/Ar
-    age, so long as the comparison stays within the
-    <sup>40</sup>K&ndash;<sup>40</sup>Ar system. It returns in full only when an
-    Ar/Ar age is compared with a different decay system, such as U&ndash;Pb;
-    Section&nbsp;3 sets out that case and the term it adds.</p>
+    <p>Substituting J gives the age in terms of the sample-to-monitor ratio
+    R<sub>u/FCs</sub>&nbsp;=&nbsp;R/R<sub>std</sub>:</p>
+    """ + E(r't = \frac{1}{\lambda}\,\ln\left[\,1 + R_{u/\mathrm{FCs}}\left(e^{\lambda t_{\mathrm{FCs}}} - 1\right)\right]') + """
+    <p>&lambda;t is small (about 0.03 at 55&nbsp;Ma), so
+    t&nbsp;&asymp;&nbsp;R<sub>u/FCs</sub>&thinsp;&middot;&thinsp;t<sub>FCs</sub>: the
+    age is nearly proportional to the monitor age and depends only weakly on &lambda;.
+    The uncertainty of &lambda; therefore mostly cancels between Ar/Ar ages on the same
+    monitor. Whether it enters in full against another decay system, such as
+    U&ndash;Pb, depends on how the monitor age was calibrated
+    (Section&nbsp;3).</p>
     """
 
     # ── 3 ────────────────────────────────────────────────────────────────
     tiers = """
     <a name="tiers"></a>
-    <h2>3. The three tiers of uncertainty</h2>
+    <h2>3. The three uncertainty tiers</h2>
 
-    <p>Every age these tools report carries three uncertainties, each larger than the
-    last. They describe the same age; the number grows only because each tier folds
-    in a further source of scatter. Which one to quote depends on what the age is
-    being compared against.</p>
+    <p>Every age is reported with three uncertainties. Each adds a further source to
+    the one before; which to quote depends on what the age is compared with.</p>
 
     <table>
-      <tr><th>Tier</th><th>What it adds</th><th>Quote it against&hellip;</th></tr>
+      <tr><th>Tier</th><th>Contains</th><th>Use for comparison with</th></tr>
       <tr><td><b>Analytical</b></td>
-          <td>The mass spectrometer alone: the R measurement, blanks, detector.</td>
-          <td>Aliquots from the same run or the same irradiation position.</td></tr>
+          <td>The measurement of R (counting statistics, blanks, detector).</td>
+          <td>Aliquots from the same irradiation position.</td></tr>
       <tr><td><b>Internal</b></td>
-          <td>Plus the neutron-flux uncertainty J at your position. This is the number
-              ArArCALC prints as the age error.</td>
-          <td>Other Ar/Ar ages tied to the same monitor and &lambda;.</td></tr>
+          <td>Plus the J uncertainty. ArArCALC reports this as the age error.</td>
+          <td>Ar/Ar ages on the same monitor and &lambda;.</td></tr>
       <tr><td><b>External</b></td>
-          <td>Plus the monitor age and, formally, the decay constant. These are
-              shared systematics that repetition cannot reduce.</td>
-          <td>Ar/Ar ages from other laboratories or monitors, and the astronomical
-              timescale.</td></tr>
+          <td>Plus the monitor age and the decay constant.</td>
+          <td>Ar/Ar ages on other monitors or from other laboratories, and the
+              astronomical timescale.</td></tr>
     </table>
 
-    <p>For a single age the tiers are quadrature sums:</p>
+    <p>For a single age:</p>
     """ + E(r'\sigma_{\mathrm{int}}^{2} = \sigma_{\mathrm{ana}}^{2} + \left(\frac{\partial t}{\partial \ln J}\,f_{J}\right)^{2} \qquad \frac{\partial t}{\partial \ln J} = \frac{1 - e^{-\lambda t}}{\lambda}') + \
     E(r'\sigma_{\mathrm{ext}}^{2} = \sigma_{\mathrm{int}}^{2} + \sum_{k} c_{k}^{2}') + """
-    <p>where f<sub>J</sub> is the relative uncertainty on J (the monitor
-    measurement), and the c<sub>k</sub> are the calibration terms described below:
-    for an astronomically calibrated monitor, the R<sub>FCs/A1</sub> measurement,
-    the anchor tephra's orbital age and &lambda;. The derivative
-    &part;t/&part;ln&nbsp;J is slightly smaller than t (by about 1.5 percent at
-    55&nbsp;Ma); it is the same for a fractional change in any ratio in the age
-    equation.</p>
+    <p>f<sub>J</sub> is the relative uncertainty of J (from the monitor measurement
+    only) and the c<sub>k</sub> are the calibration terms below.
+    &part;t/&part;ln&nbsp;J is slightly less than t (by about 1.5% at 55&nbsp;Ma) and
+    is the same for a relative change in any ratio in the age equation.</p>
 
-    <p>The external tier deserves more care, because there is a right and a wrong way
-    to compute it. The wrong way treats J as a fixed constant and then varies
-    &lambda; on its own. But J is not independent of &lambda;: it was obtained from
-    the monitor through
-    J&nbsp;=&nbsp;(e<sup>&lambda;t<sub>FCs</sub></sup>&nbsp;&minus;&nbsp;1)/R<sub>std</sub>,
-    so a change in &lambda; ought to move J with it. Freezing J cuts that link and
-    drops the full decay-constant uncertainty onto the age, which is where the
-    familiar statement that decay-constant uncertainty limits Ar/Ar to about two
-    percent comes from. That two percent belongs to the Min et al. (2000) constant in
-    particular; the optimized constants of Renne et al. (2011) and Carter et al.
-    (2025) carry closer to a tenth of it. And the figure applies only across decay
-    systems in the first place. For one Ar/Ar age against another, letting J move
-    with &lambda; makes the two &lambda; terms very nearly cancel. Writing X for
-    e<sup>&lambda;t</sup>,</p>
-    """ + E(r'X = R\left(e^{\lambda t_{\mathrm{FCs}}} - 1\right) + 1 = e^{\lambda t}') + \
-    E(r'\frac{\partial t}{\partial \lambda} = -\frac{\ln X}{\lambda^{2}} + \frac{R\,t_{\mathrm{FCs}}\,e^{\lambda t_{\mathrm{FCs}}}}{\lambda X}') + \
-    E(r'\frac{\partial t}{\partial t_{\mathrm{FCs}}} = \frac{R\,e^{\lambda t_{\mathrm{FCs}}}}{X} \qquad \frac{\partial t}{\partial R} = \frac{e^{\lambda t_{\mathrm{FCs}}} - 1}{\lambda X}') + \
-    E(r'\sigma_{t}^{2} = \left(\frac{\partial t}{\partial \lambda}\sigma_{\lambda}\right)^{2} + \left(\frac{\partial t}{\partial t_{\mathrm{FCs}}}\sigma_{t_{\mathrm{FCs}}}\right)^{2} + \left(\frac{\partial t}{\partial R}\sigma_{R}\right)^{2} + 2\,\frac{\partial t}{\partial \lambda}\frac{\partial t}{\partial t_{\mathrm{FCs}}}\,\mathrm{cov}(\lambda, t_{\mathrm{FCs}})') + """
-    <p>The covariance term on the last line is the only difference between the two
-    families of calibration the tools recognise. When the monitor age was fixed
-    astronomically, by counting orbital cycles independently of &lambda; (Kuiper
-    2008, Rivera 2011, Phillips 2022), the covariance is zero. For the joint Bayesian
-    calibration of Carter et al. (2025), where &lambda; and the monitor age were
-    determined together, it is not; the tools carry Carter's posterior value, which
-    proves numerically negligible and reproduces their Table&nbsp;9 to within
-    4&times;10<sup>&minus;5</sup>.</p>
+    <h3>Calibration terms</h3>
+    <p>J itself depends on &lambda; and t<sub>FCs</sub> (Section&nbsp;2), so the
+    calibration terms are taken from the substituted equation, in which J does not
+    appear. With X&nbsp;=&nbsp;e<sup>&lambda;t</sup>:</p>
+    """ + E(r'X = R_{u/\mathrm{FCs}}\left(e^{\lambda t_{\mathrm{FCs}}} - 1\right) + 1 = e^{\lambda t}') + \
+    E(r'\frac{\partial t}{\partial \lambda} = -\frac{\ln X}{\lambda^{2}} + \frac{R_{u/\mathrm{FCs}}\,t_{\mathrm{FCs}}\,e^{\lambda t_{\mathrm{FCs}}}}{\lambda X}') + \
+    E(r'\frac{\partial t}{\partial t_{\mathrm{FCs}}} = \frac{R_{u/\mathrm{FCs}}\,e^{\lambda t_{\mathrm{FCs}}}}{X} \qquad \frac{\partial t}{\partial R_{u/\mathrm{FCs}}} = \frac{e^{\lambda t_{\mathrm{FCs}}} - 1}{\lambda X}') + \
+    E(r'\sigma_{t}^{2} = \left(\frac{\partial t}{\partial \lambda}\sigma_{\lambda}\right)^{2} + \left(\frac{\partial t}{\partial t_{\mathrm{FCs}}}\sigma_{t_{\mathrm{FCs}}}\right)^{2} + \left(\frac{\partial t}{\partial R_{u/\mathrm{FCs}}}\sigma_{R_{u/\mathrm{FCs}}}\right)^{2} + 2\,\frac{\partial t}{\partial \lambda}\frac{\partial t}{\partial t_{\mathrm{FCs}}}\,\mathrm{cov}(\lambda, t_{\mathrm{FCs}})') + """
+    <p>The two terms of &part;t/&part;&lambda; nearly cancel. Holding J fixed instead
+    would give &part;t/&part;&lambda;&nbsp;=&nbsp;&minus;t/&lambda; and put the full
+    relative uncertainty of &lambda; on the age (1.0% at 1&sigma; for Min et&nbsp;al.
+    2000). The covariance term is zero when the monitor age was calibrated
+    astronomically (Kuiper 2008, Rivera 2011, Phillips 2022). For Carter et&nbsp;al.
+    (2025), where &lambda; and the monitor age were fitted together, the tools use
+    Carter's posterior covariance; it is numerically negligible and the result matches
+    their Table&nbsp;9 to within 4&times;10<sup>&minus;5</sup>.</p>
 
-    <h3>Astronomically calibrated monitors: the anchored chain</h3>
-    <p>For Kuiper (2008), Rivera (2011) and Phillips (2022) the tools do not
-    propagate the external from the Fish Canyon age and its error. That age was
-    itself calculated from the astronomical age of an anchor tephra with the same
-    equation and the Min et&nbsp;al. (2000) &lambda;, so it depends on &lambda;, and
-    Renne et&nbsp;al. (1998, p.&nbsp;120) point out that their eq.&nbsp;6 is not valid
-    on a standard age of that kind. The age is instead written on their two-step
-    chain (eq.&nbsp;5), in which every input is measured independently:</p>
+    <h3>Astronomically calibrated monitors</h3>
+    <p>The Fish Canyon ages of Kuiper (2008), Rivera (2011) and Phillips (2022) were
+    calculated from the astronomical age of an anchor tephra with the Min et&nbsp;al.
+    (2000) &lambda;. Renne et&nbsp;al. (1998, p.&nbsp;120) note that their eq.&nbsp;6
+    does not hold for a standard age of this kind, so for these calibrations the tools
+    use their two-step equation (eq.&nbsp;5), whose inputs are independent:</p>
     """ + E(r't = \frac{1}{\lambda}\ln\left[1 + R_{u/\mathrm{FCs}}\,R_{\mathrm{FCs}/A}\left(e^{\lambda t_{A}} - 1\right)\right]') + """
-    <p>R<sub>u/FCs</sub> is the sample-to-monitor ratio from your own irradiation;
-    R<sub>FCs/A</sub> and t<sub>A</sub> are the calibration paper's intercalibration
-    ratio and the anchor's orbital age. Eq.&nbsp;6 then applies to these inputs, with
-    the partial derivatives given by Kuiper et&nbsp;al. (2008, SOM). Writing
-    P&nbsp;=&nbsp;R<sub>u/FCs</sub>R<sub>FCs/A</sub>,</p>
+    <p>R<sub>u/FCs</sub> is the sample-to-monitor ratio from the irradiation,
+    R<sub>FCs/A</sub> the published ratio of Fish Canyon to the anchor, and
+    t<sub>A</sub> the anchor's astronomical age. With
+    P&nbsp;=&nbsp;R<sub>u/FCs</sub>R<sub>FCs/A</sub> the partial derivatives are
+    (Kuiper et&nbsp;al. 2008, SOM)</p>
     """ + E(r'\frac{\partial t}{\partial \ln R} = \frac{1 - e^{-\lambda t}}{\lambda} \qquad \frac{\partial t}{\partial t_{A}} = \frac{P\,e^{\lambda t_{A}}}{e^{\lambda t}} \qquad \frac{\partial t}{\partial \lambda} = -\frac{t}{\lambda} + \frac{P\,t_{A}\,e^{\lambda t_{A}}}{\lambda\,e^{\lambda t}}') + \
     E(r'\sigma_{\mathrm{ext}}^{2} = \sigma_{\mathrm{int}}^{2} + \left(\frac{\partial t}{\partial \ln R}\,\frac{\sigma_{R_{\mathrm{FCs}/A}}}{R_{\mathrm{FCs}/A}}\right)^{2} + \left(\frac{\partial t}{\partial t_{A}}\,\sigma_{t_{A}}\right)^{2} + \left(\frac{\partial t}{\partial \lambda}\,\sigma_{\lambda}\right)^{2}') + """
-    <p>The two terms of &part;t/&part;&lambda; nearly cancel, which is why &lambda;
-    contributes little. The anchors used (1&sigma;):</p>
+    <p>Again the two terms of &part;t/&part;&lambda; nearly cancel. The anchors
+    (1&sigma;):</p>
     <table>
       <tr><th>Calibration</th><th>Anchor</th><th>t<sub>A</sub> (Ma)</th><th>R<sub>FCs/A</sub></th></tr>
       <tr><td>Kuiper et al. (2008)</td><td>Melilla tephras, composite</td><td>6.500 &plusmn; 0.005</td><td>4.3664 &plusmn; 0.0009</td></tr>
       <tr><td>Rivera et al. (2011)</td><td>A1 tephra, Faneromeni</td><td>6.943 &plusmn; 0.0025</td><td>4.0813 &plusmn; 0.0013</td></tr>
       <tr><td>Phillips et al. (2022)</td><td>A1 tephra, Faneromeni</td><td>6.943 &plusmn; 0.0025</td><td>4.0819 &plusmn; 0.0007</td></tr>
     </table>
-    <p>R<sub>FCs/A</sub> is used at the value that returns each paper's published
-    Fish Canyon age exactly at the Min et&nbsp;al. (2000) &lambda;; the printed values
-    differ from it in the fifth figure through rounding. At that &lambda; the chain
-    and the single-step equation give identical ages, and only the external differs.
-    If the monitor-age error is edited away from the preset, the tools fall back to
-    the single-step form above. When ages are combined, each of the three terms is
-    shared by all of them and is carried through the weighted mean one term at a
-    time, so none of them averages down.</p>
+    <p>R<sub>FCs/A</sub> is set to the value that gives each paper's published Fish
+    Canyon age at the Min et&nbsp;al. (2000) &lambda;; the printed values differ from it
+    in the fifth figure. At that &lambda; the two-step and single-step equations give
+    the same age and differ only in the external uncertainty. If the monitor-age
+    uncertainty is changed from the preset, the single-step equation is used. When ages
+    are combined, each of the three calibration terms is common to all of them and is
+    carried through the weighted mean separately, so none of them averages down.</p>
 
-    <h3>When the full decay-constant term applies</h3>
-    <p>Whether the decay-constant uncertainty enters an age at full strength depends
-    on what the monitor age is anchored to, and the difference is large. Holding the
-    measured ratio fixed against an astronomical anchor, a one percent change in
-    &lambda; moves a 55&nbsp;Ma age by about 0.007 percent. Freezing J as a fixed
-    number and changing &lambda; by that same one percent moves the age by very nearly
-    one percent. Which case you are in is set by the derivative:</p>
+    <h3>The full decay-constant term</h3>
+    <p>With R and the anchor fixed, a 1% change in &lambda; moves a 55&nbsp;Ma age by
+    about 0.007%; with J fixed it moves it by nearly 1%:</p>
     """ + E(r'\left.\frac{\partial t}{\partial \lambda}\right|_{R,\;t_{\mathrm{std}}} \approx 0 \qquad\qquad \left.\frac{\partial t}{\partial \lambda}\right|_{J} = -\frac{t}{\lambda} \;\Rightarrow\; \left(\frac{\sigma_{t}}{t}\right)_{\lambda} = \frac{\sigma_{\lambda}}{\lambda}') + """
-    <p>The term does not apply, and must not be added, when the monitor is
-    astronomically calibrated (Kuiper 2008, Rivera 2011, Phillips 2022). There the
-    monitor age is a count of orbital cycles, independent of &lambda;, so the unknown
-    ties through to the orbital timescale and &lambda; cancels to about a hundredth of
-    a percent. This holds for every comparison, U&ndash;Pb included: setting such an
-    age against U&ndash;Pb tests the orbital timescale against the uranium-decay
-    timescale, and the <sup>40</sup>K constant is a bystander. The same applies to the
-    jointly optimised calibrations (Renne 2010/2011, Carter 2025), where &lambda; and
-    the monitor age were fit together against U&ndash;Pb. There &lambda; already sits
-    in the external tier through its covariance with the monitor age, at roughly a
-    tenth to a third of a percent, and adding a separate term would count it twice.</p>
-    <p>The term applies only when the age rests on the physical <sup>40</sup>K
-    radioisotopic scale: a physically measured &lambda; such as Min et al. (2000),
-    with a monitor age tied to it by K&ndash;Ar rather than by astronomy or by
-    U&ndash;Pb intercalibration, and you are deliberately treating the
-    <sup>40</sup>Ar/<sup>39</sup>Ar age as an independent decay clock to set against a
-    different decay system. Only then is the decay-constant term carried in full,</p>
+    <p>The full term,</p>
     """ + E(r'\sigma_{\mathrm{full}}^{2} = \sigma_{\mathrm{ext}}^{2} + \left(t\,\frac{\sigma_{\lambda}}{\lambda}\right)^{2}') + """
-    <p>with a size that follows &sigma;<sub>&lambda;</sub>/&lambda;, about two percent
-    for Min et al. (2000) and smaller for the later constants. The test is mechanical:
-    would the monitor age change if &lambda; changed? If it would not, &lambda; has
-    cancelled and the term does not belong. If it would, it does.</p>
+    <p>applies only when the age is used as an independent <sup>40</sup>K clock against
+    another decay system, with a physically measured &lambda; (such as Min et&nbsp;al.
+    2000) and a monitor age tied to it by K&ndash;Ar rather than by astronomy or
+    U&ndash;Pb. It is not added for:</p>
+    <ul>
+      <li>astronomically calibrated monitors (Kuiper 2008, Rivera 2011, Phillips 2022):
+          the monitor age does not depend on &lambda;, which cancels to below 0.01%.
+          This also holds against U&ndash;Pb, where the comparison is between the
+          astronomical and the uranium timescales;</li>
+      <li>jointly optimised calibrations (Renne 2010/2011, Carter 2025): &lambda; already
+          enters the external tier through its covariance with the monitor age, and
+          adding it again would count it twice.</li>
+    </ul>
+    <p>The term applies if the monitor age would change with &lambda;, and not
+    otherwise.</p>
     """
 
     # ── 4 ────────────────────────────────────────────────────────────────
-    workflow = """
-    <a name="workflow"></a>
-    <h2>4. The workflow</h2>
+    stats = """
+    <a name="stats"></a>
+    <h2>4. Combining ages</h2>
 
-    <p>The five tools are independent and any one opens on its own, but they were
-    built to be used in a particular order, and following it makes each tool's inputs
-    fall into place.</p>
+    <p>Wherever ages are combined, two methods are offered: <b>WM + √MSWD</b> and
+    <b>GLS + ML</b>. Both use the same covariance: the J and calibration parts of the
+    uncertainty are correlated between ages that share an irradiation position or a
+    calibration (Sections&nbsp;8 and 9), so they do not average down. The methods
+    differ in the mean and in how they treat overdispersion, scatter larger than the
+    analytical errors allow.</p>
+    <table>
+      <tr><th></th><th>WM + √MSWD</th><th>GLS + ML (Vermeesch 2015, &sect;13)</th></tr>
+      <tr><td><b>Mean</b></td>
+          <td>Inverse-variance weighted mean on the analytical errors.</td>
+          <td>Generalised least squares on the full covariance plus &omega;<sup>2</sup>.</td></tr>
+      <tr><td><b>Overdispersion</b></td>
+          <td>The analytical tier is multiplied by &radic;MSWD when the MSWD exceeds the
+              Wendt &amp; Carl (1991) limit below.</td>
+          <td>An additive variance &omega;<sup>2</sup>, estimated by maximum likelihood
+              and added to every age (the random-effects model of IsoplotR and
+              Ar-Ar_Redux).</td></tr>
+    </table>
+    """ + E(r'\mathrm{MSWD} > 1 + 2\sqrt{\frac{2}{n-1}}') + """
+    <p>The same limit is used in every tool. Adding &omega;<sup>2</sup> to every age
+    evens out the weights, so a few very precise analyses no longer decide the mean.
+    &omega;<sup>2</sup> is fitted on the full covariance (analytical, J and
+    calibration), so scatter already explained by independent J errors is not counted
+    twice. The three tiers are then the variance of the GLS mean.</p>
 
-    <p>Everything begins with an export. Data leaves ArArCALC as a summary workbook or
-    comes off the mass spectrometer as a raw one, and neither is in the form the
-    plotting tools expect. The <a href="#converter">Data converter</a> reads the
-    spreadsheet, lets you confirm which column is which, extracts the calibration
-    (the J values, the monitor ratio, the irradiation label), and writes a compact
-    <code>.arar</code> session file that the other tools read.</p>
+    <p>With similar analytical errors, or without overdispersion, the two methods give
+    practically the same age and uncertainty; with partial J correlations from a
+    <code>.jflux</code> file the means differ slightly. With overdispersion and widely
+    different analytical errors, as for single crystals of variable K content, they do
+    not agree. In simulations with a tenfold range of analytical errors and an
+    overdispersion of one to two times the typical analytical error, the 95% interval
+    contained the true age in about 70&ndash;80% of cases with WM + √MSWD and
+    80&ndash;93% with GLS + ML, whose mean was also closer to the true age. Coverage is
+    lower for few ages, most of all for GLS + ML, because &omega;<sup>2</sup> estimated
+    from five or ten ages is itself uncertain.</p>
 
-    <p>The next task is to pin down the flux, since an Ar/Ar age is only as good as
-    the value of J at the exact spot the unknown occupied. J is established in two
-    steps. The <a href="#wm">Flux monitors</a> tool takes the many measurements of
-    the Fish Canyon monitor from one hole and reduces them to a single value of R,
-    with an uncertainty that separates genuine grain-to-grain scatter from analytical
-    noise. The <a href="#jcalc">Flux regression</a> tool then fits a smooth surface
-    through those per-hole values across the whole irradiation disk, so that J, and a
-    realistic uncertainty on it, can be predicted anywhere a sample sat, including
-    between the monitor holes.</p>
+    <p>For stacked step-heating aliquots, GLS + ML combines the plateau ages of the
+    aliquots (n = aliquots). WM + √MSWD does the same by default, or pools every step
+    in ratio space (n = steps). When the aliquots disagree beyond analytical error, use
+    n = aliquots: the steps of one aliquot share that aliquot's offset, and treating
+    them as independent understates the uncertainty, more so the more steps there
+    are.</p>
 
-    <p>With J in hand the unknowns can be dated. The <a href="#plateau">Plateau
-    &amp; isochron</a> tool turns a step-heating experiment into an age: it reads the
-    gas-release spectrum, identifies the flat interval over which the mineral released
-    argon cleanly, and computes a weighted-mean age across those steps, with isochrons
-    as an independent check. When several aliquots or several samples are involved, the
-    <a href="#prob">Age distribution</a> tool ranks them, draws the summed-probability
-    curve, and, on request, pools them with the correlations handled properly. This is
-    the stage at which the choice between the two statistical conventions of
-    Section&nbsp;1 becomes a visible setting.</p>
-
-    <p>The order is converter, flux monitors, flux regression, then plateau &amp;
-    isochron and age distribution. The sections that follow take each tool in turn:
-    what it does, then the mathematics it does it with.</p>
+    <p>This is Vermeesch's combination step (his eqs. 91&ndash;94), not his full data
+    reduction. The tools start from reduced ages, so the covariance contains only the J
+    and monitor/&lambda; terms. Correlations from shared blanks, detector calibration,
+    mass fractionation and interference corrections need the raw isotope data and are
+    not included.</p>
     """
 
     # ── 5 ────────────────────────────────────────────────────────────────
@@ -453,37 +375,21 @@ def build_about_html(base_dir):
     <a name="converter"></a>
     <h2>5. Data converter</h2>
 
-    <h3>What it does</h3>
-    <p>The converter is the tool that makes the others possible. It reads an ArArCALC
-    summary export or a raw mass-spectrometer workbook and writes the
-    <code>.arar</code> session file that the Plateau &amp; isochron and Age distribution
-    tools open.
-    Two input layouts are recognised: the tidy per-step summary that ArArCALC
-    produces, and the wider raw sheet that comes directly off the instrument. A dialog
-    lets you choose the layout and confirm the column mapping before anything is
-    written, so that the field the tool reads as %<sup>39</sup>Ar really is the column
-    you intend.</p>
-
-    <p>Beyond reshaping the data, the converter records the calibration. It stores the
-    J value and its error, the monitor ratio R<sub>std</sub>, the reference monitor
-    age, and the irradiation label in the file's configuration block, so the other
-    tools know which constants an age was originally built on and can recast it to
-    another calibration.</p>
+    <p>Reads an ArArCALC summary export or a Mass Spec raw export (.xlsx) and writes
+    <code>.arar</code> files for the other tools. A dialog sets the layout and the
+    column of each field before anything is written. Each file stores the J value and
+    its error, the monitor ratio R<sub>std</sub>, the monitor age and the irradiation
+    label, so the other tools know the calibration the ages were calculated with and
+    can recalculate them on another.</p>
 
     """ + F('converter_mapping.png',
-            'The format and column-mapping dialog. Choose the export layout, then '
-            'confirm each internal field points at the right spreadsheet column '
-            'before the .arar file is written.') + """
+            'The format and column-mapping dialog: the export layout, and the '
+            'spreadsheet column of each field.') + """
 
-    <h3>The mathematics</h3>
-    <p>There is deliberately very little. The converter does not recompute ages; it
-    carries across whatever the export contains and keeps the calibration attached to
-    it. The one relationship it holds consistent is the identity between J and the
-    monitor ratio, so that a calibration supplied in either form yields the same age:</p>
+    <p>Ages are not recalculated. J and R<sub>std</sub> are kept consistent through</p>
     """ + E(r'J = \frac{e^{\lambda t_{\mathrm{FCs}}} - 1}{R_{\mathrm{std}}}') + """
-    <p>The monitor ages it offers are the calibration presets of Section&nbsp;10, each
-    stored with a 1&sigma; error and a note of whether that error already includes the
-    decay constant, the same bookkeeping described in Section&nbsp;3.</p>
+    <p>so a calibration given in either form gives the same age. The monitor ages
+    offered are the presets of Section&nbsp;10.</p>
     """
 
     # ── 6 ────────────────────────────────────────────────────────────────
@@ -491,114 +397,91 @@ def build_about_html(base_dir):
     <a name="wm"></a>
     <h2>6. Flux monitors</h2>
 
-    <h3>What it does</h3>
-    <p>At a single position in the irradiation disk the Fish Canyon monitor was
-    measured many times, each measurement with its own precision. This tool reduces
-    those measurements to one best estimate of R for that position, and it separates
-    the scatter that reflects real variation (flux gradients and grain-to-grain
-    heterogeneity) from the scatter expected on analytical grounds alone. It then
-    converts the mean R into the J value the regression needs.</p>
-    <p>It reads the same .arar, .ararpt and .ararstack files as the Plateau and
-    Age distribution tools (R and its error from every step, at 1&sigma;), grouped by
-    irradiation position, as well as any Excel/CSV table or pasted values. With the
-    ratio box unticked it is a plain weighted-mean calculator for any quantity.</p>
+    <p>Reduces the Fish Canyon monitor analyses of one irradiation position to one R
+    and J, and separates real scatter (flux gradients, grain-to-grain differences)
+    from analytical scatter. It reads .arar, .ararpt and .ararstack files (R and its
+    1&sigma; error from every step, grouped by irradiation position), Excel/CSV tables
+    and pasted values. With the ratio box unticked it is a weighted-mean calculator for
+    any quantity.</p>
 
     """ + F('wm_main.png',
-            'The individual acquisitions with 1-sigma error bars, the mean and its '
-            'uncertainty band, and the MSWD and p-value reported in the title.') + """
+            'The analyses with 1-sigma error bars, the mean and its uncertainty band, '
+            'and the MSWD and p-value in the title.') + """
 
-    <h3>The mathematics</h3>
-    <p>The estimate is an inverse-variance weighted mean: each measurement is weighted
-    by the reciprocal of its variance, so the noisier ones count for less.</p>
-    """ + E(r'w_{i} = \frac{1}{\sigma_{i}^{2}} \qquad \bar{x} = \frac{\sum w_{i} x_{i}}{\sum w_{i}} \qquad \mathrm{SE} = \sqrt{\frac{1}{\sum w_{i}}}') + """
-    <p>Whether the scatter is real is judged by the MSWD, which compares the observed
-    spread with the spread the analytical errors predict.</p>
-    """ + E(r'\mathrm{MSWD} = \frac{1}{n-1}\sum w_{i}\left(x_{i} - \bar{x}\right)^{2} \qquad p = P\left(\chi^{2}_{n-1} > \mathrm{MSWD}\,(n-1)\right)') + """
-    <p>A value near one means the scatter is fully accounted for by the analytical
-    errors. A value above one, with a low probability, points to additional variance,
-    from real differences in flux or potassium distribution across the grains. A
-    value well below one suggests the analytical errors were overstated.</p>
+    <h3>Weighted mean</h3>
+    """ + E(r'w_{i} = \frac{1}{\sigma_{i}^{2}} \qquad \bar{x} = \frac{\sum w_{i} x_{i}}{\sum w_{i}} \qquad \mathrm{SE} = \sqrt{\frac{1}{\sum w_{i}}}') + \
+    E(r'\mathrm{MSWD} = \frac{1}{n-1}\sum w_{i}\left(x_{i} - \bar{x}\right)^{2} \qquad p = P\left(\chi^{2}_{n-1} > \mathrm{MSWD}\,(n-1)\right)') + """
+    <p>x<sub>i</sub>&nbsp;&plusmn;&nbsp;&sigma;<sub>i</sub> are the analyses. An MSWD
+    near 1 means the scatter is explained by the analytical errors; above 1 with a low
+    p, there is additional variance; well below 1, the errors are overestimated.</p>
 
-    <p>When the excess scatter is real, the ordinary standard error understates the
-    uncertainty. Rather than scale it by the square root of the MSWD, this tool
-    estimates the additional population variance &tau;<sup>2</sup> directly, by
-    restricted maximum likelihood (REML): &tau;<sup>2</sup> minimises</p>
-    """ + E(r'\sum_{i}\ln\left(\sigma_{i}^{2} + \tau^{2}\right) + \ln W^{*} + \sum_{i} w_{i}^{*}\left(x_{i} - \hat{\mu}^{*}\right)^{2}, \qquad w_{i}^{*} = \frac{1}{\sigma_{i}^{2} + \tau^{2}}, \quad W^{*} = \sum_{i} w_{i}^{*}') + """
-    <p>The ln&nbsp;W* term is what distinguishes REML from ordinary maximum
-    likelihood: it allows for the mean being estimated from the same data, so
-    &tau;<sup>2</sup> is not biased low for the small numbers of monitors typical of
-    one irradiation position.</p>
-    <p>When &tau;<sup>2</sup> is zero the result reduces to the ordinary weighted mean;
-    when it is not, &tau; is reported as the true grain-to-grain spread, in the units
-    of R. This is the random-effects treatment of the second convention in
-    Section&nbsp;1, applied here at the monitor-calibration stage.</p>
+    <h3>Excess scatter (REML)</h3>
+    <p>The excess scatter is estimated as a variance &tau;<sup>2</sup> by restricted
+    maximum likelihood, which minimises</p>
+    """ + E(r'\sum_{i}\ln\left(\sigma_{i}^{2} + \tau^{2}\right) + \ln W^{*} + \sum_{i} w_{i}^{*}\left(x_{i} - \hat{\mu}^{*}\right)^{2}, \qquad w_{i}^{*} = \frac{1}{\sigma_{i}^{2} + \tau^{2}}, \quad W^{*} = \sum_{i} w_{i}^{*}') + \
+    E(r'\hat{\mu}^{*} = \frac{\sum_{i} w_{i}^{*} x_{i}}{W^{*}}') + """
+    <p>The ln&nbsp;W* term allows for the mean being estimated from the same data, so &tau;<sup>2</sup>
+    is not biased low for the few monitors of one position. With
+    &tau;<sup>2</sup>&nbsp;=&nbsp;0 the result is the ordinary weighted mean; otherwise
+    &tau; is the grain-to-grain spread in units of R. This is the random-effects model of
+    GLS + ML (Section&nbsp;4), applied to the monitors.</p>
+    <p>The standard error is 1/&radic;W* and does not include the uncertainty of
+    &tau;<sup>2</sup>. In simulations with excess scatter as large as the analytical
+    errors, &plusmn;1.96&nbsp;SE contained the true mean in 90&ndash;92% of cases for
+    5&ndash;20 monitors (95&ndash;96% without excess scatter), against 85&ndash;89% for
+    the weighted mean with SE&nbsp;&times;&nbsp;&radic;MSWD. With REML unticked the tool
+    reports that weighted mean, with the SE multiplied by &radic;MSWD when the MSWD
+    exceeds the Wendt &amp; Carl limit (Section&nbsp;4).</p>
 
-    <p>The standard error is the plug-in value 1/&radic;W*, which does not include
-    the uncertainty of &tau;<sup>2</sup> itself. Simulated with excess scatter as
-    large as the analytical errors, &plusmn;1.96&nbsp;SE covers the true mean 90&ndash;92%
-    of the time for 5&ndash;20 monitors (95&ndash;96% without excess scatter); the
-    weighted mean with SE&nbsp;&times;&nbsp;&radic;MSWD covers 85&ndash;89%. With REML
-    unticked the tool reports that weighted mean, its SE multiplied by &radic;MSWD
-    when the MSWD exceeds the Wendt &amp; Carl (1991) 95% limit
-    1&nbsp;+&nbsp;2&radic;(2/(n&minus;1)), the rule the Plateau &amp; isochron tool uses.</p>
-
-    <p>Converting the mean R to J uses the monitor age and the decay constant:</p>
+    <h3>J</h3>
     """ + E(r'J = \frac{e^{\lambda t} - 1}{R} \qquad \frac{\sigma_{J}}{J} = \frac{\sigma_{R}}{R}') + """
-    <p>The error on J is the monitor measurement only. The FCs age and &lambda; are
-    systematic, shared by every J and every age on that calibration; folded into
-    each J they would be averaged down wherever J values are combined, so they are
-    added once, in the external tier of the ages (Section&nbsp;3). J is computed
-    from the reported R, not averaged separately: the J view shows the same
-    accepted and rejected points, MSWD and p as the R analysis.</p>
+    <p>t is the monitor age and R the mean monitor ratio. &sigma;<sub>J</sub> contains
+    the monitor measurement only. The monitor age and &lambda; are common to every J on
+    the calibration and would average down if included in each J, so they are added
+    once, in the external tier of the ages (Section&nbsp;3). J is calculated from the
+    reported R, so the J view has the same accepted and rejected points, MSWD and p as
+    the R analysis.</p>
 
     <h3>Crystals: fusion and step heating</h3>
-    <p>A crystal is identified by a grain-ID column (a blank cell continues the
-    crystal above) or, in an .arar file, by the run-ID prefix (11776-13A &rarr;
-    11776-13) or the laser-power sequence in run order: a step at the same or a
-    lower power than the one before starts the next crystal. A crystal measured in
-    one step is a fusion; one with several steps was step-heated. The points that
-    are averaged can be every step, one point per crystal, the single-step
-    crystals only, or the last step of each crystal. One point per crystal is the
-    crystal's total gas, the &sup3;&sup9;Ar-weighted ratio</p>
+    <p>A crystal is identified by a grain-ID column (a blank cell continues the crystal
+    above) or, in an .arar file, by the run-ID prefix (100-01A &rarr; 100-01) or by the
+    laser power in run order (a step at the same or a lower power than the step before
+    starts a new crystal). A crystal with one step is a fusion, one with several was
+    step-heated. The points averaged can be every step, one point per crystal, the
+    single-step crystals only, or the last step of each crystal. One point per crystal
+    is the total gas, the <sup>39</sup>Ar-weighted ratio</p>
     """ + E(r'R_{\mathrm{TG}} = \sum_{i} f_{i} R_{i}, \quad f_{i} = \frac{{}^{39}\mathrm{Ar}_{i}}{\sum {}^{39}\mathrm{Ar}} \qquad \sigma_{\mathrm{TG}} = \sqrt{\sum_{i} f_{i}^{2}\sigma_{i}^{2}}') + """
-    <p>which is what a single fusion of the crystal would have measured, so
-    step-heated and fused crystals can be averaged together. Without &sup3;&sup9;Ar
-    the inverse-variance mean of the steps is used and labelled as such. For every
-    step-heated crystal the tool also reports the MSWD of its steps, and the steps
-    are grouped by laser power (or step number) to compare a weighted mean per
-    group and test whether the groups agree.</p>
+    <p>which equals what a single fusion of the crystal would have measured, so fused
+    and step-heated crystals can be averaged together. Without <sup>39</sup>Ar the
+    inverse-variance mean of the steps is used and labelled as such. For each
+    step-heated crystal the MSWD of its steps is reported, and the steps can be grouped
+    by laser power or step number to compare a weighted mean per group.</p>
 
-    <p>For outlier handling the defaults are a relative-error cut, which removes
-    analyses with poor counting statistics, and rejection by the normalised median
-    absolute deviation, which flags points lying more than k times the NMAD from
-    the median:</p>
+    <h3>Outlier rejection</h3>
+    <p>By default two filters are applied: a relative-error cut, which removes analyses
+    with poor counting statistics, and NMAD rejection of points more than k&nbsp;NMAD
+    from the median,</p>
     """ + E(r'\mathrm{NMAD} = 1.4826 \times \mathrm{median}\,\left| x_{i} - \mathrm{median}\right|') + """
-    <p>Being built on the median, the NMAD is not masked by several outliers at
-    once. It uses the values only, not their errors, so with unequal errors it
-    removes the least precise points first even when they agree within error, and
-    every rejection trims the tails that &tau;<sup>2</sup> is meant to measure. On
-    good data (15 monitors, errors varying threefold) it rejects at least one good
-    point in about half of all sets at k&nbsp;=&nbsp;2.5 and a third at
-    k&nbsp;=&nbsp;3. The default is k&nbsp;=&nbsp;2.5, as in the Age distribution
-    tool.</p>
-
-    <p>MSWD rejection, when ticked, removes one point at a time while the MSWD
-    exceeds the Wendt &amp; Carl limit (or a fixed value). Each round the point most
-    at odds with the others is found from its externally studentized residual,
-    the distance from the weighted mean of all the other points relative to its
-    own error, the other points' excess scatter &tau; and the error of their
-    mean:</p>
+    <p>The NMAD is not inflated by several outliers at once, but it uses the values only,
+    not their errors. With unequal errors it removes the least precise points first,
+    even when they agree within error, and each rejection trims the scatter that
+    &tau;<sup>2</sup> measures. On 15 good monitors with errors varying threefold it
+    rejects at least one good point in about half of the sets at k&nbsp;=&nbsp;2.5 and
+    a third at k&nbsp;=&nbsp;3. The default is k&nbsp;=&nbsp;2.5, as in Age
+    distribution.</p>
+    <p>MSWD rejection, when ticked, removes one point at a time while the MSWD exceeds
+    the Wendt &amp; Carl limit (or a set value). The candidate is the point with the
+    largest externally studentized residual (Viechtbauer &amp; Cheung 2010),</p>
     """ + E(r'r_{i} = \frac{x_{i} - \hat{\mu}_{(-i)}}{\sqrt{\sigma_{i}^{2} + \hat{\tau}^{2}_{(-i)} + \mathrm{SE}^{2}_{(-i)}}} \qquad |r_{i}| > \Phi^{-1}\!\left(1 - \frac{0.025}{n}\right)') + """
-    <p>(the random-effects residual of Viechtbauer &amp; Cheung, 2010). The point is
-    removed only if it exceeds the 5% two-sided critical value corrected for
-    testing n points (2.81 at n&nbsp;=&nbsp;10, 3.02 at n&nbsp;=&nbsp;20). When no point
-    does, the MSWD stays above the limit and the tool says so: the scatter is
-    spread over the whole set, which REML or &radic;MSWD account for, rather than
-    caused by a few outliers. Simulated on 15 points, this removes a good point in
-    1% of sets without excess scatter and 15% with &tau;&nbsp;=&nbsp;&sigma;, against
-    68% for removing points until the MSWD is reached, and finds a 6&sigma; outlier
-    every time. The rejections run in the order relative-error filter, NMAD, MSWD,
-    Chauvenet.</p>
+    <p>where (&minus;i) marks the weighted mean, excess variance and standard error of
+    the other points. The point is removed only if |r<sub>i</sub>| exceeds the 5%
+    two-sided critical value corrected for n tests (2.81 at n&nbsp;=&nbsp;10, 3.02 at
+    n&nbsp;=&nbsp;20). If no point does, the MSWD stays above the limit and the tool
+    reports it: the scatter is spread over the whole set and is handled by REML or
+    &radic;MSWD. In simulations with 15 points this removed a good point in 1% of sets
+    without excess scatter and 15% with &tau;&nbsp;=&nbsp;&sigma; (68% when points are
+    removed until the MSWD is below the limit) and found a 6&sigma; outlier every time.
+    The filters run in the order relative error, NMAD, MSWD, Chauvenet.</p>
     """
 
     # ── 7 ────────────────────────────────────────────────────────────────
@@ -606,22 +489,15 @@ def build_about_html(base_dir):
     <a name="jcalc"></a>
     <h2>7. Flux regression</h2>
 
-    <h3>What it does</h3>
-    <p>J was measured only at the few holes that held monitors, but unknowns sat
-    throughout the disk. This tool fits a smooth surface through the measured values
-    so that J can be predicted at any position, and it attaches a realistic
-    uncertainty to each prediction by Monte Carlo simulation rather than reporting a
-    bare interpolated number.</p>
+    <p>J is measured only in the monitor holes. The tool fits a surface through the
+    monitor values and predicts J, with a Monte Carlo uncertainty, at the position of
+    each unknown.</p>
 
     """ + F('jcalc_surface.png',
             'A fitted flux surface over the irradiation disk. The monitor holes are '
-            'the control points; unknowns are predicted from the surface with a '
-            'Monte Carlo uncertainty.') + """
+            'the control points; unknowns are predicted from the surface.') + """
 
-    <h3>The mathematics</h3>
-    <p>Depending on how the disks were stacked and how many monitors are available,
-    progressively richer surfaces can be fitted, from a single plane through a full
-    three-dimensional form.</p>
+    <h3>Surfaces</h3>
     <table>
       <tr><th>Model</th><th>Surface</th><th>Parameters</th><th>Minimum monitors</th></tr>
       <tr><td>2D planar</td><td>f = ax + by + c</td><td>3</td><td>3</td></tr>
@@ -629,44 +505,55 @@ def build_about_html(base_dir):
       <tr><td>Complex 3D</td><td>f = ax + by + cz + d + e(xz) + f(yz) + g(xy) + h(xyz)</td><td>8</td><td>8 (12+ preferred)</td></tr>
       <tr><td>Individual</td><td>an independent plane per disk</td><td>3 per disk</td><td>3 per disk</td></tr>
     </table>
-    <p>Here x and y are the hole coordinates and z is the vertical position in the
-    stack, so the three-dimensional models capture a flux gradient along the length of
-    the irradiation container.</p>
+    <p>x and y are the hole coordinates (cm) and z the height of the disk in the
+    stack.</p>
+    <ul>
+      <li><b>2D planar</b>: J changes linearly across the disk. For a single disk
+          only.</li>
+      <li><b>Simple 3D</b>: adds a linear change with height, so every disk has the same
+          lateral gradient on top of a gradient along the stack. For stacked disks with
+          monitors on at least two levels.</li>
+      <li><b>Complex 3D</b>: also lets the lateral gradient change with height (xz, yz)
+          and allows a saddle-shaped surface (xy, xyz). Only with many monitors spread
+          over several disks; with fewer than about 12, its eight parameters fit the
+          noise.</li>
+      <li><b>Individual</b>: the 2D plane fitted to each disk separately, with nothing
+          shared between disks. For several disks whose gradients are unrelated, with at
+          least three monitors on each.</li>
+    </ul>
+    <p>Use the simplest model the monitors support, and a more complex one only if it
+    predicts left-out monitors better (see Choosing a model below).</p>
 
-    <p>A single least-squares fit gives a surface but no honest uncertainty at an
-    arbitrary point, so the fit is repeated many times over perturbed inputs. Each
-    iteration shifts the monitor positions at random and adds Gaussian noise to each
-    measured J at its stated error, then refits the surface by weighted least squares
-    (weights 1/&sigma;<sup>2</sup>). The mean and standard deviation of the resulting
-    predictions are reported as the value and its uncertainty at each unknown; a
-    monitor keeps its measured value:</p>
+    <h3>Monte Carlo uncertainty</h3>
+    <p>Each iteration moves the monitor positions at random, adds Gaussian noise to
+    each monitor J at its stated error, and refits the surface by weighted least
+    squares (weights 1/&sigma;<sup>2</sup>). The mean and standard deviation of the
+    predictions are the J and &sigma;<sub>J</sub> of each unknown; monitors keep their
+    measured values:</p>
     """ + E(r'\hat{J}(x,y,z) = \langle J \rangle_{\mathrm{MC}} \qquad \sigma_{J}(x,y,z) = \mathrm{std}_{\mathrm{MC}}') + """
-    <p>The position shift allows for where the monitor crystals sat. A monitor
-    value is the mean of n crystals, each lying anywhere on the floor of a hole of
-    diameter d. A point placed at random on a disc has a standard deviation of d/4 in
-    each direction (its mean squared distance from the centre is d<sup>2</sup>/8,
-    shared equally between x and y), so the mean position of n crystals is uncertain
-    by</p>
+    <p>The position shift allows for where the monitor crystals lay. A monitor value is
+    the mean of n crystals, each anywhere on the floor of a hole of diameter d. A random
+    point on a disc has a standard deviation of d/4 in x and in y (its mean squared
+    distance from the centre is d<sup>2</sup>/8), so the mean position of n crystals is
+    uncertain by</p>
     """ + E(r'\sigma_{\mathrm{pos}} = \frac{d}{4\sqrt{n}}') + """
     <p>in each direction: 0.2&ndash;0.3&nbsp;mm for about ten crystals in the
     2.7&ndash;4.0&nbsp;mm monitor holes of the 13- and 21-hole disks. The standard
-    deviation of the shift is drawn anew in each iteration between 15 and
-    450&nbsp;&mu;m (typically about 0.26&nbsp;mm). Hole coordinates are in cm.</p>
-    <p>The perturbations only carry the errors the monitors are stated to have.
-    When the monitors scatter about the fitted surface by more than that (a weighted
-    MSWD above the Wendt &amp; Carl limit for n &minus; k degrees of freedom), every
-    predicted &sigma;<sub>J</sub> is multiplied by &radic;MSWD, the same rule the
-    other tools use for a weighted mean; the correlations between holes are kept.
-    The MSWD of each fit is reported when the regression finishes and stored in the
-    <code>.jflux</code> file.</p>
-    <p>Monitors report their own measured values; unknowns take the Monte Carlo
-    prediction. Because a more flexible surface always fits the control points better,
-    the tool judges models by how well they predict data they did not see: leave-one-out
-    cross-validation error, the AIC, which penalises extra parameters, and a reduced
-    &chi;<sup>2</sup> near one as a check that the error bars are neither too large nor
-    too small. The fitted J and its uncertainty can be sent to the dating tools or saved
-    as a <code>.jflux</code> file, which the Plateau &amp; isochron tool reads to recover the true
-    correlation between holes when combining aliquots.</p>
+    deviation of the shift is drawn in each iteration between 15 and 450&nbsp;&mu;m
+    (typically about 0.26&nbsp;mm).</p>
+    <p>If the monitors scatter about the surface more than their errors allow (weighted
+    MSWD above the Wendt &amp; Carl limit for n&nbsp;&minus;&nbsp;k degrees of freedom,
+    k the number of parameters), every &sigma;<sub>J</sub> is multiplied by
+    &radic;MSWD; the correlations between holes are kept. The MSWD of each fit is
+    reported and stored in the <code>.jflux</code> file.</p>
+
+    <h3>Choosing a model</h3>
+    <p>A more flexible surface always fits the monitors better, so the models are
+    compared by leave-one-out cross-validation error, the AIC, which penalises extra
+    parameters, and the reduced &chi;<sup>2</sup>, which is near 1 when the errors are
+    right. J and &sigma;<sub>J</sub> can be sent to the dating tools or saved as a
+    <code>.jflux</code> file, from which Plateau &amp; isochron reads the correlation
+    between holes.</p>
     """
 
     # ── 8 ────────────────────────────────────────────────────────────────
@@ -674,81 +561,68 @@ def build_about_html(base_dir):
     <a name="plateau"></a>
     <h2>8. Plateau &amp; isochron</h2>
 
-    <h3>What it does</h3>
-    <p>In a step-heating experiment the argon is released in increasingly hot steps,
-    each yielding an age. If the mineral retained its argon cleanly, the middle steps
-    agree, forming a plateau, and that interval gives the best age.
-    The tool draws the age spectrum, identifies the plateau against criteria you set,
-    computes its age with the appropriate uncertainty tiers, and provides isochrons as
-    an independent test. It also combines several aliquots of one sample.</p>
+    <p>Draws the age spectrum of a step-heating run, finds the plateau, calculates its
+    age with the three uncertainty tiers, fits isochrons, and combines several aliquots
+    of one sample.</p>
 
     """ + F('plateau_spectrum.png',
             'A step-heating spectrum. Box heights are 2-sigma per step and box widths '
-            'are the fraction of 39Ar released; the highlighted steps form the '
-            'plateau, with its weighted-mean age and MSWD below.') + """
+            'the fraction of 39Ar released; the highlighted steps form the plateau.') + """
 
-    <h3>The mathematics</h3>
-    <p><i>Identifying the plateau.</i> A run of adjacent steps qualifies when it meets
-    three conditions you control: a minimum number of steps, a minimum fraction of the
-    total <sup>39</sup>Ar released, and a minimum probability on the &chi;<sup>2</sup>
-    test of the weighted mean. Individual steps can also be forced in or excluded by
-    hand.</p>
-
-    <p><i>The plateau age.</i> The age is the weighted mean of the qualifying steps,
-    weighted by analytical uncertainty, with
-    the uncertainty scaled for overdispersion according to the mode you choose.</p>
+    <h3>Plateau</h3>
+    <p>A run of consecutive steps is a plateau when it has at least a set number of
+    steps, a set fraction of the <sup>39</sup>Ar, and a &chi;<sup>2</sup> probability
+    of the weighted mean above a set value. Steps can also be included or excluded by
+    hand. The plateau age is the weighted mean of its steps on the analytical errors,
+    with the uncertainty given by the error mode:</p>
     <table>
       <tr><th>Error mode</th><th>Uncertainty</th><th>Use when</th></tr>
       <tr><td>SEM &times; 2</td><td>2&nbsp;&middot;&nbsp;SEM</td><td>MSWD &asymp; 1, no scatter correction</td></tr>
       <tr><td>SEM &times; &radic;MSWD &times; 2</td><td>2&nbsp;&middot;&nbsp;SEM&nbsp;&middot;&nbsp;&radic;MSWD</td><td>most cases</td></tr>
       <tr><td>Student's t</td><td>SEM&nbsp;&middot;&nbsp;&radic;MSWD&nbsp;&middot;&nbsp;t(n&minus;1)</td><td>small n; matches ArArCALC when p &lt; 5%</td></tr>
     </table>
-
-    <p><i>Why J enters once.</i> Every step of one aliquot shares the same J, because
-    the steps come from the same position in the disk; J is therefore fully correlated
-    across them and must not be allowed to average down. The internal and external
-    tiers add it after the mean rather than within it:</p>
+    <p>All steps of one aliquot share the same J, so J is added after the mean, not to
+    each step, where it would average down:</p>
     """ + E(r'\sigma_{\mathrm{int}} = \sqrt{\sigma_{\mathrm{ana}}^{2} + \left(\frac{\partial t}{\partial \ln J} f_{J}\right)^{2}} \qquad \sigma_{\mathrm{ext}} = \sqrt{\sigma_{\mathrm{int}}^{2} + \sum_{k} c_{k}^{2}}') + """
-    <p>where the c<sub>k</sub> are the calibration terms of Section&nbsp;3.</p>
+    <p>with the c<sub>k</sub> of Section&nbsp;3.</p>
 
-    <p><i>Combining aliquots.</i> Combining aliquots is itself a weighted mean, so a
-    shared systematic shifts them all together while an independent one diminishes as
-    roughly the square root of their number. Whether two aliquots share J depends on
-    where they sat.</p>
+    <h3>Combining aliquots</h3>
+    <p>Shared uncertainties do not average down when aliquots are combined; independent
+    ones decrease roughly as 1/&radic;n. Whether two aliquots share J depends on where
+    they were irradiated:</p>
     <table>
-      <tr><th>Provenance</th><th>Correlation of J</th><th>Does J average down?</th></tr>
-      <tr><td>Same hole, repeat analyses</td><td>&rho; = 1</td><td>No</td></tr>
+      <tr><th>Aliquots from</th><th>Correlation of J</th><th>Does J average down?</th></tr>
+      <tr><td>The same hole</td><td>&rho; = 1</td><td>No</td></tr>
       <tr><td>Different holes, same disk</td><td>0 &lt; &rho; &lt; 1, from the flux model</td><td>Partly</td></tr>
       <tr><td>Different disks or irradiations</td><td>&rho; = 0</td><td>Yes, J only</td></tr>
       <tr><td>Different laboratories or calibrations</td><td>&rho; = 0; monitor and &lambda; also independent</td><td>J yes; monitor and &lambda; only if they differ</td></tr>
     </table>
-    <p>Loading a <code>.jflux</code> file lets the combination use the genuine
-    correlation between holes taken from the flux model, rather than assuming it is
-    either zero or one. Because the decay constant and the monitor age are common to
-    everything on one calibration, the external tier does not average down even across
-    disks; it sets a floor on the achievable precision. The two combination methods are
-    those of Section&nbsp;1: <b>WM + √MSWD</b>, on the per-aliquot
-    plateau ages (n = aliquots, the default) or with the steps normalised to a single
-    J and pooled in ratio space (n = steps), and <b>GLS + ML</b> (Vermeesch 2015 §13),
-    which combines the per-aliquot plateau ages on the covariance with a
-    maximum-likelihood dispersion term (n = aliquots) and is the right choice when
-    the aliquots span more than one hole or disk, or disagree beyond analytical
-    error.  On n = aliquots both use the
-    same J correlation and give the same age as pooling the aliquots in the Age
-    distribution tool.</p>
+    <p>A loaded <code>.jflux</code> file gives the correlation between holes from the
+    flux model instead of assuming 0 or 1. The monitor age and &lambda; are common to
+    everything on one calibration, so the external tier does not average down even
+    across disks. The methods are those of Section&nbsp;4:</p>
+    <ul>
+      <li><b>WM + √MSWD</b>: on the plateau ages of the aliquots (n = aliquots, the
+          default), or with all steps normalised to one J and pooled in ratio space
+          (n = steps);</li>
+      <li><b>GLS + ML</b>: on the plateau ages with the full covariance and
+          &omega;<sup>2</sup> (n = aliquots). Use it when the aliquots come from more
+          than one hole or disk, or disagree beyond analytical error.</li>
+    </ul>
+    <p>With n = aliquots both use the same J correlation and give the same age as pooling
+    the aliquots in Age distribution.</p>
 
-    <p><i>Isochrons.</i> Rather than assume the trapped argon has an atmospheric
-    composition, an isochron solves for it from the spread of the steps. For the
-    inverse isochron (x = <sup>39</sup>Ar<sub>K</sub>/<sup>40</sup>Ar,
-    y = <sup>36</sup>Ar/<sup>40</sup>Ar) the age comes from the slope and intercept,</p>
+    <h3>Isochrons</h3>
+    <p>An isochron solves for the composition of the trapped argon instead of assuming
+    it is atmospheric. For the inverse isochron (x&nbsp;=&nbsp;<sup>39</sup>Ar<sub>K</sub>/<sup>40</sup>Ar,
+    y&nbsp;=&nbsp;<sup>36</sup>Ar/<sup>40</sup>Ar) with intercept a and slope b,</p>
     """ + E(r'R = -\,b/a \qquad t = \frac{1}{\lambda}\ln\left(RJ + 1\right)') + """
-    <p>and for the normal isochron (x = <sup>39</sup>Ar<sub>K</sub>/<sup>36</sup>Ar,
-    y = <sup>40</sup>Ar/<sup>36</sup>Ar) from the slope alone,</p>
+    <p>and for the normal isochron (x&nbsp;=&nbsp;<sup>39</sup>Ar<sub>K</sub>/<sup>36</sup>Ar,
+    y&nbsp;=&nbsp;<sup>40</sup>Ar/<sup>36</sup>Ar) with slope b,</p>
     """ + E(r't = \frac{1}{\lambda}\ln\left(bJ + 1\right)') + """
-    <p>Both are fitted by the method of York (1969), the correct weighted regression
-    when both axes carry correlated errors, and both report 2&sigma; analytical
-    uncertainties inflated by the square root of the MSWD where the scatter warrants
-    it.</p>
+    <p>Both are fitted by York (1969) regression, which allows for correlated errors on
+    both axes. The uncertainties are multiplied by &radic;MSWD when the MSWD exceeds 1,
+    as in ArArCALC.</p>
     """
 
     # ── 9 ────────────────────────────────────────────────────────────────
@@ -756,111 +630,90 @@ def build_about_html(base_dir):
     <a name="prob"></a>
     <h2>9. Age distribution</h2>
 
-    <h3>What it does</h3>
-    <p>When a sample yields a population of single-crystal or single-aliquot ages, the
-    shape of their distribution carries information a mean alone cannot: whether the
-    ages form one cluster or several. This tool ranks the ages, places a Gaussian
-    of the appropriate width on each, sums them into a probability-density curve,
-    computes a weighted mean for each sample, and can pool several samples with the
-    correlations handled correctly.</p>
+    <p>For a population of single-crystal or single-aliquot ages: the ranked ages with
+    a probability density curve, a weighted mean of each sample, pooled ages of several
+    samples, and mixture and minimum-age models.</p>
 
     """ + F('prob_plot.png',
-            'Ranked ages with 1-sigma bars and the summed-Gaussian probability curve. '
-            'Excluded points are open markers, and the dashed curve shows the '
-            'distribution with them added back.') + """
+            'Ranked ages with 1-sigma bars and the probability density curve. Excluded '
+            'points are open markers; the dashed curve includes them.') + """
 
-    <h3>The mathematics</h3>
-    <p>Each accepted age contributes a Gaussian of unit area, centred on its value with
-    its own width, and the curve is their sum; it is a representation of the population
-    rather than a fitted model. The weighted mean, MSWD, and probability use the same
-    analytical-weighted machinery as elsewhere,</p>
+    <h3>Probability density and weighted mean</h3>
+    <p>Each accepted age adds a Gaussian of unit area with its own &sigma;, and the
+    curve is their sum. It displays the data and is not a fitted model. The weighted
+    mean and MSWD use the analytical errors:</p>
     """ + E(r'\bar{t} = \frac{\sum w_{i} t_{i}}{\sum w_{i}}, \quad \mathrm{MSWD} = \frac{1}{n-1}\sum w_{i}\left(t_{i} - \bar{t}\right)^{2}, \quad w_{i} = \frac{1}{\sigma_{\mathrm{ana},i}^{2}}') + """
-    <p>Pooling is where the covariance treatment matters. When samples are combined,
-    only the independent parts of their uncertainties should diminish. Both methods
-    assemble the same covariance matrix for this (the decomposition of Vermeesch 2015),</p>
+    <p>Outliers can be removed by NMAD, by iterative 2&sigma; rejection, or by clicking
+    points. A dashed curve shows the distribution with the excluded points added
+    back.</p>
+
+    <h3>Pooling samples</h3>
+    <p>Samples are pooled on the covariance of Vermeesch (2015):</p>
     """ + E(r'\Sigma_{ij} = a_{i}^{2}\,\delta_{ij} + \rho^{\mathrm{pos}}_{ij}\,p_{i} p_{j} + \rho^{\mathrm{std}}_{ij}\,s_{i} s_{j}') + \
     E(r'a = \sigma_{\mathrm{ana}} \qquad p = \sqrt{\sigma_{\mathrm{int}}^{2} - \sigma_{\mathrm{ana}}^{2}} \qquad s = \sqrt{\sigma_{\mathrm{ext}}^{2} - \sigma_{\mathrm{int}}^{2}}') + """
-    <p>in which a is the analytical term, p the flux term, and s the monitor-and-decay
-    term. The indicator &rho;<sup>pos</sup> is one for samples that occupied the same
-    irradiation position and zero otherwise, and &rho;<sup>std</sup> is one for samples
-    on the same calibration. Samples that shared a position share their flux
-    completely, so that part does not shrink when they are combined; samples from
-    different irradiations have independent flux, which does. The monitor-and-decay
-    systematic is common to every active sample and never averages down.</p>
-
-    <p>The two statistical methods are again those of Section&nbsp;1. Position grouping
-    is automatic: samples with a matching calibration fall into the same fully
-    correlated group, and the pooled report states which samples grouped together.
-    Outliers can be removed by NMAD or by iterative 2&sigma; rejection, or by
-    clicking individual points; in every case a dashed curve shows what the excluded
-    points would have contributed, so nothing is hidden from view.</p>
+    <p>a is the analytical term, p the flux term and s the monitor and decay-constant
+    term. &rho;<sup>pos</sup> is 1 for samples from the same irradiation position and 0
+    otherwise; &rho;<sup>std</sup> is 1 for samples on the same calibration. The flux
+    term therefore averages down only between positions, and the calibration term never
+    does. Samples with matching calibration are grouped automatically, and the report
+    lists the groups. The methods are those of Section&nbsp;4.</p>
 
     <h3>Mixture view</h3>
-    <p>The <b>Mixture</b> button replaces the plot with a mixture model of one sample,
-    picked in the box above it; the plot and the samples are not changed, and the
-    button switches back. The model asks whether the analyses come from one age
-    population or several, and which analysis belongs to which. It takes the analyses,
-    z<sub>j</sub>&nbsp;&plusmn;&nbsp;s<sub>j</sub> with their analytical uncertainties
-    (z is the age, or its logarithm on the log scale), to come from k components with
-    ages &mu;<sub>i</sub> in proportions &pi;<sub>i</sub> (Galbraith &amp; Green 1990;
-    Galbraith &amp; Laslett 1993), and finds the values that maximise</p>
+    <p><b>Mixture</b> replaces the plot with a mixture model of the sample chosen above
+    it; the samples are not changed, and the button switches back. The analyses
+    z<sub>j</sub>&nbsp;&plusmn;&nbsp;s<sub>j</sub> (the age, or its logarithm on the log
+    scale, with the analytical uncertainty) are modelled as k components with ages
+    &mu;<sub>i</sub> in proportions &pi;<sub>i</sub> (Galbraith &amp; Green 1990;
+    Galbraith &amp; Laslett 1993), fitted by maximising</p>
     """ + E(r'\ln L = \sum_{j=1}^{n} \ln \sum_{i=1}^{k} \pi_{i}\,\phi(z_{j};\,\mu_{i},\,s_{j})') + """
     <p>where &phi; is the normal density. The probability that analysis j belongs to
     component i is</p>
     """ + E(r'p_{ij} = \frac{\pi_{i}\,\phi(z_{j};\,\mu_{i},\,s_{j})}{\sum_{l=1}^{k} \pi_{l}\,\phi(z_{j};\,\mu_{l},\,s_{j})}') + """
-    <p>and the maximum is reached by repeating, from several starting points,</p>
+    <p>and the maximum is found by iterating, from several starting points,</p>
     """ + E(r'\pi_{i} = \frac{1}{n}\sum_{j} p_{ij}, \qquad \mu_{i} = \frac{\sum_{j} p_{ij}\,z_{j}/s_{j}^{2}}{\sum_{j} p_{ij}/s_{j}^{2}}') + """
-    <p>so each component age is a weighted mean of the analyses, each weighted by how
-    likely it is to belong. The uncertainties of &mu;<sub>i</sub> and &pi;<sub>i</sub>
-    come from the information matrix (Galbraith 2005), as in IsoplotR's peakfit
-    (Vermeesch 2018). The number of components is chosen with the Bayes Information
-    Criterion (Schwarz 1978),</p>
+    <p>so each component age is a weighted mean of the analyses, each weighted by its
+    probability of belonging. The uncertainties of &mu;<sub>i</sub> and
+    &pi;<sub>i</sub> come from the information matrix (Galbraith 2005), as in IsoplotR's
+    peakfit (Vermeesch 2018). The number of components is chosen with the Bayes
+    Information Criterion (Schwarz 1978),</p>
     """ + E(r'\mathrm{BIC} = -2\ln L + (2k-1)\ln n') + """
-    <p>taking the fewest components within 2 of the lowest BIC, since a smaller
-    difference is not worth more than a bare mention (Kass &amp; Raftery 1995). Up to
-    ten components are tried, because every old xenocryst takes one of its own. A
-    component of at least two analyses also has an MSWD, with every analysis weighted
-    by p<sub>ij</sub>,</p>
+    <p>as the fewest components within 2 of the lowest BIC; a smaller difference is not
+    considered evidence (Kass &amp; Raftery 1995). Up to ten components are tried,
+    since each old xenocryst can form its own. A component of at least two analyses
+    has an MSWD, with each analysis weighted by p<sub>ij</sub>,</p>
     """ + E(r'\mathrm{MSWD}_{i} = \frac{\sum_{j} p_{ij}(z_{j} - \mu_{i})^{2}/s_{j}^{2}}{\sum_{j} p_{ij} - 1}') + """
     <p>and when it exceeds the Wendt &amp; Carl limit for &sum;<sub>j</sub>p<sub>ij</sub>
-    analyses, the analytical uncertainty of the component is multiplied by &radic;MSWD,
-    the rule used for every weighted mean. J and the calibration are then added to each
-    component age to give the internal and external tiers, as for the weighted mean of
-    the sample.</p>
-
-    <p>By default the model sees every analysis of the sample: deciding which
-    analyses belong together is its job, so the outlier rejection and the clicked
-    exclusions are not used. <b>Included only</b> uses the analyses included on the
-    plot. The log scale, IsoplotR's default, leaves out ages of zero or below.</p>
-
-    <p>The minimum age model (Galbraith et al. 1999) is offered for the youngest
-    population on its own: one discrete youngest age plus a continuous spread of older
-    analyses, truncated at it. It assumes no analysis is too young, so a single young
-    outlier (argon loss) becomes the minimum, and old xenocrysts widen the spread until
-    it takes in analyses that do not belong. It should be run on data without them.</p>
-
-    <p>Two cautions apply to every result. The BIC also splits a single population whose
-    scatter exceeds its analytical errors, and the number of components it finds grows
-    with the number of analyses, so a split is a reason to look at the data, not proof
-    of two populations. And the youngest component is not automatically the eruption
-    age: a single blank-dominated analysis can form a component of its own. The radial
-    plot (Galbraith 1988) helps with both. Each analysis is plotted at its precision,
-    1/&sigma;, against its deviation from the weighted mean in units of &sigma;, so its
-    age is read where the line from the origin through it meets the arc, and each
-    component is such a line. The ΔBIC panel shows how clearly the number of components
-    was chosen.</p>
+    analyses, the analytical uncertainty of the component is multiplied by &radic;MSWD.
+    J and the calibration are then added to give the internal and external tiers, as
+    for the weighted mean of the sample.</p>
+    <p>By default the model uses every analysis of the sample and ignores outlier
+    rejection and clicked exclusions. <b>Included only</b> uses the analyses included
+    on the plot. The log scale, IsoplotR's default, leaves out ages of zero or
+    below.</p>
+    <p>The minimum age model (Galbraith et al. 1999) fits the youngest population on its
+    own: one discrete youngest age plus a truncated spread of older analyses. It
+    assumes no analysis is too young, so a young outlier (argon loss) becomes the
+    minimum, and old xenocrysts widen the spread. Run it on data without them.</p>
+    <p>The BIC also splits a single population whose scatter exceeds its analytical
+    errors, and the number of components it finds grows with the number of analyses. A
+    split is therefore a reason to look at the data, not proof of two populations.
+    The youngest component is not necessarily the eruption age; a single
+    blank-dominated analysis can form a component of its own. The radial plot
+    (Galbraith 1988) helps with both: each analysis is plotted at its precision,
+    1/&sigma;, against its deviation from the weighted mean in units of &sigma;. Its
+    age is read where the line from the origin through the point meets the arc, and
+    each component is such a line. The &Delta;BIC panel shows how clearly the number of
+    components was chosen.</p>
     """ + F('prob_mixture.png',
-            'The Mixture view. Left: the ranked analyses and the probability curve, split '
-            'into the components; each analysis is coloured by the component it most '
-            'likely belongs to. Right: the radial plot and the BIC of each number of '
-            'components.') + """
-    <p>While the view is on, both export buttons export the mixture model of the
-    sample shown, and nothing else. <b>Export mixture figure</b> lays it out as in the
-    window, the diagram on the left and the radial plot and &Delta;BIC on the right, or
-    stacks the panels. <b>Export mixture XLSX / CSV</b> writes the component ages with
-    their three tiers, proportions and MSWD, then every analysis the model used with its
-    point data and its probability of belonging to each component; the constants and raw
-    signals are those of that sample. The settings are saved with the session.</p>
+            'The Mixture view. Left: the ranked analyses and the probability curve split '
+            'into components, each analysis coloured by its most likely component. '
+            'Right: the radial plot and the BIC of each number of components.') + """
+    <p>While the view is on, both export buttons export the mixture model of the sample
+    shown. <b>Export mixture figure</b> uses the window layout (diagram left, radial
+    plot and &Delta;BIC right) or stacks the panels. <b>Export mixture XLSX / CSV</b>
+    writes the component ages with their three tiers, proportions and MSWD, then every
+    analysis the model used with its data and its probability for each component. The
+    settings are saved with the session.</p>
     """
 
     # ── 10 ───────────────────────────────────────────────────────────────
@@ -868,17 +721,14 @@ def build_about_html(base_dir):
     <a name="calib"></a>
     <h2>10. Calibrations and constants</h2>
 
-    <p>Every tool defaults to the calibration of Phillips et al. (2022): a Fish Canyon
-    age of 28.176&nbsp;&plusmn;&nbsp;0.0115&nbsp;Ma (1&sigma;, the published
-    &plusmn;0.023&nbsp;Ma at 2&sigma; halved), paired with the decay constant it is
-    anchored to, Min et&nbsp;al. (2000):
+    <p>The default calibration is Phillips et&nbsp;al. (2022): Fish Canyon
+    28.176&nbsp;&plusmn;&nbsp;0.0115&nbsp;Ma (1&sigma;; published as
+    &plusmn;0.023&nbsp;Ma at 2&sigma;) with the Min et&nbsp;al. (2000) decay constant,
     5.463&nbsp;&plusmn;&nbsp;0.054&nbsp;&times;&nbsp;10<sup>&minus;10</sup>&nbsp;yr<sup>&minus;1</sup>.
-    The monitor age is astronomically calibrated, so ages are computed on the
-    anchored chain of Section&nbsp;3 (A1 tephra, 6.943&nbsp;Ma;
-    R<sub>FCs/A1</sub>&nbsp;=&nbsp;4.0819), and the external tier comes from
-    R<sub>FCs/A1</sub>, the A1 age and &lambda; rather than from the Fish Canyon
-    age's quoted error. Any of the presets below may be chosen, or custom values
-    entered.</p>
+    Ages are calculated with the two-step equation of Section&nbsp;3 (A1 tephra,
+    6.943&nbsp;Ma; R<sub>FCs/A1</sub>&nbsp;=&nbsp;4.0819), so the external tier comes
+    from R<sub>FCs/A1</sub>, the A1 age and &lambda;, not from the quoted Fish Canyon
+    error. The other presets, or custom values, can be chosen in each tool:</p>
 
     <table>
       <tr><th>Monitor-age preset</th><th>Age (Ma)</th><th>1&sigma; (Ma)</th><th>External &lambda;</th></tr>
@@ -890,26 +740,24 @@ def build_about_html(base_dir):
       <tr><td>Jourdan &amp; Renne (2007)</td><td>28.03</td><td>0.08</td><td>No</td></tr>
     </table>
 
-    <p>Two points deserve emphasis. First, the astronomically tuned monitor ages of
-    Kuiper (2008), Rivera (2011) and Phillips (2022) were derived with the Min et al.
-    (2000) decay constant, and the tools pair them with it. Because the ages are
-    computed on the anchored chain, another &lambda; can be chosen without breaking
-    the calibration: the chain then gives the Fish Canyon age that the anchor implies
-    at that &lambda;, not the published 28.176&nbsp;Ma. Second, the External
-    &lambda; setting only matters for calibrations without an anchor. For those, a
-    jointly calibrated monitor age already contains the decay-constant uncertainty
-    within its published error, so the setting prevents it from being added a second
-    time, and for the Carter calibration it also activates the
-    &lambda;&ndash;monitor covariance term that reproduces Carter's Table&nbsp;9.</p>
+    <p>The astronomically calibrated ages (Kuiper 2008, Rivera 2011, Phillips 2022)
+    were calculated with the Min et&nbsp;al. (2000) &lambda;, and the tools pair them
+    with it. Another &lambda; can be chosen; the two-step equation then gives the Fish
+    Canyon age the anchor implies at that &lambda;, not the published value.</p>
+    <p>The External &lambda; setting matters only for calibrations without an anchor.
+    "Yes" means the published monitor-age uncertainty already contains the &lambda;
+    uncertainty (a jointly calibrated age), so it is not added again. For Carter
+    et&nbsp;al. (2025) it also includes the &lambda;&ndash;monitor covariance, which
+    reproduces their Table&nbsp;9.</p>
 
-    <h3>Reading Carter's three uncertainties</h3>
-    <p>Carter's Fish Canyon age appears in the literature with three different
-    uncertainties. These are three different tiers, not one number quoted three ways.</p>
+    <h3>Carter et al. (2025): three uncertainties</h3>
+    <p>Carter's Fish Canyon age is quoted with three different 1&sigma;
+    uncertainties:</p>
     <table>
-      <tr><th>1&sigma; value</th><th>What it is</th></tr>
-      <tr><td>0.0112 Ma</td><td>The posterior precision: how tightly the fit pins the age.</td></tr>
-      <tr><td>0.017 Ma</td><td>The full external systematic, with input-data systematics folded in. This is the tool's external tier.</td></tr>
-      <tr><td>0.035 Ma</td><td>The usage total when actually dating, which adds the R-value and neutron-fluence terms on top.</td></tr>
+      <tr><th>1&sigma; (Ma)</th><th>Meaning</th></tr>
+      <tr><td>0.0112</td><td>Posterior precision of the fit.</td></tr>
+      <tr><td>0.017</td><td>Full external systematic, including the input-data systematics. Used as the external tier here.</td></tr>
+      <tr><td>0.035</td><td>Total for dating, adding the R-value and neutron-fluence terms.</td></tr>
     </table>
     """
 
@@ -951,6 +799,8 @@ def build_about_html(base_dir):
       <li>Vermeesch (2015): revised error propagation including covariances.
           <i>GCA</i> 171, 325&ndash;337.</li>
       <li>Vermeesch (2018): IsoplotR. <i>Geosci. Front.</i> 9, 1479&ndash;1493.</li>
+      <li>Viechtbauer &amp; Cheung (2010): outlier and influence diagnostics for
+          meta-analysis. <i>Res. Synth. Methods</i> 1, 112&ndash;125.</li>
       <li>Wendt &amp; Carl (1991): MSWD confidence limits.
           <i>Chem. Geol.</i> 86, 275&ndash;285.</li>
       <li>York (1969): least-squares fit with correlated errors on both axes.
@@ -959,5 +809,5 @@ def build_about_html(base_dir):
     <p class="back"><a href="#top">Back to top</a></p>
     """
 
-    return (style + toc + stats + idea + tiers + workflow
+    return (style + toc + workflow + idea + tiers + stats
             + converter + wm + jcalc + plateau + prob + calib + refs)
