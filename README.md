@@ -78,4 +78,9 @@ and export.
 
 ## Citing
 
-A DOI will be added with the first archived release.
+Cite the archived release on Zenodo; GitHub's **Cite this repository** button (from
+`CITATION.cff`) gives the reference. The DOI is added here with the first release.
+
+## Licence
+
+GNU General Public License v3.0 or later; see `LICENSE`.
