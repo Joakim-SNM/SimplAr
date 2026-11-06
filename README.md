@@ -3,8 +3,7 @@
 Desktop tools for ⁴⁰Ar/³⁹Ar geochronology, from the laboratory's data export to
 plateau, isochron and combined ages. Every age carries three uncertainty tiers:
 analytical; internal (plus J); external (plus the monitor age and decay constant).
-Shared J and calibration errors are treated as correlated, so they do not average
-down when ages are combined.
+Shared J and calibration errors are treated as correlated.
 
 ## The tools
 
