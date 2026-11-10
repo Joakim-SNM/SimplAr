@@ -26,8 +26,7 @@ references.
 
 ## Installation
 
-SimplAr runs on Windows, macOS and Linux. You need Python; the first start installs
-the rest.
+SimplAr runs on Windows, macOS and Linux. You need Python with the requirements automatically installed at first start. 
 
 1. **Install Python 3.10 or later** from
    [python.org/downloads](https://www.python.org/downloads/).
