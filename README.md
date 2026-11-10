@@ -43,10 +43,14 @@ the rest.
    After that the launcher opens straight away.
 
 Both systems may warn the first time, because the files come from the internet. On
-Windows, click **More info** and **Run anyway** (or **Run**). On a Mac, if
-`launch.command` is blocked, open **System Settings → Privacy & Security**, scroll
-down to the message about `launch.command`, click **Open Anyway**, and double-click
-it again.
+Windows, click **More info** and **Run anyway** (or **Run**).
+
+On a Mac, if `launch.command` is blocked, open **System Settings → Privacy &
+Security**, scroll down to the message about `launch.command`, click **Open Anyway**,
+and double-click it again. If it is still blocked (some university and company Macs
+do not allow Open Anyway), start it once from Terminal: open the Terminal app, type
+`bash` and a space, drag `launch.command` from the Finder into the Terminal window,
+and press Return. After that, double-clicking works.
 
 From a terminal, the same is:
 

@@ -3,6 +3,11 @@
 # The first start installs the Python packages listed in requirements.txt.
 cd "$(dirname "$0")" || exit 1
 
+# A copy downloaded from GitHub is marked as coming from the internet, and macOS
+# blocks double-clicks on it. Once this file has run, remove that mark from it so
+# that double-clicking works from then on.
+xattr -d com.apple.quarantine "$(basename "$0")" 2>/dev/null
+
 stop() {
     echo
     echo "$1"
