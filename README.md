@@ -26,16 +26,35 @@ references.
 
 ## Installation
 
-Python 3.10 or later (Windows, macOS or Linux), then:
+SimplAr runs on Windows, macOS and Linux. You need Python; the first start installs
+the rest.
 
-    pip install -r requirements.txt
+1. **Install Python 3.10 or later** from
+   [python.org/downloads](https://www.python.org/downloads/).
+   - Windows: tick **Add python.exe to PATH** on the first page of the installer.
+   - Mac: use the python.org installer. A Python from Homebrew will not let SimplAr
+     install its packages.
+2. **Download SimplAr**: at the top of this page, click the green **Code** button,
+   then **Download ZIP**. Unzip it (on Windows: right-click the ZIP, **Extract All**)
+   and put the folder where you want to keep it.
+3. **Start it**: in the folder, double-click `launch.bat` (Windows) or
+   `launch.command` (Mac). The first start installs the packages SimplAr uses
+   (numpy, scipy, pandas, openpyxl, matplotlib, PyQt5), which takes a few minutes.
+   After that the launcher opens straight away.
 
-## Running
+Both systems may warn the first time, because the files come from the internet. On
+Windows, click **More info** and **Run anyway** (or **Run**). On a Mac, if
+`launch.command` is blocked, open **System Settings → Privacy & Security**, scroll
+down to the message about `launch.command`, click **Open Anyway**, and double-click
+it again.
 
+From a terminal, the same is:
+
+    python -m pip install -r requirements.txt
     python launcher.py
 
-or double-click `launch.bat` (Windows) or `launch.command` (macOS). Each tool also
-runs on its own, for example `python 4_plateau_isochron/plateau_isochron.py`.
+(`python3` on macOS and Linux). Each tool also runs on its own, for example
+`python 4_plateau_isochron/plateau_isochron.py`.
 
 ## Where files are saved
 
