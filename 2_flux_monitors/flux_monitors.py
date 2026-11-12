@@ -169,7 +169,7 @@ def read_arar_rows(path, crystal_rule='auto', group_by='position'):
         cat = pos if (group_by == 'position' and pos) else title
         # Work in run order: an export can list a step out of sequence (e.g.
         # the 30 W fusion step of a step-heated crystal written first), and
-        # both the power-sequence rule and "last step" need the real order.
+        # the power-sequence rule needs the real order.
         order = list(range(len(steps)))
         if steps and all(s.get('run_dt') for s in steps):
             order.sort(key=lambda i: (str(steps[i]['run_dt']), _run_number(steps[i]), i))
@@ -1597,7 +1597,6 @@ class FluxMonitorsWindow(QMainWindow):
         ('steps',       'Every step is a point'),
         ('crystal',     'One point per crystal (³⁹Ar-weighted total gas)'),
         ('fusion_only', 'Single-step (fusion) crystals only'),
-        ('last_step',   'Last step of each crystal'),
     ])
 
     def _reset_overrides(self):
@@ -1625,7 +1624,7 @@ class FluxMonitorsWindow(QMainWindow):
         return (self.use_error_filter_var, self.error_threshold_var,
                 self.use_mswd_var, self.mswd_threshold_var, self.mswd_rule_var,
                 self.mswd_discordant_var,
-                self.use_chauvenet_var, self.use_nmad_var, self.nmad_k_var,
+                self.use_nmad_var, self.nmad_k_var,
                 self.use_reml_var, self.std_age_var, self.std_age_err_var,
                 self.lambda_var, self.lambda_err_var)
 
@@ -1812,8 +1811,6 @@ class FluxMonitorsWindow(QMainWindow):
         mode = self.crystal_mode_var.get()
         if mode == 'fusion_only':
             return [t for t in tagged if t['step_type'] == 'fusion'], {}
-        if mode == 'last_step':
-            return [t for t in tagged if t['step_index'] == t['crystal_n_steps']], {}
         if mode == 'crystal':
             return self._pool_crystal_steps(category, tagged)
         return tagged, {}
@@ -2206,8 +2203,6 @@ class FluxMonitorsWindow(QMainWindow):
                   "√MSWD. Without the test the point whose removal lowers χ² most goes "
                   "each round until the MSWD is reached, which trims real scatter.")
         orl.addLayout(_row(20, n, stretch=False))
-        self.use_chauvenet_var = Value(False)
-        orl.addWidget(bind_check(self.use_chauvenet_var, QCheckBox("Chauvenet Criterion")))
         self.use_nmad_var = Value(True)
         orl.addWidget(bind_check(self.use_nmad_var, QCheckBox("NMAD outlier rejection")))
         self.nmad_k_var = Value(2.5)
@@ -2355,62 +2350,6 @@ class FluxMonitorsWindow(QMainWindow):
         bar.setValue(bar.maximum())
         self.results_text.repaint()
 
-    def applyChauvenetCriterion(self, data, valueKey='value', uncertaintyKey='uncertainty', maxIterations=10):
-        def erfcApprox(x):
-            # Abramowitz and Stegun approximation
-            a1, a2, a3, a4 = -1.26551223, 1.00002368, 0.37409196, 0.09678418
-            a5, a6, a7, a8 = -0.18628806, 0.27886807, -1.13520398, 1.48851587
-            a9, a10 = -0.82215223, 0.17087277
-
-            t = 1.0 / (1.0 + 0.5 * abs(x))
-            tau = t * math.exp(-x * x + a1 + t * (a2 + t * (a3 + t * (a4 + t * (a5 + t * (a6 + t * (a7 + t * (a8 + t * (a9 + t * a10)))))))))
-            return tau if x >= 0 else 2.0 - tau
-
-        def calculateWeightedStats(data):
-            if len(data) == 0:
-                return None
-
-            weights = [1 / (item[uncertaintyKey] ** 2) for item in data]
-            totalWeight = sum(weights)
-            weightedMean = sum(item[valueKey] * weights[i] for i, item in enumerate(data)) / totalWeight
-
-            return {'weightedMean': weightedMean, 'weights': weights, 'totalWeight': totalWeight}
-
-        currentData = data.copy()
-        removedItems = []
-        iteration = 0
-
-        while iteration < maxIterations and len(currentData) > 2:
-            iteration += 1
-            stats = calculateWeightedStats(currentData)
-            if not stats:
-                break
-
-            chauvenetThreshold = 1.0 / (2 * len(currentData))
-            worstPoint = None
-            worstProb = 1.0
-
-            for item in currentData:
-                residual = abs(item[valueKey] - stats['weightedMean'])
-                normalizedResidual = residual / item[uncertaintyKey]
-                prob = erfcApprox(normalizedResidual / math.sqrt(2))
-
-                if prob < worstProb and prob < chauvenetThreshold:
-                    worstPoint = item
-                    worstProb = prob
-
-            if not worstPoint:
-                break
-
-            testData = [item for item in currentData if item['sampleId'] != worstPoint['sampleId']]
-            if len(testData) >= 2:
-                currentData = testData
-                removedItems.append(worstPoint)
-            else:
-                break
-
-        return {'finalData': currentData, 'removedItems': removedItems}
-
     def analyzeCategory(self, categoryName, categoryData, valueKey='value', uncertaintyKey='uncertainty',
                         manual_exclusions=None, all_data=None, manual_inclusions=None):
         # Total points including any manually excluded ones
@@ -2452,7 +2391,7 @@ class FluxMonitorsWindow(QMainWindow):
             dataWithRelErr.append(newItem)
 
         # Force-included points bypass every auto-rejection step. Split them out so
-        # the error filter / MSWD / NMAD / Chauvenet only ever act on the rest, then
+        # the error filter / NMAD / MSWD only ever act on the rest, then
         # add them back before the final weighted mean.
         incl_ids = set(manual_inclusions or set())
         protected  = [it for it in dataWithRelErr if it['sampleId'] in incl_ids]
@@ -2486,7 +2425,7 @@ class FluxMonitorsWindow(QMainWindow):
 
         mswd_note = ""
         # Robust screen first (not masked by several outliers at once), then the
-        # MSWD and Chauvenet tests on what remains.
+        # MSWD test on what remains.
         if self.use_nmad_var.get() and len(currentData) > 2:
             k = self.nmad_k_var.get()
             self.log(f"Applying NMAD rejection (k={k})...")
@@ -2498,12 +2437,6 @@ class FluxMonitorsWindow(QMainWindow):
             currentData, removed, mswd_note = self.sequentialMSWD(
                 currentData, valueKey, uncertaintyKey, protected=protected)
             allRemovedItems.extend(removed)
-
-        if self.use_chauvenet_var.get() and len(currentData) > 2:
-            self.log("Applying Chauvenet criterion...")
-            chauvenetResults = self.applyChauvenetCriterion(currentData, valueKey, uncertaintyKey)
-            currentData = chauvenetResults['finalData']
-            allRemovedItems.extend(chauvenetResults['removedItems'])
 
         # Force-included points rejoin the kept set, whatever the algorithms decided.
         currentData = protected + currentData
@@ -3731,8 +3664,7 @@ class FluxMonitorsWindow(QMainWindow):
                 'studentized residual, 5 % Bonferroni)' if self.mswd_discordant_var.get()
                 else '; no discordance test')
              if self.use_mswd_var.get() else "MSWD rejection: off"),
-            "Order of rejection: relative-error filter, NMAD, MSWD, Chauvenet.",
-            f"Chauvenet criterion: {'on' if self.use_chauvenet_var.get() else 'off'}",
+            "Order of rejection: relative-error filter, NMAD, MSWD.",
             "",
             "NOTES",
             "SE values are 1σ unless the column says 2σ.",

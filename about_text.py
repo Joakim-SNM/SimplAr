@@ -327,16 +327,19 @@ def build_about_html(base_dir):
     differ in the mean and in how they treat overdispersion, scatter larger than the
     analytical errors allow.</p>
     <table>
-      <tr><th></th><th>WM + √MSWD</th><th>GLS + ML (Vermeesch 2015, &sect;13)</th></tr>
+      <tr><th></th><th>WM + √MSWD</th><th>GLS + ML</th></tr>
       <tr><td><b>Mean</b></td>
           <td>Inverse-variance weighted mean on the analytical errors.</td>
-          <td>Generalised least squares on the full covariance plus &omega;<sup>2</sup>.</td></tr>
+          <td>The covariance-weighted mean of Vermeesch (2015, eqs. 91&ndash;92), which
+              is the generalised least-squares (GLS) estimate, on the full covariance
+              plus &omega;<sup>2</sup>.</td></tr>
       <tr><td><b>Overdispersion</b></td>
           <td>The analytical tier is multiplied by &radic;MSWD when the MSWD exceeds the
               Wendt &amp; Carl (1991) limit below.</td>
           <td>An additive variance &omega;<sup>2</sup>, estimated by maximum likelihood
-              and added to every age (the random-effects model of IsoplotR and
-              Ar-Ar_Redux).</td></tr>
+              on the full covariance and added to every age. Vermeesch (2015, eq. 94)
+              adds it to each age's own variance, and IsoplotR fits it on the
+              analytical errors only.</td></tr>
     </table>
     """ + E(r'\mathrm{MSWD} > 1 + 2\sqrt{\frac{2}{n-1}}') + """
     <p>The same limit is used in every tool. Adding &omega;<sup>2</sup> to every age
@@ -363,8 +366,8 @@ def build_about_html(base_dir):
     them as independent understates the uncertainty, more so the more steps there
     are.</p>
 
-    <p>This is Vermeesch's combination step (his eqs. 91&ndash;94), not his full data
-    reduction. The tools start from reduced ages, so the covariance contains only the J
+    <p>The mean follows Vermeesch's combination step (his eqs. 91&ndash;94), not his
+    full data reduction. The tools start from reduced ages, so the covariance contains only the J
     and monitor/&lambda; terms. Correlations from shared blanks, detector calibration,
     mass fractionation and interference corrections need the raw isotope data and are
     not included.</p>
@@ -447,8 +450,8 @@ def build_about_html(base_dir):
     above) or, in an .arar file, by the run-ID prefix (100-01A &rarr; 100-01) or by the
     laser power in run order (a step at the same or a lower power than the step before
     starts a new crystal). A crystal with one step is a fusion, one with several was
-    step-heated. The points averaged can be every step, one point per crystal, the
-    single-step crystals only, or the last step of each crystal. One point per crystal
+    step-heated. The points averaged can be every step, one point per crystal,
+    or the single-step crystals only. One point per crystal
     is the total gas, the <sup>39</sup>Ar-weighted ratio</p>
     """ + E(r'R_{\mathrm{TG}} = \sum_{i} f_{i} R_{i}, \quad f_{i} = \frac{{}^{39}\mathrm{Ar}_{i}}{\sum {}^{39}\mathrm{Ar}} \qquad \sigma_{\mathrm{TG}} = \sqrt{\sum_{i} f_{i}^{2}\sigma_{i}^{2}}') + """
     <p>which equals what a single fusion of the crystal would have measured, so fused
@@ -481,7 +484,7 @@ def build_about_html(base_dir):
     &radic;MSWD. In simulations with 15 points this removed a good point in 1% of sets
     without excess scatter and 15% with &tau;&nbsp;=&nbsp;&sigma; (68% when points are
     removed until the MSWD is below the limit) and found a 6&sigma; outlier every time.
-    The filters run in the order relative error, NMAD, MSWD, Chauvenet.</p>
+    The filters run in the order relative error, NMAD, MSWD.</p>
     """
 
     # ── 7 ────────────────────────────────────────────────────────────────
