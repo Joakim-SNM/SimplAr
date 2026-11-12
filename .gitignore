@@ -2,9 +2,11 @@
 __pycache__/
 *.pyc
 
-# macOS / Office
+# macOS / Office / R
 .DS_Store
 ~$*
+.Rhistory
+.RData
 
 # generated at run time
 docs/eqcache/
