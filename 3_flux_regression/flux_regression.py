@@ -24,6 +24,7 @@ import ast
 import json
 import math
 import re
+import uuid
 import numpy as np
 import pandas as pd
 import warnings
@@ -61,18 +62,36 @@ MODE_R = 'R'   # regress on 40/39 ratios
 
 MONTE_CARLO_ITERATIONS = 15000
 
-# Hole coordinates are in cm (the 21-hole disk's outer holes are 4.7 mm apart).
-# Coordinate perturbation: 0.015 cm = 150 μm base, scaled 0.1–3.0× per iteration
-# → 15–450 μm range (RMS ≈ 0.26 mm).  A monitor value is the mean of n crystals
-# lying anywhere on the floor of a hole of diameter d; a point placed at random
-# on a disc has a standard deviation of d/4 in each direction, so the mean of n
-# crystals sits within about d/(4√n) of the hole centre: 0.2–0.3 mm for ~10
-# crystals in the 2.7–4.0 mm monitor holes of the 13- and 21-hole disks.
-BASE_COORDINATE_UNCERTAINTY = 0.015
+# Position shift in the Monte Carlo.  Units differ by axis: hole coordinates
+# x, y are in cm, disk heights z in mm.  Each iteration draws one factor
+# between COORDINATE_SCALE_MIN and COORDINATE_SCALE_MAX and shifts every
+# monitor position with a standard deviation of
+#   x, y:  LATERAL_SHIFT_CM × factor = 0.015 cm × 0.1–3 = 15–450 μm (RMS ≈ 0.26 mm)
+#   z:     HEIGHT_SHIFT_MM  × factor = 0.015 mm × 0.1–3 = 1.5–45 μm
+# Lateral: a monitor value is the mean of n crystals lying anywhere on the
+# floor of a hole of diameter d; a point placed at random on a disc has a
+# standard deviation of d/4 in each direction, so the mean of n crystals sits
+# within about d/(4√n) of the hole centre: 0.2–0.3 mm for ~10 crystals in the
+# 2.7–4.0 mm monitor holes of the 13- and 21-hole disks.
+# Height: the crystals lie on the hole floor, so only the height of the disk
+# in the stack is uncertain, at most 45 μm.
+LATERAL_SHIFT_CM = 0.015
+HEIGHT_SHIFT_MM = 0.015
 COORDINATE_SCALE_MIN = 0.1
 COORDINATE_SCALE_MAX = 3.0
 
 COLORS = ['red', 'blue', 'green', 'orange', 'purple', 'brown']
+
+
+def perturb_positions(coords):
+    """One Monte Carlo draw of the monitor positions: coords (n × 2 for x, y
+    in cm, or n × 3 for x, y in cm and z in mm) with a random shift of standard
+    deviation LATERAL_SHIFT_CM (x, y) and HEIGHT_SHIFT_MM (z), both multiplied
+    by one factor drawn between COORDINATE_SCALE_MIN and COORDINATE_SCALE_MAX."""
+    coords = np.asarray(coords, float)
+    factor = np.random.uniform(COORDINATE_SCALE_MIN, COORDINATE_SCALE_MAX)
+    sd = np.array([LATERAL_SHIFT_CM, LATERAL_SHIFT_CM, HEIGHT_SHIFT_MM])[:coords.shape[1]]
+    return coords + np.random.normal(0.0, 1.0, coords.shape) * (factor * sd)
 
 
 def _wls(X, y, sigma):
@@ -111,7 +130,7 @@ def lack_of_fit(X, y, sigma):
 class MonteCarloThread(QThread):
     """Fits the regression plane to perturbed copies of the input data.
 
-    Each iteration applies random coordinate noise (15–450 μm) and Gaussian
+    Each iteration shifts the positions (perturb_positions) and applies Gaussian
     perturbation of the measured values before refitting. The distribution of
     resulting coefficients propagates uncertainty from both positioning and
     measurement errors.
@@ -132,9 +151,7 @@ class MonteCarloThread(QThread):
         n_points = len(self.coords_3d)
 
         for i in range(MONTE_CARLO_ITERATIONS):
-            coord_perturbation = BASE_COORDINATE_UNCERTAINTY * np.random.uniform(
-                COORDINATE_SCALE_MIN, COORDINATE_SCALE_MAX)
-            coords_perturbed   = self.coords_3d + np.random.normal(0, coord_perturbation, (n_points, 3))
+            coords_perturbed   = perturb_positions(self.coords_3d)
             values_perturbed   = np.random.normal(self.values, self.errors)
 
             try:
@@ -208,9 +225,7 @@ class IndividualDiskMonteCarloThread(QThread):
         n_points = len(coords_2d)
 
         for i in range(MONTE_CARLO_ITERATIONS):
-            coord_perturbation = BASE_COORDINATE_UNCERTAINTY * np.random.uniform(
-                COORDINATE_SCALE_MIN, COORDINATE_SCALE_MAX)
-            coords_perturbed = coords_2d + np.random.normal(0, coord_perturbation, (n_points, 2))
+            coords_perturbed = perturb_positions(coords_2d)
             values_perturbed = np.random.normal(values, errors)
 
             try:
@@ -2366,9 +2381,7 @@ class FluxRegressionCalculator(QMainWindow):
         predictions = []
         for _ in range(n_iterations):
             try:
-                coord_perturbation = BASE_COORDINATE_UNCERTAINTY * np.random.uniform(
-                    COORDINATE_SCALE_MIN, COORDINATE_SCALE_MAX)
-                coords_perturbed = coords_original + np.random.normal(0, coord_perturbation, coords_original.shape)
+                coords_perturbed = perturb_positions(coords_original)
                 values_perturbed = np.random.normal(values, errors)
 
                 with warnings.catch_warnings(), np.errstate(all='ignore'):
@@ -2418,17 +2431,21 @@ class FluxRegressionCalculator(QMainWindow):
         Plateau & isochron and Age distribution tools.
 
         A JOINT Monte Carlo: in every iteration the flux model is fit once and
-        J is predicted at all holes in the same draw, so the per-disk covariance
+        J is predicted at all holes in the same draw, so the covariance
         captures the real cross-hole correlation (validated against the
         analytic g_i.C.g_j form).  The fit is the one the results table shows:
         each disk's own standards for an individual-disk regression, the
         standards of every enabled disk for a global 2D / 3D one.  Holes are
         keyed by their hole number; disks by the disk label; the file is keyed
         by the irradiation name.  Monitor holes keep their measured value and
-        σ (flagged in 'monitor'); unknowns take the plane.  Only the
-        within-disk correlation is stored:
-        exact for individual-disk fits, an understatement between disks for a
-        global fit (the export message says so).
+        σ (flagged in 'monitor'); unknowns take the plane.
+
+        Each disk stores the correlation between its own holes (J_corr).  A
+        global fit through several disks also correlates holes on different
+        disks; those blocks go in 'cross_disk_corr' (rows: holes of disk_a,
+        columns: holes of disk_b), tagged with the file's 'fit_id' so they are
+        only used between disks from this same fit.  Individual-disk fits are
+        independent between disks, so they have no cross blocks.
         """
         if not hasattr(self, 'regression_info'):
             QMessageBox.warning(self, "No regression",
@@ -2486,9 +2503,7 @@ class FluxRegressionCalculator(QMainWindow):
             draws = [[] for _ in hole_sets]
             for it in range(n_iter):
                 try:
-                    cp_pert = BASE_COORDINATE_UNCERTAINTY * np.random.uniform(
-                        COORDINATE_SCALE_MIN, COORDINATE_SCALE_MAX)
-                    csp = cs + np.random.normal(0, cp_pert, cs.shape)
+                    csp = perturb_positions(cs)
                     vp = np.random.normal(svals, serrs)
                     with warnings.catch_warnings(), np.errstate(all='ignore'):
                         warnings.simplefilter('ignore')
@@ -2525,6 +2540,7 @@ class FluxRegressionCalculator(QMainWindow):
                                  self._lack_of_fit(dd['standard_data'], '2d', False)))
 
         fit_ids = ({id(s) for s in all_std} if is_global else None)
+        joint = []          # (disk label, J draws) for the cross-disk blocks
         for dd, draws, (mswd, dof, scale) in jobs:
             label = dd['disk_label']
             holes = dd['all_data']
@@ -2540,6 +2556,7 @@ class FluxRegressionCalculator(QMainWindow):
                 draws = vmean + (draws - vmean) * np.where(is_mon, 1.0, scale)
             if mode == MODE_R:                          # convert R draws -> J draws
                 draws = const / draws
+            joint.append((label, draws))
             Jmean = draws.mean(axis=0)
             Jcov = np.cov(draws.T)
             # Monitors report their measured value and σ exactly (the draws
@@ -2592,6 +2609,21 @@ class FluxRegressionCalculator(QMainWindow):
                 fit_dof=int(dof),
                 sigma_scale=round(float(scale), 6),
             ))
+        # Correlation between holes on different disks of a global fit, from
+        # the same joint draws (the monitor rescaling above changes σ, not ρ).
+        cross = []
+        if is_global and len(joint) > 1:
+            C = np.cov(np.hstack([d for _, d in joint]).T)
+            sd = np.sqrt(np.clip(np.diag(C), 0, None))
+            den = np.outer(sd, sd)
+            with np.errstate(divide='ignore', invalid='ignore'):
+                rho_all = np.where(den > 0, C / den, 0.0)
+            edges = np.cumsum([0] + [d.shape[1] for _, d in joint])
+            for a in range(len(joint)):
+                for b in range(a + 1, len(joint)):
+                    blk = rho_all[edges[a]:edges[a + 1], edges[b]:edges[b + 1]]
+                    cross.append(dict(disk_a=joint[a][0], disk_b=joint[b][0],
+                                      J_corr=[[round(float(c), 6) for c in r] for r in blk]))
         self.progress_bar.setVisible(False)
 
         if not disks_out:
@@ -2603,7 +2635,10 @@ class FluxRegressionCalculator(QMainWindow):
             model=rtype + (" complex" if complex_3d else ""),
             lambdaYr=lam, stdAgeMa=t_fc, stdAgeErrMa=t_fc_err,
             stdAgeErrType="external", n_iter=n_iter, disks=disks_out,
+            fit_id=uuid.uuid4().hex,
         )
+        if cross:
+            payload['cross_disk_corr'] = cross
         path, _ = dfold.get_save_file_name(
             self, "Export flux config", f"{irr}.jflux",
             "Flux config (*.jflux);;All files (*)")
@@ -2612,17 +2647,14 @@ class FluxRegressionCalculator(QMainWindow):
         try:
             with open(path, 'w', encoding='utf-8') as fh:
                 json.dump(payload, fh, indent=2)
-            note = ("\n\nThis is a global fit through the standards of all disks: "
-                    "the J values match the results table, but the file stores the "
-                    "J correlation within each disk only, so the Plateau and "
-                    "Age distribution tools treat holes on different disks as "
-                    "independent. Export an individual-disk regression when "
-                    "samples from several disks are to be combined."
-                    if is_global and len(disks_out) > 1 else "")
+            note = ("\n\nThis is a global fit through the standards of all disks, "
+                    "so the file also stores the J correlation between holes on "
+                    "different disks."
+                    if cross else "")
             QMessageBox.information(
                 self, "Exported",
                 f"Wrote {len(disks_out)} disk(s) for irradiation '{irr}'.\n"
-                "Load this in the Plateau & isochron or Age distribution tool to combine same-disk "
+                "Load this in the Plateau & isochron or Age distribution tool to combine "
                 "samples with their true J covariance." + note)
         except Exception as e:
             QMessageBox.critical(self, "Export failed", str(e))
@@ -2919,8 +2951,7 @@ class FluxRegressionCalculator(QMainWindow):
 
                     mc_predictions = []
                     for _ in range(MONTE_CARLO_ITERATIONS):
-                        coord_perturbation = BASE_COORDINATE_UNCERTAINTY * np.random.uniform(COORDINATE_SCALE_MIN, COORDINATE_SCALE_MAX)
-                        coords_perturbed = coords_2d + np.random.normal(0, coord_perturbation, coords_2d.shape)
+                        coords_perturbed = perturb_positions(coords_2d)
                         values_perturbed = np.random.normal(values, errors)
 
                         X = np.column_stack([coords_perturbed[:, 0], coords_perturbed[:, 1], np.ones(len(train_standards))])
@@ -3004,8 +3035,7 @@ class FluxRegressionCalculator(QMainWindow):
 
                 mc_predictions = []
                 for _ in range(MONTE_CARLO_ITERATIONS):
-                    coord_perturbation = BASE_COORDINATE_UNCERTAINTY * np.random.uniform(COORDINATE_SCALE_MIN, COORDINATE_SCALE_MAX)
-                    coords_perturbed = coords_3d + np.random.normal(0, coord_perturbation, coords_3d.shape)
+                    coords_perturbed = perturb_positions(coords_3d)
                     values_perturbed = np.random.normal(values, errors)
 
                     if complex_3d:
@@ -4048,8 +4078,10 @@ class FluxRegressionCalculator(QMainWindow):
             "─" * 40,
             f"Iterations:         {MONTE_CARLO_ITERATIONS:,}",
             f"Regression mode:    {mode_label}",
-            f"Coordinate noise:   {BASE_COORDINATE_UNCERTAINTY*COORDINATE_SCALE_MIN*1e4:.1f}–"
-            f"{BASE_COORDINATE_UNCERTAINTY*COORDINATE_SCALE_MAX*1e4:.0f} μm per iteration",
+            f"Position shift x,y: {LATERAL_SHIFT_CM*COORDINATE_SCALE_MIN*1e4:.0f}–"
+            f"{LATERAL_SHIFT_CM*COORDINATE_SCALE_MAX*1e4:.0f} μm (1σ, drawn per iteration)",
+            f"Height shift z:     {HEIGHT_SHIFT_MM*COORDINATE_SCALE_MIN*1e3:.1f}–"
+            f"{HEIGHT_SHIFT_MM*COORDINATE_SCALE_MAX*1e3:.0f} μm (1σ, same factor)",
             "",
             "Error precision",
             "─" * 40,

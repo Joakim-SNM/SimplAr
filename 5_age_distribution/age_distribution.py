@@ -70,6 +70,7 @@ from arar_math import (
     full_systematics_warning, force_light,
     cfg_J, scale_sem, position_ident, combine, read_jflux,
     deserialize_disk_flux, merge_disk_flux, flux_hole_R, flux_hole_rel,
+    flux_pair_corr, serialize_xcorr,
     draw_budget_pie, file_err_div,
     METHOD_WM, METHOD_GLS, method_key,
     mono_font,
@@ -3792,11 +3793,13 @@ class ProbabilityWindow(QMainWindow):
                         for jj in range(ii + 1, len(matched)):
                             a, b = matched[ii], matched[jj]
                             ma, mb = self._flux_match(a), self._flux_match(b)
+                            rho = flux_pair_corr(self._disk_flux, ma, mb)
                             if ma[0] == mb[0]:
-                                rho = float(self._disk_flux[ma[0]]['J_corr'][ma[1], mb[1]])
                                 tag = 'same hole' if ma[1] == mb[1] else 'same disk'
+                            elif rho != 0.0:
+                                tag = 'different disk, same fit'
                             else:
-                                rho, tag = 0.0, 'different disk → independent'
+                                tag = 'different disk → independent'
                             L.append(f'      {a.name} ↔ {b.name}:  ρ = {rho:+.3f}   {tag}')
             else:
                 L += ['', '  Disk flux: loaded, but no active sample matched by disk+hole '
@@ -3835,6 +3838,7 @@ class ProbabilityWindow(QMainWindow):
                 R_sigma=(fx['R_sigma'].tolist() if fx.get('R_sigma') is not None else None),
                 lamFlux=fx.get('lamFlux'), fcFlux=fx.get('fcFlux'),
                 fcFluxErr=fx.get('fcFluxErr'),
+                fit=fx.get('fit'), xcorr=serialize_xcorr(fx),
             ))
         data = dict(
             version=3,

@@ -507,12 +507,15 @@ def match_flux_hole(disk_flux, disk, hole, irr=None, preferred=None):
 # The registry maps (irradiation, disk_id) to one entry per disk:
 #   idx {hole: index}, holes, J, J_sigma, J_corr, hole_xy, design,
 #   R, R_sigma (newer files only), lamFlux, fcFlux, fcFluxErr (the λ / FCs age
-#   the J values were computed with).
+#   the J values were computed with), fit (the fit_id of the .jflux, newer
+#   files only) and xcorr {(irradiation, other disk): n_this × n_other
+#   correlation} for the disks of a global fit through several disks.
 # Every tool reads and writes it through the functions below.
 # --------------------------------------------------------------------------
 
 def disk_flux_entry(holes, J, J_sigma, J_corr, hole_xy=(), design='',
-                    R=None, R_sigma=None, lam=None, fc=None, fc_err=None):
+                    R=None, R_sigma=None, lam=None, fc=None, fc_err=None,
+                    fit=None, xcorr=None):
     """One registry entry from plain lists."""
     holes = [str(h) for h in holes]
     entry = dict(idx={h: i for i, h in enumerate(holes)}, holes=holes,
@@ -524,6 +527,9 @@ def disk_flux_entry(holes, J, J_sigma, J_corr, hole_xy=(), design='',
         entry['R'] = np.asarray(R, float)
     if R_sigma is not None:
         entry['R_sigma'] = np.asarray(R_sigma, float)
+    if fit:
+        entry['fit'] = str(fit)
+    entry['xcorr'] = {tuple(k): np.asarray(v, float) for k, v in (xcorr or {}).items()}
     return entry
 
 
@@ -533,12 +539,22 @@ def jflux_entries(cfg):
     if cfg.get('type') != 'jflux_config':
         raise ValueError('not a jflux_config file.')
     irr = str(cfg.get('irradiation'))
+    fit = cfg.get('fit_id')
     out = {}
     for d in cfg.get('disks', []):
         out[(irr, str(d['disk_id']))] = disk_flux_entry(
             d['holes'], d['J'], d['J_sigma'], d['J_corr'], d.get('hole_xy', []),
             d.get('disk_design', ''), d.get('R'), d.get('R_sigma'),
-            cfg.get('lambdaYr'), cfg.get('stdAgeMa'), cfg.get('stdAgeErrMa'))
+            cfg.get('lambdaYr'), cfg.get('stdAgeMa'), cfg.get('stdAgeErrMa'), fit)
+    # Global fit through several disks: correlation between holes on
+    # different disks, stored once per pair and kept both ways here.
+    if fit:
+        for c in cfg.get('cross_disk_corr', []):
+            ka, kb = (irr, str(c['disk_a'])), (irr, str(c['disk_b']))
+            if ka in out and kb in out:
+                m = np.asarray(c['J_corr'], float)
+                out[ka]['xcorr'][kb] = m
+                out[kb]['xcorr'][ka] = m.T
     return out
 
 
@@ -565,8 +581,21 @@ def serialize_disk_flux(disk_flux):
             'design': fx.get('design', ''),
             'lamFlux': fx.get('lamFlux'), 'fcFlux': fx.get('fcFlux'),
             'fcFluxErr': fx.get('fcFluxErr'),
+            'fit': fx.get('fit'),
+            'xcorr': serialize_xcorr(fx),
         }
     return out
+
+
+def serialize_xcorr(fx):
+    """A registry entry's cross-disk correlations as a JSON-safe list."""
+    return [{'irr': k[0], 'disk': k[1], 'J_corr': np.asarray(m, float).tolist()}
+            for k, m in (fx.get('xcorr') or {}).items()]
+
+
+def _xcorr_from(data):
+    return {(str(c.get('irr')), str(c.get('disk'))): c.get('J_corr', [])
+            for c in (data or [])}
 
 
 def deserialize_disk_flux(data):
@@ -583,7 +612,7 @@ def deserialize_disk_flux(data):
             fx.get('holes', []), fx.get('J', []), fx.get('J_sigma', []),
             fx.get('J_corr', []), fx.get('hole_xy', []), fx.get('design', ''),
             fx.get('R'), fx.get('R_sigma'), fx.get('lamFlux'), fx.get('fcFlux'),
-            fx.get('fcFluxErr'))
+            fx.get('fcFluxErr'), fx.get('fit'), _xcorr_from(fx.get('xcorr')))
     return out
 
 
@@ -667,6 +696,21 @@ def position_ident(disk_id=None, hole_id=None, group=None, cfg=None):
     return None
 
 
+def flux_pair_corr(disk_flux, ma, mb):
+    """Correlation of the J error between two loaded disk-flux holes
+    ma, mb = ((irradiation, disk), hole_index): J_corr within one disk; the
+    cross-disk block when both disks come from the same global fit (same
+    fit_id); otherwise 0, as disks fitted separately are independent."""
+    fa = disk_flux[ma[0]]
+    if ma[0] == mb[0]:
+        return float(fa['J_corr'][ma[1], mb[1]])
+    fb = disk_flux.get(mb[0], {})
+    x = (fa.get('xcorr') or {}).get(mb[0])
+    if x is not None and fa.get('fit') and fa.get('fit') == fb.get('fit'):
+        return float(x[ma[1], mb[1]])
+    return 0.0
+
+
 def j_correlation(points, disk_flux, force=False):
     """N x N correlation of the J (flux) error between analyses.
 
@@ -685,8 +729,11 @@ def j_correlation(points, disk_flux, force=False):
                        -> J_corr[hole_i, hole_j] from the .jflux (1 for the
                           same hole; between 0 and 1 for neighbours; it can
                           be negative)
-      both matched, but to different loaded disks (e.g. 'E outer' and
-      'E inner', or two irradiations)
+      both matched to different disks of one global fit (a 3D fit through
+      several disks, same .jflux)
+                       -> the cross-disk J_corr from the .jflux
+      both matched, but to disks fitted separately (individual-disk fits,
+      other files, or two irradiations)
                        -> 0: separate flux monitors, independent
       one matched, the other not
                        -> 0: the unmatched one has its J from elsewhere
@@ -707,8 +754,7 @@ def j_correlation(points, disk_flux, force=False):
             else:
                 ma, mb = pa.get('match'), pb.get('match')
                 if ma is not None and mb is not None:
-                    r = (float(disk_flux[ma[0]]['J_corr'][ma[1], mb[1]])
-                         if ma[0] == mb[0] else 0.0)
+                    r = flux_pair_corr(disk_flux, ma, mb)
                 elif ma is not None or mb is not None:
                     r = 0.0
                 else:

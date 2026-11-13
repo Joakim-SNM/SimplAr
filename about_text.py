@@ -548,7 +548,9 @@ def build_about_html(base_dir):
     <p>in each direction: 0.2&ndash;0.3&nbsp;mm for about ten crystals in the
     2.7&ndash;4.0&nbsp;mm monitor holes of the 13- and 21-hole disks. The standard
     deviation of the shift is drawn in each iteration between 15 and 450&nbsp;&mu;m
-    (typically about 0.26&nbsp;mm).</p>
+    (typically about 0.26&nbsp;mm). The crystals lie on the hole floor, so the height
+    z (in mm) is only shifted for the uncertain height of the disk in the stack, by
+    1.5&ndash;45&nbsp;&mu;m with the same factor.</p>
     <p>If the monitors scatter about the surface more than their errors allow (weighted
     MSWD above the Wendt &amp; Carl limit for n&nbsp;&minus;&nbsp;k degrees of freedom,
     k the number of parameters), every &sigma;<sub>J</sub> is multiplied by
@@ -560,8 +562,9 @@ def build_about_html(base_dir):
     compared by leave-one-out cross-validation error, the AIC, which penalises extra
     parameters, and the reduced &chi;<sup>2</sup>, which is near 1 when the errors are
     right. J and &sigma;<sub>J</sub> can be sent to the dating tools or saved as a
-    <code>.jflux</code> file, from which Plateau &amp; isochron reads the correlation
-    between holes.</p>
+    <code>.jflux</code> file, from which Plateau &amp; isochron and Age distribution
+    read the correlation between holes. For a global fit through several disks the file
+    also holds the correlation between holes on different disks.</p>
     """
 
     # ── 8 ────────────────────────────────────────────────────────────────
@@ -602,7 +605,8 @@ def build_about_html(base_dir):
       <tr><th>Aliquots from</th><th>Correlation of J</th><th>Does J average down?</th></tr>
       <tr><td>The same hole</td><td>&rho; = 1</td><td>No</td></tr>
       <tr><td>Different holes, same disk</td><td>0 &lt; &rho; &lt; 1, from the flux model</td><td>Partly</td></tr>
-      <tr><td>Different disks or irradiations</td><td>&rho; = 0</td><td>Yes, J only</td></tr>
+      <tr><td>Different disks, one 3D fit</td><td>from the flux model</td><td>Partly</td></tr>
+      <tr><td>Different disks fitted separately, or irradiations</td><td>&rho; = 0</td><td>Yes, J only</td></tr>
       <tr><td>Different laboratories or calibrations</td><td>&rho; = 0; monitor and &lambda; also independent</td><td>J yes; monitor and &lambda; only if they differ</td></tr>
     </table>
     <p>A loaded <code>.jflux</code> file gives the correlation between holes from the
