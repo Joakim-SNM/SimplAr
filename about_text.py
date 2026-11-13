@@ -495,6 +495,11 @@ def build_about_html(base_dir):
     <p>J is measured only in the monitor holes. The tool fits a surface through the
     monitor values and predicts J, with a Monte Carlo uncertainty, at the position of
     each unknown.</p>
+    <p>The monitor values can be typed or pasted into the disk tables, or imported
+    from an .xlsx export of the Flux monitors tool (File &rarr; Import Flux monitors
+    export). A category named like C1 goes to the disk labelled C, hole 1, with its
+    reported R and SE. In J mode, J is calculated from that R with the FC age and
+    &lambda; set in this tool.</p>
 
     """ + F('jcalc_surface.png',
             'A fitted flux surface over the irradiation disk. The monitor holes are '

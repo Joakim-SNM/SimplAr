@@ -23,6 +23,7 @@ import os
 import ast
 import json
 import math
+import re
 import numpy as np
 import pandas as pd
 import warnings
@@ -1195,6 +1196,60 @@ class DiskWidget(QWidget):
                 child.setTitle(f"Disk {self.disk_number} Configuration")
                 break
 
+# ── Flux monitors export ─────────────────────────────────────────────────────
+
+def _num(v):
+    """float(v), or None when v is empty or not a finite number."""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if math.isfinite(f) else None
+
+
+def read_flux_monitors_export(path):
+    """The positions of a Flux monitors export (.xlsx) and its calibration line.
+
+    One dict per category of the Results sheet: its reported R and 1σ SE (REML
+    or weighted mean, whichever the Flux monitors tool reported) and the J it
+    exported.  Raises ValueError when the file has no R results table."""
+    from openpyxl import load_workbook
+    wb = load_workbook(path, read_only=True, data_only=True)
+    try:
+        ws = wb['Results'] if 'Results' in wb.sheetnames else wb.worksheets[0]
+        rows = [list(r) for r in ws.iter_rows(values_only=True)]
+    finally:
+        wb.close()
+    head = next((i for i, r in enumerate(rows)
+                 if r and r[0] == 'Category' and 'Reported R' in r), None)
+    if head is None:
+        raise ValueError("No table with 'Category' and 'Reported R' columns. Load an "
+                         "export of the Flux monitors tool made in 40/39 ratio mode.")
+    col = {h: k for k, h in enumerate(rows[head]) if isinstance(h, str)}
+    out = []
+    for r in rows[head + 1:]:
+        if not r or r[0] is None or not str(r[0]).strip():
+            break
+        get = lambda name: _num(r[col[name]]) if name in col and col[name] < len(r) else None
+        s1 = get('Reported SE (1σ)')
+        if s1 is None and get('Reported SE (2σ)') is not None:
+            s1 = get('Reported SE (2σ)') / 2.0
+        out.append({'category': str(r[0]).strip(), 'R': get('Reported R'),
+                    'R_sigma': s1, 'J': get('J')})
+    calib = next((r[0] for r in rows if r and isinstance(r[0], str)
+                  and r[0].startswith('Calibration for J:')), '')
+    return out, calib
+
+
+def split_position_label(label):
+    """(disk label, hole number) of a position such as 'C1', 'C-1', 'C 01' or
+    'E17'; ('', 13) for a bare number; None when it does not end in a number."""
+    m = re.match(r'^\s*(.*?)[\s_\-]*0*(\d+)\s*$', str(label))
+    if not m:
+        return None
+    return m.group(1).strip(), int(m.group(2))
+
+
 # ── Main application class ───────────────────────────────────────────────────
 
 class FluxRegressionCalculator(QMainWindow):
@@ -1425,6 +1480,12 @@ class FluxRegressionCalculator(QMainWindow):
         self.add_disk_btn = QPushButton("Add Disk")
         self.add_disk_btn.clicked.connect(self.add_disk)
         disk_controls.addWidget(self.add_disk_btn)
+        self.import_fm_btn = QPushButton("Import Flux monitors export...")
+        self.import_fm_btn.setToolTip(
+            "Fill the monitor holes from an .xlsx export of the Flux monitors tool:\n"
+            "category C1 goes to the disk labelled C, hole 1, with its reported R and SE.")
+        self.import_fm_btn.clicked.connect(lambda: self.import_flux_monitors_export())
+        disk_controls.addWidget(self.import_fm_btn)
         disk_layout.addLayout(disk_controls)
 
         # Irradiation name + flux-config export (for the Plateau & isochron and Age distribution tools)
@@ -1550,6 +1611,9 @@ class FluxRegressionCalculator(QMainWindow):
         load_action.setShortcut('Ctrl+O')
         load_action.triggered.connect(self.load_session)
         file_menu.addAction(load_action)
+        import_fm_action = QAction('Import Flux monitors export (.xlsx)...', self)
+        import_fm_action.triggered.connect(lambda: self.import_flux_monitors_export())
+        file_menu.addAction(import_fm_action)
 
         # Configuration menu
         config_menu = menubar.addMenu('Configuration')
@@ -3751,6 +3815,107 @@ class FluxRegressionCalculator(QMainWindow):
 
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Save failed: {str(e)}")
+
+    def import_flux_monitors_export(self, path=None):
+        """Fill the monitor holes from a Flux monitors export (.xlsx).
+
+        A category named like 'C1' goes to the disk labelled 'C', hole 1, with
+        its reported R and 1σ SE, ticked for the regression.  In J mode J is
+        calculated from that R with this tool's FC age and λ, so J and R stay on
+        one calibration.  A disk label no disk has yet goes to the first disk
+        without values, otherwise to a new disk."""
+        if not path:
+            path, _ = dfold.get_open_file_name(
+                self, "Import Flux monitors export", "", "Excel files (*.xlsx)",
+                tool='flux_monitors')
+            if not path:
+                return
+        try:
+            rows, calib = read_flux_monitors_export(path)
+        except Exception as e:
+            QMessageBox.critical(self, "Import failed", f"{os.path.basename(path)}:\n{e}")
+            return
+
+        by_disk, skipped = {}, []
+        for r in rows:
+            pos = split_position_label(r['category'])
+            if pos is None or not (r['R'] or 0) > 0 or not (r['R_sigma'] or 0) > 0:
+                skipped.append(r['category'])
+                continue
+            by_disk.setdefault(pos[0], []).append((pos[1], r))
+        if not by_disk:
+            QMessageBox.warning(self, "Nothing imported",
+                                "No category with a position name (e.g. C1) and a reported R.")
+            return
+
+        def label(w):
+            return w.disk_label_edit.text().strip().upper()
+
+        def has_values(w):
+            t = w.table_widget
+            return any(t.item(i, 3) and t.item(i, 3).text().strip() for i in range(t.rowCount()))
+
+        wanted = {d.upper() for d in by_disk if d}
+        target, used = {}, set()
+        for d in sorted(by_disk, key=lambda d: not any(d and label(w) == d.upper()
+                                                       for w in self.disk_widgets)):
+            w = next((w for w in self.disk_widgets if d and label(w) == d.upper()), None)
+            if w is None:
+                w = next((w for w in self.disk_widgets if w not in used
+                          and not has_values(w) and label(w) not in wanted), None)
+                if w is None:
+                    self.add_disk()
+                    w = self.disk_widgets[-1]
+                if d:
+                    w.disk_label_edit.setText(d)
+            used.add(w)
+            target[d] = w
+
+        c = self.monitor_ingrowth()
+        k = self.input_sigma
+        lines, recalculated, n = [], False, 0
+        for d, items in by_disk.items():
+            w = target[d]
+            t = w.table_widget
+            holes = []
+            for hole, r in sorted(items, key=lambda h: h[0]):
+                if not 1 <= hole <= t.rowCount():
+                    skipped.append(f"{r['category']} (disk {w.disk_label_edit.text()} has a "
+                                   f"{t.rowCount()}-hole design; choose its design, then import again)")
+                    continue
+                R, sR = r['R'], r['R_sigma']
+                if self.regression_mode == MODE_R:
+                    val, err = R, sR
+                else:
+                    val, err = c / R, c / R * sR / R
+                    if r['J'] and abs(val / r['J'] - 1) > 1e-9:
+                        recalculated = True
+                i = hole - 1
+                t.setItem(i, 0, QTableWidgetItem(r['category']))
+                t.setItem(i, 3, QTableWidgetItem(repr(float(val))))
+                t.setItem(i, 4, QTableWidgetItem(repr(float(err * k))))
+                box = t.cellWidget(i, 2)
+                if box is not None:
+                    box.setChecked(True)
+                holes.append(str(hole))
+            if holes:
+                n += len(holes)
+                lines.append(f"Disk {w.disk_label_edit.text() or w.disk_number}: "
+                             f"hole {', '.join(holes)}")
+
+        msg = [f"{n} position(s) from {os.path.basename(path)}:"] + lines
+        if self.regression_mode == MODE_R:
+            msg.append(f"\nEach hole holds the reported R and its SE (as ±{k}σ), "
+                       f"ticked for the regression.")
+        else:
+            msg.append(f"\nEach hole holds J = (e^(λt) − 1)/R from the reported R, with the "
+                       f"FC age and λ set here, and its SE (as ±{k}σ), ticked for the regression.")
+            if recalculated:
+                msg.append("The J in the export used a different calibration"
+                           + (f" ({calib.split(':', 1)[1].strip()})" if calib else "") + ".")
+        if skipped:
+            msg.append("\nNot imported: " + "; ".join(skipped))
+        QMessageBox.information(self, "Flux monitors export imported", "\n".join(msg))
 
     def load_session(self):
         """Load a previously saved session from a JSON file."""
