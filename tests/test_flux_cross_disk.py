@@ -1,4 +1,4 @@
-"""Flux regression: position shift units, and J correlation between disks.
+"""Flux regression: position shift (x, y only), and J correlation between disks.
 
 A global 3D fit through several disks correlates holes on different disks; the
 .jflux export stores that correlation and the Plateau & isochron / Age
@@ -34,20 +34,21 @@ print('Position shift:')
 f = np.array([fr.COORDINATE_SCALE_MIN, fr.COORDINATE_SCALE_MAX])
 assert np.allclose(fr.LATERAL_SHIFT_CM * 1e4 * f, [15, 450])
 ok('x, y (cm): 15–450 μm')
-assert np.allclose(fr.HEIGHT_SHIFT_MM * 1e3 * f, [1.5, 45])
-ok('z (mm): 1.5–45 μm')
 c3 = np.array([[0.3, -0.2, 20.0], [0.0, 0.5, 0.0]])
 np.random.seed(7)
 new = fr.perturb_positions(c3)
 np.random.seed(7)
 s = 0.015 * np.random.uniform(0.1, 3.0)
 old = c3 + np.random.normal(0, s, c3.shape)
-assert np.allclose(new, old, rtol=0, atol=1e-15)
-ok('same draws as before the change (z in mm, x and y in cm)')
+assert np.allclose(new[:, :2], old[:, :2], rtol=0, atol=1e-15)
+ok('x, y: the same draws as before the change')
+assert np.array_equal(new[:, 2], c3[:, 2])
+ok('z (disk height) is not shifted')
 np.random.seed(1)
-d = np.array([fr.perturb_positions(np.zeros((1, 3)))[0] for _ in range(20000)])
-assert abs(d[:, 0].std() / d[:, 2].std() - 1.0) < 0.05
-ok('z shifted by the same number in mm as x, y in cm (10× less in μm)')
+d = np.array([fr.perturb_positions(np.zeros((1, 2)))[0] for _ in range(20000)])
+rms = fr.LATERAL_SHIFT_CM * np.sqrt((0.1**2 + 0.1 * 3.0 + 3.0**2) / 3)   # RMS of σ ~ U(0.1, 3)·0.015 cm
+assert abs(d.std(axis=0).mean() / rms - 1.0) < 0.03
+ok(f'x, y shift RMS {d.std(axis=0).mean()*1e4:.0f} μm (about 0.26 mm)')
 
 print('Cross-disk J correlation:')
 fr.MONTE_CARLO_ITERATIONS = 6000

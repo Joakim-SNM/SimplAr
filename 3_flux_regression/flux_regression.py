@@ -62,21 +62,17 @@ MODE_R = 'R'   # regress on 40/39 ratios
 
 MONTE_CARLO_ITERATIONS = 15000
 
-# Position shift in the Monte Carlo.  Units differ by axis: hole coordinates
-# x, y are in cm, disk heights z in mm.  Each iteration draws one factor
-# between COORDINATE_SCALE_MIN and COORDINATE_SCALE_MAX and shifts every
-# monitor position with a standard deviation of
-#   x, y:  LATERAL_SHIFT_CM × factor = 0.015 cm × 0.1–3 = 15–450 μm (RMS ≈ 0.26 mm)
-#   z:     HEIGHT_SHIFT_MM  × factor = 0.015 mm × 0.1–3 = 1.5–45 μm
-# Lateral: a monitor value is the mean of n crystals lying anywhere on the
-# floor of a hole of diameter d; a point placed at random on a disc has a
-# standard deviation of d/4 in each direction, so the mean of n crystals sits
-# within about d/(4√n) of the hole centre: 0.2–0.3 mm for ~10 crystals in the
-# 2.7–4.0 mm monitor holes of the 13- and 21-hole disks.
-# Height: the crystals lie on the hole floor, so only the height of the disk
-# in the stack is uncertain, at most 45 μm.
+# Position shift in the Monte Carlo: x and y only.  Hole coordinates are in
+# cm.  Each iteration draws one factor between COORDINATE_SCALE_MIN and
+# COORDINATE_SCALE_MAX and shifts every monitor position in x and y with a
+# standard deviation of LATERAL_SHIFT_CM × factor = 0.015 cm × 0.1–3
+# = 15–450 μm (RMS ≈ 0.26 mm).  A monitor value is the mean of n crystals
+# lying anywhere on the floor of a hole of diameter d; a point placed at
+# random on a disc has a standard deviation of d/4 in each direction, so the
+# mean of n crystals sits within about d/(4√n) of the hole centre: 0.2–0.3 mm
+# for ~10 crystals in the 2.7–4.0 mm monitor holes of the 13- and 21-hole
+# disks.  Disk heights z (mm) are not shifted.
 LATERAL_SHIFT_CM = 0.015
-HEIGHT_SHIFT_MM = 0.015
 COORDINATE_SCALE_MIN = 0.1
 COORDINATE_SCALE_MAX = 3.0
 
@@ -84,13 +80,15 @@ COLORS = ['red', 'blue', 'green', 'orange', 'purple', 'brown']
 
 
 def perturb_positions(coords):
-    """One Monte Carlo draw of the monitor positions: coords (n × 2 for x, y
-    in cm, or n × 3 for x, y in cm and z in mm) with a random shift of standard
-    deviation LATERAL_SHIFT_CM (x, y) and HEIGHT_SHIFT_MM (z), both multiplied
-    by one factor drawn between COORDINATE_SCALE_MIN and COORDINATE_SCALE_MAX."""
+    """One Monte Carlo draw of the monitor positions.  coords is n × 2 (x, y
+    in cm) or n × 3 (x, y in cm, z in mm).  x and y are shifted with a
+    standard deviation of LATERAL_SHIFT_CM times one factor drawn between
+    COORDINATE_SCALE_MIN and COORDINATE_SCALE_MAX; z is not shifted.  A
+    random number is still drawn for z, so the x, y shifts are the same draws
+    as in earlier versions."""
     coords = np.asarray(coords, float)
     factor = np.random.uniform(COORDINATE_SCALE_MIN, COORDINATE_SCALE_MAX)
-    sd = np.array([LATERAL_SHIFT_CM, LATERAL_SHIFT_CM, HEIGHT_SHIFT_MM])[:coords.shape[1]]
+    sd = np.array([LATERAL_SHIFT_CM, LATERAL_SHIFT_CM, 0.0])[:coords.shape[1]]
     return coords + np.random.normal(0.0, 1.0, coords.shape) * (factor * sd)
 
 
@@ -4080,8 +4078,7 @@ class FluxRegressionCalculator(QMainWindow):
             f"Regression mode:    {mode_label}",
             f"Position shift x,y: {LATERAL_SHIFT_CM*COORDINATE_SCALE_MIN*1e4:.0f}–"
             f"{LATERAL_SHIFT_CM*COORDINATE_SCALE_MAX*1e4:.0f} μm (1σ, drawn per iteration)",
-            f"Height shift z:     {HEIGHT_SHIFT_MM*COORDINATE_SCALE_MIN*1e3:.1f}–"
-            f"{HEIGHT_SHIFT_MM*COORDINATE_SCALE_MAX*1e3:.0f} μm (1σ, same factor)",
+            "Height z:           not shifted",
             "",
             "Error precision",
             "─" * 40,
