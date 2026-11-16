@@ -24,9 +24,9 @@ def monitor_rows(seed=1, positions=('E1', 'E5', 'E9')):
 
         def add(gid, label, power, ar39, value, err):
             sid = f"{pos}-{gid}-{label}"
-            rows.append({'sampleId': sid, 'value40_39': value, 'uncertainty40_39': err,
-                         'value': value, 'uncertainty': err, 'measuredJ': None,
-                         'measuredJError': None, 'importedJ': None, 'importedJError': None,
+            rows.append({'sample_id': sid, 'value40_39': value, 'uncertainty40_39': err,
+                         'value': value, 'uncertainty': err, 'measured_j': None,
+                         'measured_j_error': None, 'imported_j': None, 'imported_j_error': None,
                          'power': power, 'grain_id': gid, 'ar39': ar39, 'label': label})
         for c in range(4):
             g = centre + rng.normal(0, tau)

@@ -67,9 +67,10 @@ from arar_math import (
     external_sigma_array, calibration_class, age_error_budget,
     internal_sigma_array, systematic_matrix, cfg_ingrowth,
     external_route, calibration_group_key,
-    full_systematics_warning, force_light,
+    full_systematics_warning, calibration_warning, force_light,
     cfg_J, scale_sem, position_ident, combine, read_jflux,
     deserialize_disk_flux, merge_disk_flux, flux_hole_R, flux_hole_rel,
+    flux_pair_corr, serialize_xcorr,
     draw_budget_pie, file_err_div,
     METHOD_WM, METHOD_GLS, method_key,
     mono_font,
@@ -3619,7 +3620,8 @@ class ProbabilityWindow(QMainWindow):
         ms = list(s.metas) if len(s.metas) == n else [dexp.step_meta({}) for _ in range(n)]
         lbls = s.labels if len(s.labels) == n else [''] * n
         rids = s.run_ids if len(s.run_ids) == n else [''] * n
-        _sink = dexp.TableSink(path)
+        _sink = dexp.TableSink(path, results_note='The mixture model of the sample shown: its '
+                               'components, then each analysis with its membership.')
         with _sink as fh:
             w = csv.writer(fh)
             w.writerow([f'# Mixture model of {s.name} only, as shown in the Mixture view'])
@@ -3755,7 +3757,10 @@ class ProbabilityWindow(QMainWindow):
              f"    external      ± {pr['sigma_ext']*ds:.4f} Ma     + FCs age & decay const"
              f"  [{ext_route}]"]
         if _fs_warn:
-            L.append(f"    ⚠ {_fs_warn}")
+            L.append(f"    Note: {_fs_warn}")
+        _cal_warn = calibration_warning(act[0].j_cfg)
+        if _cal_warn:
+            L.append(f"    Note: {_cal_warn}")
         if 'overdispersion' in pr:           # Vermeesch: always report ω
             zeta = pr['overdispersion'] * ds
             tail = '  (no excess scatter)' if zeta == 0 else ''
@@ -3792,11 +3797,13 @@ class ProbabilityWindow(QMainWindow):
                         for jj in range(ii + 1, len(matched)):
                             a, b = matched[ii], matched[jj]
                             ma, mb = self._flux_match(a), self._flux_match(b)
+                            rho = flux_pair_corr(self._disk_flux, ma, mb)
                             if ma[0] == mb[0]:
-                                rho = float(self._disk_flux[ma[0]]['J_corr'][ma[1], mb[1]])
                                 tag = 'same hole' if ma[1] == mb[1] else 'same disk'
+                            elif rho != 0.0:
+                                tag = 'different disk, same fit'
                             else:
-                                rho, tag = 0.0, 'different disk → independent'
+                                tag = 'different disk → independent'
                             L.append(f'      {a.name} ↔ {b.name}:  ρ = {rho:+.3f}   {tag}')
             else:
                 L += ['', '  Disk flux: loaded, but no active sample matched by disk+hole '
@@ -3835,6 +3842,7 @@ class ProbabilityWindow(QMainWindow):
                 R_sigma=(fx['R_sigma'].tolist() if fx.get('R_sigma') is not None else None),
                 lamFlux=fx.get('lamFlux'), fcFlux=fx.get('fcFlux'),
                 fcFluxErr=fx.get('fcFluxErr'),
+                fit=fx.get('fit'), xcorr=serialize_xcorr(fx),
             ))
         data = dict(
             version=3,
@@ -4289,7 +4297,7 @@ class ProbabilityWindow(QMainWindow):
         method_label = ('GLS + ML random-effects (after Vermeesch 2015 §13)'
                         if _STAT_METHOD == METHOD_GLS
                         else 'WM + √MSWD')
-        _sink = dexp.TableSink(path)
+        _sink = dexp.TableSink(path, results_note='The analyses of each sample, the sample results and the pooled result.')
         with _sink as fh:
             w = csv.writer(fh)
             w.writerow([f'# Statistics: {method_label}  |  Covariance: shared J + FCs/λ (Vermeesch 2015 §13, both methods)'])
@@ -4328,11 +4336,11 @@ class ProbabilityWindow(QMainWindow):
                         f'±{sig_lbl} Ana (Ma)', f'±{sig_lbl} Int (Ma)',
                         f'±{sig_lbl} Ext (Ma)',
                         'R_unk/R_std', f'±{sig_lbl} Ana R', f'±{sig_lbl} Int R', f'±{sig_lbl} Ext R',
-                        'MSWD', 'p-value',
-                        'Reject', 'NMAD thr', 'J mode',
-                        'J', 'σ J (1σ)', 'σ J (%)',
-                        'R_std', 'σ R_std (1σ)', 'σ R_std (%)',
-                        't_FCs (Ma)', 'σ t_FCs (Ma)', 'FC err type',
+                        'MSWD', 'p',
+                        'Reject', 'NMAD thr', 'Age source',
+                        'J', '±1σ J', '±1σ J (%)',
+                        'R standard', '±1σ R standard', '±1σ R standard (%)',
+                        'FC age (Ma)', '±1σ FC age (Ma)', 'FC err type',
                         'σ in', 'Paste tier', 'J calibration'])
             for s in self.samples:
                 r = s.wm()
@@ -4373,7 +4381,7 @@ class ProbabilityWindow(QMainWindow):
                     _rr_str, _rra_str, _rri_str, _rre_str,
                     f"{r['mswd']:.4f}",
                     f"{r.get('prob', float('nan')):.4f}",
-                    s.reject, s.nmad_thresh, mode,
+                    s.reject, s.nmad_thresh, _JMODE_DISPLAY.get(mode, mode),
                     j_val, j_err, j_pct,
                     r_val, r_err, r_pct,
                     c.get('stdAgeMa', ''), c.get('stdAgeErrMa', ''),
@@ -4390,7 +4398,7 @@ class ProbabilityWindow(QMainWindow):
                                 f'±{sig_lbl} Ana (Ma)', f'±{sig_lbl} Int (Ma)',
                                 f'±{sig_lbl} Ext (Ma)',
                                 'R_unk/R_std', f'±{sig_lbl} Ana R', f'±{sig_lbl} Int R', f'±{sig_lbl} Ext R',
-                                'MSWD', 'p-value', 'n',
+                                'MSWD', 'p', 'n',
                                 'Overdispersed', 'MSWD scale',
                                 'N position groups', 'Force corr. J'])
                     act = self._active()
@@ -4407,8 +4415,8 @@ class ProbabilityWindow(QMainWindow):
                         f"{pr['sigma_int']*ds:.8f}", f"{pr['sigma_ext']*ds:.8f}",
                         _rr_pool_str, _rr_pool_ana_str, _rr_pool_int_str, _rr_pool_ext_str,
                         f"{pr['mswd']:.4f}", f"{pr.get('prob', float('nan')):.4f}",
-                        pr['n'], pr['overdispersed'],
-                        f"{pr['mswd_scale']:.4f}", ngrp, self.corr_j])
+                        pr['n'], 'yes' if pr['overdispersed'] else 'no',
+                        f"{pr['mswd_scale']:.4f}", ngrp, 'yes' if self.corr_j else 'no'])
                     w.writerow([])
                     w.writerow(['Pool method', method_label])
                     if 'overdispersion' in pr:
@@ -4423,7 +4431,7 @@ class ProbabilityWindow(QMainWindow):
                                 else 'from the J correlation used in the pool'])
                     for g_idx, (gmembers, gshared) in enumerate(_groups, 1):
                         w.writerow([f'Position group {g_idx}',
-                                    gmembers[0].j_cfg.get('ageFluxMode', 'imported'),
+                                    _JMODE_DISPLAY.get(gmembers[0].j_cfg.get('ageFluxMode', 'imported'), ''),
                                     self._flux_desc(gmembers[0].j_cfg), gshared,
                                     ', '.join(_m.name for _m in gmembers)])
                     w.writerow(['Standard',
