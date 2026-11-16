@@ -529,12 +529,16 @@ def raw_tables(items, include_empty=False):
 # notes sheet
 # ---------------------------------------------------------------------------
 
-def notes_rows(raws=None):
-    """Rows of the Notes sheet. raws: the raw_tables() groups written."""
+RESULTS_NOTE = 'The step table, plateau and isochron results of each sample.'
+
+
+def notes_rows(raws=None, results_note=None):
+    """Rows of the Notes sheet. raws: the raw_tables() groups written;
+    results_note: what the Results sheet holds (RESULTS_NOTE when not given)."""
     raws = raws or []
     rows = [
         ['ABOUT THIS FILE'],
-        ['Sheet "Results"', 'The step table, plateau and isochron results of each sample.'],
+        ['Sheet "Results"', results_note or RESULTS_NOTE],
         ['Sheet "Constants"', 'Every constant behind the numbers (atmospheric argon, decay constants, '
                               'FC age, interferences, irradiation time, data source and signal unit).'],
     ]
@@ -553,16 +557,22 @@ def notes_rows(raws=None):
                                    'The same value follows from the 39Ar decay factor.'],
         ['Run date/time', 'Date and hour of the analysis as written in the source file '
                           '(lab clock; only differences are meaningful here).'],
-        ['Signal units', 'The unit is in every header: fA for ArArCALC and V for Mass Spec, both set '
-                         'manually (see Constants). No unit conversion is made.'],
-        ['Signals', 'Every signal column in the raw sheets is blank-corrected (baseline and blank '
-                    'subtracted). 37Ar and 39Ar are in addition decay-corrected; 36Ar, '
-                    '38Ar and 40Ar need no decay correction. Mass Spec: the file\'s own corrected signals, which '
-                    'reproduce the ratio columns of the file. ArArCALC: intercept minus blank, with 37Ar and '
-                    '39Ar multiplied by their decay factors. Mass discrimination (MDF) and the interference '
-                    '(Ca, K, Cl) corrections are NOT applied to the ArArCALC signals; ArArCALC applies MDF to '
-                    'its ratios and adds a 36Ar collector calibration that its export does not contain, so a '
-                    'ratio of these signals is not the same as ArArCALC\'s corrected ratio.'],
+    ]
+    if raws:
+        rows += [
+            ['Signal units', 'The unit is in every header of the raw sheets: the one the source file '
+                             'states, or the one set for that source (see Constants). No unit '
+                             'conversion is made.'],
+            ['Signals', 'Every signal column in the raw sheets is blank-corrected (baseline and blank '
+                        'subtracted). 37Ar and 39Ar are in addition decay-corrected; 36Ar, '
+                        '38Ar and 40Ar need no decay correction. Mass Spec: the file\'s own corrected signals, which '
+                        'reproduce the ratio columns of the file. ArArCALC: intercept minus blank, with 37Ar and '
+                        '39Ar multiplied by their decay factors. Mass discrimination (MDF) and the interference '
+                        '(Ca, K, Cl) corrections are NOT applied to the ArArCALC signals; ArArCALC applies MDF to '
+                        'its ratios and adds a 36Ar collector calibration that its export does not contain, so a '
+                        'ratio of these signals is not the same as ArArCALC\'s corrected ratio.'],
+        ]
+    rows += [
         ['FC age, decay constant', 'Used to calculate the ages when the Age source is R mode. Imported ages '
                                    'were calculated by the source software with its own constants.'],
         ['R standard', 'The monitor 40Ar*/39ArK taken from the source file. Where the ArArCALC export '
@@ -587,6 +597,7 @@ def notes_rows(raws=None):
 
 _NUM = re.compile(r'^[-+]?(\d+\.?\d*|\.\d+)([eE][-+]\d+)?$')
 _SECTIONS = ('CONSTANTS', 'STEP DATA', 'PLATEAU RESULTS', 'ISOCHRON RESULTS',
+             'FLUX REGRESSION RESULTS',
              'STACKED ISOCHRON RESULTS',
              'SAMPLE RESULTS', 'POINT DATA', 'POOLED RESULT', 'RAW SIGNALS',
              'ABOUT THIS FILE', 'CONVENTIONS', 'COLUMNS OF', 'MIXTURE')
@@ -674,8 +685,9 @@ class TableSink:
     tables appended as sections.
     """
 
-    def __init__(self, path):
+    def __init__(self, path, results_note=None):
         self.path = path
+        self.results_note = results_note
         self.is_xlsx = str(path).lower().endswith('.xlsx')
         self.raws = []
         self.raw_missing = False
@@ -702,11 +714,11 @@ class TableSink:
                 self._f.seek(0)
                 rows = list(csv.reader(self._f))
                 consts, rows = split_constants(rows)
-                _notes = notes_rows(self.raws)
+                _notes = notes_rows(self.raws, self.results_note)
                 if self.raw_missing:
                     _notes.append(['No raw-signal sheet',
-                                   'The loaded files were saved before raw signals were stored '
-                                   'in them. Re-convert the source data and reload to include them.'])
+                                   'The loaded data carry no raw signals: typed or pasted values, '
+                                   'or files converted before raw signals were stored in them.'])
                 write_xlsx(self.path, rows, self.raws, _notes, consts)
             elif self.raws:
                 w = csv.writer(self._f)

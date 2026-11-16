@@ -50,7 +50,7 @@ def t_crit(dof):
 LAMBDA_PRESETS = [
     ('Steiger & Jäger (1977)', 5.543e-10,  0.0),
     ('Min et al. (2000)',      5.463e-10,  0.054e-10),
-    ('Renne et al. (2010)',    5.5492e-10, 0.0094e-10),
+    ('Renne et al. (2010)',    5.5492e-10, 0.0093e-10),
     ('Renne et al. (2011)',    5.5305e-10, 0.0132e-10),
     ('Carter et al. (2025)',   5.5042e-10, 0.0054e-10),
 ]
@@ -507,12 +507,15 @@ def match_flux_hole(disk_flux, disk, hole, irr=None, preferred=None):
 # The registry maps (irradiation, disk_id) to one entry per disk:
 #   idx {hole: index}, holes, J, J_sigma, J_corr, hole_xy, design,
 #   R, R_sigma (newer files only), lamFlux, fcFlux, fcFluxErr (the λ / FCs age
-#   the J values were computed with).
+#   the J values were computed with), fit (the fit_id of the .jflux, newer
+#   files only) and xcorr {(irradiation, other disk): n_this × n_other
+#   correlation} for the disks of a global fit through several disks.
 # Every tool reads and writes it through the functions below.
 # --------------------------------------------------------------------------
 
 def disk_flux_entry(holes, J, J_sigma, J_corr, hole_xy=(), design='',
-                    R=None, R_sigma=None, lam=None, fc=None, fc_err=None):
+                    R=None, R_sigma=None, lam=None, fc=None, fc_err=None,
+                    fit=None, xcorr=None):
     """One registry entry from plain lists."""
     holes = [str(h) for h in holes]
     entry = dict(idx={h: i for i, h in enumerate(holes)}, holes=holes,
@@ -524,6 +527,9 @@ def disk_flux_entry(holes, J, J_sigma, J_corr, hole_xy=(), design='',
         entry['R'] = np.asarray(R, float)
     if R_sigma is not None:
         entry['R_sigma'] = np.asarray(R_sigma, float)
+    if fit:
+        entry['fit'] = str(fit)
+    entry['xcorr'] = {tuple(k): np.asarray(v, float) for k, v in (xcorr or {}).items()}
     return entry
 
 
@@ -533,12 +539,22 @@ def jflux_entries(cfg):
     if cfg.get('type') != 'jflux_config':
         raise ValueError('not a jflux_config file.')
     irr = str(cfg.get('irradiation'))
+    fit = cfg.get('fit_id')
     out = {}
     for d in cfg.get('disks', []):
         out[(irr, str(d['disk_id']))] = disk_flux_entry(
             d['holes'], d['J'], d['J_sigma'], d['J_corr'], d.get('hole_xy', []),
             d.get('disk_design', ''), d.get('R'), d.get('R_sigma'),
-            cfg.get('lambdaYr'), cfg.get('stdAgeMa'), cfg.get('stdAgeErrMa'))
+            cfg.get('lambdaYr'), cfg.get('stdAgeMa'), cfg.get('stdAgeErrMa'), fit)
+    # Global fit through several disks: correlation between holes on
+    # different disks, stored once per pair and kept both ways here.
+    if fit:
+        for c in cfg.get('cross_disk_corr', []):
+            ka, kb = (irr, str(c['disk_a'])), (irr, str(c['disk_b']))
+            if ka in out and kb in out:
+                m = np.asarray(c['J_corr'], float)
+                out[ka]['xcorr'][kb] = m
+                out[kb]['xcorr'][ka] = m.T
     return out
 
 
@@ -565,8 +581,21 @@ def serialize_disk_flux(disk_flux):
             'design': fx.get('design', ''),
             'lamFlux': fx.get('lamFlux'), 'fcFlux': fx.get('fcFlux'),
             'fcFluxErr': fx.get('fcFluxErr'),
+            'fit': fx.get('fit'),
+            'xcorr': serialize_xcorr(fx),
         }
     return out
+
+
+def serialize_xcorr(fx):
+    """A registry entry's cross-disk correlations as a JSON-safe list."""
+    return [{'irr': k[0], 'disk': k[1], 'J_corr': np.asarray(m, float).tolist()}
+            for k, m in (fx.get('xcorr') or {}).items()]
+
+
+def _xcorr_from(data):
+    return {(str(c.get('irr')), str(c.get('disk'))): c.get('J_corr', [])
+            for c in (data or [])}
 
 
 def deserialize_disk_flux(data):
@@ -583,7 +612,7 @@ def deserialize_disk_flux(data):
             fx.get('holes', []), fx.get('J', []), fx.get('J_sigma', []),
             fx.get('J_corr', []), fx.get('hole_xy', []), fx.get('design', ''),
             fx.get('R'), fx.get('R_sigma'), fx.get('lamFlux'), fx.get('fcFlux'),
-            fx.get('fcFluxErr'))
+            fx.get('fcFluxErr'), fx.get('fit'), _xcorr_from(fx.get('xcorr')))
     return out
 
 
@@ -667,6 +696,21 @@ def position_ident(disk_id=None, hole_id=None, group=None, cfg=None):
     return None
 
 
+def flux_pair_corr(disk_flux, ma, mb):
+    """Correlation of the J error between two loaded disk-flux holes
+    ma, mb = ((irradiation, disk), hole_index): J_corr within one disk; the
+    cross-disk block when both disks come from the same global fit (same
+    fit_id); otherwise 0, as disks fitted separately are independent."""
+    fa = disk_flux[ma[0]]
+    if ma[0] == mb[0]:
+        return float(fa['J_corr'][ma[1], mb[1]])
+    fb = disk_flux.get(mb[0], {})
+    x = (fa.get('xcorr') or {}).get(mb[0])
+    if x is not None and fa.get('fit') and fa.get('fit') == fb.get('fit'):
+        return float(x[ma[1], mb[1]])
+    return 0.0
+
+
 def j_correlation(points, disk_flux, force=False):
     """N x N correlation of the J (flux) error between analyses.
 
@@ -685,8 +729,11 @@ def j_correlation(points, disk_flux, force=False):
                        -> J_corr[hole_i, hole_j] from the .jflux (1 for the
                           same hole; between 0 and 1 for neighbours; it can
                           be negative)
-      both matched, but to different loaded disks (e.g. 'E outer' and
-      'E inner', or two irradiations)
+      both matched to different disks of one global fit (a 3D fit through
+      several disks, same .jflux)
+                       -> the cross-disk J_corr from the .jflux
+      both matched, but to disks fitted separately (individual-disk fits,
+      other files, or two irradiations)
                        -> 0: separate flux monitors, independent
       one matched, the other not
                        -> 0: the unmatched one has its J from elsewhere
@@ -707,8 +754,7 @@ def j_correlation(points, disk_flux, force=False):
             else:
                 ma, mb = pa.get('match'), pb.get('match')
                 if ma is not None and mb is not None:
-                    r = (float(disk_flux[ma[0]]['J_corr'][ma[1], mb[1]])
-                         if ma[0] == mb[0] else 0.0)
+                    r = flux_pair_corr(disk_flux, ma, mb)
                 elif ma is not None or mb is not None:
                     r = 0.0
                 else:
@@ -1069,26 +1115,16 @@ def r_to_age(R, err1s_R, J, J_err_frac, lam=LAMBDA_DEFAULT):
 
 def rvalue_age_external(R, sigma_R, t_std_ma, sigma_t_std_ma,
                         lam=LAMBDA_DEFAULT, sigma_lam=LAMBDA_ERR):
-    """Age and full external error by the R-value intercalibration method.
-
-    Renne et al. (2010). The sample age is written relative to a standard whose
-    age is fixed *independently of the decay constant* (an astronomically tuned
-    age), which is what makes the decay-constant term nearly cancel:
+    """Age and full external error by the R-value intercalibration method
+    (Renne et al. 2010), for a standard whose age does not depend on the decay
+    constant (an astronomically tuned age):
 
         T = (1/λ) · ln[ (e^{λ·t_std} − 1)·R + 1 ]
-
-    The external error is propagated through the three inputs that carry
-    systematic uncertainty, λ, the standard age, and the intercalibration
-    ratio R, via their exact partial derivatives:
-
         σ²_T = (∂T/∂λ)²·σ²_λ + (∂T/∂t_std)²·σ²_t_std + (∂T/∂R)²·σ²_R
 
-    Because t_std is astronomical (λ-independent), the ∂T/∂λ term is tiny; the
-    external is dominated by the R-value precision (σ_R) and the standard's
-    astronomical-age uncertainty (σ_t_std). This is the low-external route.
-
-    not valid for a jointly calibrated standard (e.g. Carter et al. 2025), where
-    the standard age and λ are covariant and cannot be varied independently.
+    The ∂T/∂λ term nearly cancels, so the external is dominated by σ_R and
+    σ_t_std.  Not valid for a jointly calibrated standard (Carter et al. 2025),
+    where the standard age and λ are covariant.
 
     Parameters
     ----------
@@ -1295,8 +1331,10 @@ def systematic_components(age_ma, cfg, include_cross=True):
             f = e / (e - 1.0)
             ext_age = cfg.get('stdAgeErrType', 'internal') == 'external'
             d_lnR = dt_dlnR(age_ma, lam)
+            # A standard age that scales as 1/λ (dt_std/dλ = −t_std/λ) gives the
+            # total derivative dt/dλ = ∂t/∂λ − (t_std/λ) ∂t/∂t_std = −t/λ.
             comps = [('FCs standard age', d_lnR * f * lam * s_std * 1e6),
-                     (lam_label, 0.0 if ext_age else d_lnR * f * t_std * 1e6 * slam)]
+                     (lam_label, 0.0 if ext_age else -age_ma * slam / lam)]
             cross_ok = ext_age
     if full:
         decay = min_full_external(
@@ -1318,9 +1356,12 @@ def external_route(cfg):
         return (f'astronomical anchor, t_A = {anc[0]:g} Ma via R(FCs/A) '
                 f'(λ nearly cancels)')
     cls, _ = calibration_box(cfg)
-    return {'astronomical': 'R-value on the FCs age (λ nearly cancels)',
-            'joint': 'joint calibration (Carter-style)'}.get(
-                cls, 'single-step J route (full λ)')
+    route = {'astronomical': 'R-value on the FCs age (λ nearly cancels)',
+             'joint': 'joint calibration (Carter-style)'}.get(
+                 cls, 'single-step J route (full λ)')
+    if calibration_warning(cfg):
+        route += '; overstated for Renne et al., see About'
+    return route
 
 
 def systematic_matrix(ages, cfgs):
@@ -1372,7 +1413,7 @@ def age_error_budget(sigma_ana, sigma_int, sigma_ext, age_ma, cfg):
 # Min et al. (2000) full external error
 # --------------------------------------------------------------------------
 #
-# Min et al. (2000, GCA 64, 73-98) propagate the *physically measured* 40K
+# Min et al. (2000, GCA 64, 73-98) propagate the measured 40K
 # decay scheme rather than a single pinned total lambda.  The two partial
 # decay constants are measured independently:
 #   lambda_e  = electron-capture branch  40K -> 40Ar   ("lambda_40Ar")
@@ -1401,7 +1442,7 @@ def min_full_external(age_ma, sigma_int_ma=0.0, sigma_std_ma=0.0,
                       decay_set=MIN_DECAY_DEFAULT, include_abundance=False):
     """Min et al. (2000) full external error (Ma, 1sigma).
 
-    Propagates the two 40K partial decay constants *independently* (Min's
+    Propagates the two 40K partial decay constants independently (Min's
     hierarchical scheme, no covariance) through the K-Ar-equivalent age
     equation with branching,
         t = (1/lambda) * ln[1 + (lambda/lambda_e) * D],   lambda = lambda_e + lambda_b,
@@ -1463,32 +1504,22 @@ def min_full_external(age_ma, sigma_int_ma=0.0, sigma_std_ma=0.0,
 
 
 # --------------------------------------------------------------------------
-# External-error boxes  (which calibration computes which way)
+# External error: which calibration is propagated which way
 # --------------------------------------------------------------------------
 #
-# There are two propagation regimes, not three:
+# Box 1, intercalibrated (default).  The standard age is fixed independently
+#   of lambda (astronomical tuning) or jointly with it (Carter), so lambda
+#   nearly cancels in the R-value form and the external is dominated by the
+#   standard age.  The two cases differ only in cov(lambda, t_std): 0 for an
+#   astronomical age, the calibration's own value for a joint fit.
 #
-#   BOX 1 - intercalibrated (the default, "correct low error").
-#           The standard age is fixed independently of lambda (astronomical
-#           tuning) or jointly with it (Carter), so lambda cancels in the
-#           R-value form and the external is dominated by the standard age.
-#           This is the right external for all routine comparisons, including
-#           against U-Pb.  Astronomical anchors and jointly calibrated ones
-#           (Carter, Renne 2010/11) are the same box; they differ only by the
-#           covariance term cov(lambda, t_std): 0 for astronomical, the
-#           calibration's value for a joint fit.
-#
-#   BOX 2 - Min et al. (2000) full external (opt-in, "full systematics").
-#           Propagates the independently measured physical 40K decay scheme
-#           (lambda_e, lambda_b) with its full ~1-2.5% uncertainty, without
-#           cancellation.  This is a conservative / independence stance (Min's
-#           purpose was an independent test of Ar/Ar against U-Pb), not a
-#           "compare to U-Pb" switch: a modern calibration is already U-Pb
-#           comparable via Box 1.  It is only coherent when you are not also
-#           trusting a jointly calibrated lambda.
+# Box 2, Min et al. (2000) full external (opt-in).  Propagates the measured
+#   40K decay scheme (lambda_e, lambda_b) without cancellation.  It treats the
+#   decay constants as independent of the standard, so it should not be
+#   combined with a jointly calibrated lambda (see full_systematics_warning).
 
 def calibration_box(cfg):
-    """(regime, cov) for a calibration's *default* (Box 1) external.
+    """(regime, cov) for a calibration's default (Box 1) external.
 
     regime is 'astronomical' (cov=0), 'joint' (cov=Carter's value), or 'other'
     (legacy physical-lambda presets that fall back to the J-fraction route).
@@ -1519,15 +1550,37 @@ def calibration_group_key(cfg):
             calibration_box(cfg)[0])
 
 
-def full_systematics_warning(cfg):
-    """Return a warning string if the Min full-external stance is incoherent
-    with the selected calibration, else ''.
+# Renne et al. (2010, 2011) calibrated the FCs age and the 40K decay constants
+# jointly, but the covariances they publish (2010 Table 4b; 2011 Table 1) are
+# rounded too far to propagate below about 1 Ga: the matrix is not positive
+# definite and the age uncertainty from it falls well short of their own Monte
+# Carlo values (2010 Table 5).  Their Monte Carlo triplets (2010, EA-3) are not
+# included, so these presets go through the single-step route with the FCs age
+# and λ independent, which overstates the external error.
+RENNE_JOINT_NAMES = ('Renne et al. (2010)', 'Renne et al. (2011)')
 
-    Applying Min's large physical decay-constant uncertainty on top of a
-    lambda that was pinned by a joint calibration (Carter, Renne 2010/11)
-    double-counts confidence: you would be using a lambda *value* you got by
-    trusting U-Pb while attaching an uncertainty that says you do not trust it.
-    """
+
+def calibration_warning(cfg):
+    """A warning when the FCs age is that of Renne et al. (2010) or (2011),
+    else ''."""
+    age = cfg.get('stdAgeMa')
+    if age is None:
+        return ''
+    for name, a, _e, _x in FC_PRESETS:
+        if name in RENNE_JOINT_NAMES and abs(a - float(age)) < 5e-4:
+            return (f'{name}: the FCs age and λ were calibrated together, but their '
+                    'published covariances are too rounded to propagate, so SimplAr '
+                    'treats them as independent. The external error is overstated, '
+                    'by about a factor of four at 56 Ma. Internal errors are not '
+                    'affected.')
+    return ''
+
+
+def full_systematics_warning(cfg):
+    """A warning when the Min full external is combined with a jointly
+    calibrated lambda (Carter), else ''.  The joint lambda was fixed with the
+    help of U-Pb ages; the Min uncertainty treats lambda as independent of
+    them, so the two do not belong together."""
     cls, _ = calibration_box(cfg)
     if cls == 'joint':
         return ('Full-systematics (Min) uses the independent physical decay '

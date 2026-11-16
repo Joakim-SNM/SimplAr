@@ -23,6 +23,8 @@ import os
 import ast
 import json
 import math
+import re
+import uuid
 import numpy as np
 import pandas as pd
 import warnings
@@ -35,6 +37,7 @@ from arar_math import (
     fc_ingrowth, mswd_critical, mswd_classify, mono_font,
 )
 import data_folders as dfold
+import data_export as dexp
 
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QVBoxLayout, QHBoxLayout, QWidget, QPushButton,
@@ -59,19 +62,37 @@ MODE_J = 'J'   # regress on J values
 MODE_R = 'R'   # regress on 40/39 ratios
 
 MONTE_CARLO_ITERATIONS = 15000
+MONTE_CARLO_SEED = 0      # every Monte Carlo run starts from this seed, so the same
+                          # input always gives the same J and σ
 
-# Hole coordinates are in cm (the 21-hole disk's outer holes are 4.7 mm apart).
-# Coordinate perturbation: 0.015 cm = 150 μm base, scaled 0.1–3.0× per iteration
-# → 15–450 μm range (RMS ≈ 0.26 mm).  A monitor value is the mean of n crystals
-# lying anywhere on the floor of a hole of diameter d; a point placed at random
-# on a disc has a standard deviation of d/4 in each direction, so the mean of n
-# crystals sits within about d/(4√n) of the hole centre: 0.2–0.3 mm for ~10
-# crystals in the 2.7–4.0 mm monitor holes of the 13- and 21-hole disks.
-BASE_COORDINATE_UNCERTAINTY = 0.015
+# Position shift in the Monte Carlo: x and y only.  Hole coordinates are in
+# cm.  Each iteration draws one factor between COORDINATE_SCALE_MIN and
+# COORDINATE_SCALE_MAX and shifts every monitor position in x and y with a
+# standard deviation of LATERAL_SHIFT_CM × factor = 0.015 cm × 0.1–3
+# = 15–450 μm (RMS ≈ 0.26 mm).  A monitor value is the mean of n crystals
+# lying anywhere on the floor of a hole of diameter d; a point placed at
+# random on a disc has a standard deviation of d/4 in each direction, so the
+# mean of n crystals sits within about d/(4√n) of the hole centre: 0.2–0.3 mm
+# for ~10 crystals in the 2.7–4.0 mm monitor holes of the 13- and 21-hole
+# disks.  Disk heights z (mm) are not shifted.
+LATERAL_SHIFT_CM = 0.015
 COORDINATE_SCALE_MIN = 0.1
 COORDINATE_SCALE_MAX = 3.0
 
 COLORS = ['red', 'blue', 'green', 'orange', 'purple', 'brown']
+
+
+def perturb_positions(coords, rng=np.random):
+    """One Monte Carlo draw of the monitor positions, from the generator rng.  coords is n × 2 (x, y
+    in cm) or n × 3 (x, y in cm, z in mm).  x and y are shifted with a
+    standard deviation of LATERAL_SHIFT_CM times one factor drawn between
+    COORDINATE_SCALE_MIN and COORDINATE_SCALE_MAX; z is not shifted.  A
+    random number is still drawn for z, so the x, y shifts are the same draws
+    as in earlier versions."""
+    coords = np.asarray(coords, float)
+    factor = rng.uniform(COORDINATE_SCALE_MIN, COORDINATE_SCALE_MAX)
+    sd = np.array([LATERAL_SHIFT_CM, LATERAL_SHIFT_CM, 0.0])[:coords.shape[1]]
+    return coords + rng.normal(0.0, 1.0, coords.shape) * (factor * sd)
 
 
 def _wls(X, y, sigma):
@@ -110,7 +131,7 @@ def lack_of_fit(X, y, sigma):
 class MonteCarloThread(QThread):
     """Fits the regression plane to perturbed copies of the input data.
 
-    Each iteration applies random coordinate noise (15–450 μm) and Gaussian
+    Each iteration shifts the positions (perturb_positions) and applies Gaussian
     perturbation of the measured values before refitting. The distribution of
     resulting coefficients propagates uncertainty from both positioning and
     measurement errors.
@@ -130,11 +151,10 @@ class MonteCarloThread(QThread):
         results = []
         n_points = len(self.coords_3d)
 
+        rng = np.random.default_rng(MONTE_CARLO_SEED)
         for i in range(MONTE_CARLO_ITERATIONS):
-            coord_perturbation = BASE_COORDINATE_UNCERTAINTY * np.random.uniform(
-                COORDINATE_SCALE_MIN, COORDINATE_SCALE_MAX)
-            coords_perturbed   = self.coords_3d + np.random.normal(0, coord_perturbation, (n_points, 3))
-            values_perturbed   = np.random.normal(self.values, self.errors)
+            coords_perturbed   = perturb_positions(self.coords_3d, rng)
+            values_perturbed   = rng.normal(self.values, self.errors)
 
             try:
                 with warnings.catch_warnings(), np.errstate(all='ignore'):
@@ -206,11 +226,10 @@ class IndividualDiskMonteCarloThread(QThread):
         disk_results = []
         n_points = len(coords_2d)
 
+        rng = np.random.default_rng(MONTE_CARLO_SEED)
         for i in range(MONTE_CARLO_ITERATIONS):
-            coord_perturbation = BASE_COORDINATE_UNCERTAINTY * np.random.uniform(
-                COORDINATE_SCALE_MIN, COORDINATE_SCALE_MAX)
-            coords_perturbed = coords_2d + np.random.normal(0, coord_perturbation, (n_points, 2))
-            values_perturbed = np.random.normal(values, errors)
+            coords_perturbed = perturb_positions(coords_2d, rng)
+            values_perturbed = rng.normal(values, errors)
 
             try:
                 with warnings.catch_warnings(), np.errstate(all='ignore'):
@@ -1195,6 +1214,60 @@ class DiskWidget(QWidget):
                 child.setTitle(f"Disk {self.disk_number} Configuration")
                 break
 
+# ── Flux monitors export ─────────────────────────────────────────────────────
+
+def _num(v):
+    """float(v), or None when v is empty or not a finite number."""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if math.isfinite(f) else None
+
+
+def read_flux_monitors_export(path):
+    """The positions of a Flux monitors export (.xlsx) and its calibration line.
+
+    One dict per category of the Results sheet: its reported R and 1σ SE (REML
+    or weighted mean, whichever the Flux monitors tool reported) and the J it
+    exported.  Raises ValueError when the file has no R results table."""
+    from openpyxl import load_workbook
+    wb = load_workbook(path, read_only=True, data_only=True)
+    try:
+        ws = wb['Results'] if 'Results' in wb.sheetnames else wb.worksheets[0]
+        rows = [list(r) for r in ws.iter_rows(values_only=True)]
+    finally:
+        wb.close()
+    head = next((i for i, r in enumerate(rows)
+                 if r and r[0] == 'Category' and 'Reported R' in r), None)
+    if head is None:
+        raise ValueError("No table with 'Category' and 'Reported R' columns. Load an "
+                         "export of the Flux monitors tool made in 40/39 ratio mode.")
+    col = {h: k for k, h in enumerate(rows[head]) if isinstance(h, str)}
+    out = []
+    for r in rows[head + 1:]:
+        if not r or r[0] is None or not str(r[0]).strip():
+            break
+        get = lambda name: _num(r[col[name]]) if name in col and col[name] < len(r) else None
+        s1 = get('Reported SE (1σ)')
+        if s1 is None and get('Reported SE (2σ)') is not None:
+            s1 = get('Reported SE (2σ)') / 2.0
+        out.append({'category': str(r[0]).strip(), 'R': get('Reported R'),
+                    'R_sigma': s1, 'J': get('J')})
+    calib = next((r[0] for r in rows if r and isinstance(r[0], str)
+                  and r[0].startswith('Calibration for J:')), '')
+    return out, calib
+
+
+def split_position_label(label):
+    """(disk label, hole number) of a position such as 'C1', 'C-1', 'C 01' or
+    'E17'; ('', 13) for a bare number; None when it does not end in a number."""
+    m = re.match(r'^\s*(.*?)[\s_\-]*0*(\d+)\s*$', str(label))
+    if not m:
+        return None
+    return m.group(1).strip(), int(m.group(2))
+
+
 # ── Main application class ───────────────────────────────────────────────────
 
 class FluxRegressionCalculator(QMainWindow):
@@ -1425,6 +1498,12 @@ class FluxRegressionCalculator(QMainWindow):
         self.add_disk_btn = QPushButton("Add Disk")
         self.add_disk_btn.clicked.connect(self.add_disk)
         disk_controls.addWidget(self.add_disk_btn)
+        self.import_fm_btn = QPushButton("Import Flux monitors export...")
+        self.import_fm_btn.setToolTip(
+            "Fill the monitor holes from an .xlsx export of the Flux monitors tool:\n"
+            "category C1 goes to the disk labelled C, hole 1, with its reported R and SE.")
+        self.import_fm_btn.clicked.connect(lambda: self.import_flux_monitors_export())
+        disk_controls.addWidget(self.import_fm_btn)
         disk_layout.addLayout(disk_controls)
 
         # Irradiation name + flux-config export (for the Plateau & isochron and Age distribution tools)
@@ -1550,6 +1629,9 @@ class FluxRegressionCalculator(QMainWindow):
         load_action.setShortcut('Ctrl+O')
         load_action.triggered.connect(self.load_session)
         file_menu.addAction(load_action)
+        import_fm_action = QAction('Import Flux monitors export (.xlsx)...', self)
+        import_fm_action.triggered.connect(lambda: self.import_flux_monitors_export())
+        file_menu.addAction(import_fm_action)
 
         # Configuration menu
         config_menu = menubar.addMenu('Configuration')
@@ -1810,15 +1892,15 @@ class FluxRegressionCalculator(QMainWindow):
                                   regression_type='2d'):
         """Validate data requirements for regression."""
         if len(all_disk_data) == 0:
-            QMessageBox.warning(self, "Error", "No disks are enabled for regression!")
+            QMessageBox.warning(self, "Error", "No disks are enabled for regression.")
             return False
 
         if len(all_standard_data) < 3:
-            QMessageBox.warning(self, "Error", "Need at least 3 standard holes for regression!")
+            QMessageBox.warning(self, "Error", "Need at least 3 standard holes for regression.")
             return False
 
         if complex_3d and len(all_standard_data) < 8:
-            QMessageBox.warning(self, "Error", "Need at least 8 standard holes for complex 3D regression!")
+            QMessageBox.warning(self, "Error", "Need at least 8 standard holes for complex 3D regression.")
             return False
 
         # A 3D fit with every monitor at one height has no information on the
@@ -1853,7 +1935,7 @@ class FluxRegressionCalculator(QMainWindow):
             self.enable_all_buttons()
 
             if len(mc_results) == 0:
-                QMessageBox.warning(self, "Error", "Monte Carlo simulation failed!")
+                QMessageBox.warning(self, "Error", "Monte Carlo simulation failed.")
                 return
 
             # Calculate mean coefficients and uncertainties
@@ -2069,7 +2151,7 @@ class FluxRegressionCalculator(QMainWindow):
 
         enabled_count = len(processed_disk_data)
         total_count = len(self.disk_widgets)
-        status_msg = f"{regression_label} regression calculation completed!\n"
+        status_msg = f"{regression_label} regression calculated.\n"
         status_msg += f"Used {enabled_count} of {total_count} disks in regression."
         _all_std = [s for dd in processed_disk_data for s in dd['standard_data']]
         status_msg += "\n\n" + self._lack_of_fit_text(
@@ -2088,7 +2170,7 @@ class FluxRegressionCalculator(QMainWindow):
                     enabled_disks.append(disk_data)
 
             if len(enabled_disks) == 0:
-                QMessageBox.warning(self, "Error", "No enabled disks with sufficient standards!")
+                QMessageBox.warning(self, "Error", "No enabled disks with sufficient standards.")
                 return
 
             # Start Monte Carlo calculation
@@ -2114,7 +2196,7 @@ class FluxRegressionCalculator(QMainWindow):
             self.enable_all_buttons()
 
             if len(all_disk_results) == 0:
-                QMessageBox.warning(self, "Error", "Monte Carlo simulation failed!")
+                QMessageBox.warning(self, "Error", "Monte Carlo simulation failed.")
                 return
 
             # Process each disk's results
@@ -2140,8 +2222,8 @@ class FluxRegressionCalculator(QMainWindow):
                                        dd['standard_data'], '2d', False)
                 for dd in processed_disks)
             QMessageBox.information(self, "Success",
-                                  f"Individual regressions calculated for {len(processed_disks)} disks using Monte Carlo!\n"
-                                  f"Each disk calculated independently with {MONTE_CARLO_ITERATIONS:,} iterations.\n\n"
+                                  f"Individual regressions calculated for {len(processed_disks)} disk(s).\n"
+                                  f"Each disk fitted on its own, {MONTE_CARLO_ITERATIONS:,} iterations.\n\n"
                                   + fit_lines)
 
         except Exception as e:
@@ -2255,7 +2337,7 @@ class FluxRegressionCalculator(QMainWindow):
 
         predictions = np.array(predictions)
         _, _, scale = self._lack_of_fit(standards, regression_type, complex_3d)
-        return np.mean(predictions), np.std(predictions) * scale
+        return np.mean(predictions), np.std(predictions, ddof=1) * scale
 
     def _lack_of_fit(self, standards, regression_type, complex_3d):
         """(MSWD, dof, scale) of the weighted fit through ``standards`` (see
@@ -2300,12 +2382,11 @@ class FluxRegressionCalculator(QMainWindow):
             coords_original = np.array([s['coordinates_3d'] for s in standards])
 
         predictions = []
+        rng = np.random.default_rng(MONTE_CARLO_SEED)
         for _ in range(n_iterations):
             try:
-                coord_perturbation = BASE_COORDINATE_UNCERTAINTY * np.random.uniform(
-                    COORDINATE_SCALE_MIN, COORDINATE_SCALE_MAX)
-                coords_perturbed = coords_original + np.random.normal(0, coord_perturbation, coords_original.shape)
-                values_perturbed = np.random.normal(values, errors)
+                coords_perturbed = perturb_positions(coords_original, rng)
+                values_perturbed = rng.normal(values, errors)
 
                 with warnings.catch_warnings(), np.errstate(all='ignore'):
                     warnings.simplefilter('ignore')
@@ -2354,17 +2435,21 @@ class FluxRegressionCalculator(QMainWindow):
         Plateau & isochron and Age distribution tools.
 
         A JOINT Monte Carlo: in every iteration the flux model is fit once and
-        J is predicted at all holes in the same draw, so the per-disk covariance
+        J is predicted at all holes in the same draw, so the covariance
         captures the real cross-hole correlation (validated against the
         analytic g_i.C.g_j form).  The fit is the one the results table shows:
         each disk's own standards for an individual-disk regression, the
         standards of every enabled disk for a global 2D / 3D one.  Holes are
         keyed by their hole number; disks by the disk label; the file is keyed
         by the irradiation name.  Monitor holes keep their measured value and
-        σ (flagged in 'monitor'); unknowns take the plane.  Only the
-        within-disk correlation is stored:
-        exact for individual-disk fits, an understatement between disks for a
-        global fit (the export message says so).
+        σ (flagged in 'monitor'); unknowns take the plane.
+
+        Each disk stores the correlation between its own holes (J_corr).  A
+        global fit through several disks also correlates holes on different
+        disks; those blocks go in 'cross_disk_corr' (rows: holes of disk_a,
+        columns: holes of disk_b), tagged with the file's 'fit_id' so they are
+        only used between disks from this same fit.  Individual-disk fits are
+        independent between disks, so they have no cross blocks.
         """
         if not hasattr(self, 'regression_info'):
             QMessageBox.warning(self, "No regression",
@@ -2420,12 +2505,11 @@ class FluxRegressionCalculator(QMainWindow):
             mon_cols = [[(j, std_idx[id(h)]) for j, h in enumerate(holes) if id(h) in std_idx]
                         for holes in hole_sets]
             draws = [[] for _ in hole_sets]
+            rng = np.random.default_rng(MONTE_CARLO_SEED)
             for it in range(n_iter):
                 try:
-                    cp_pert = BASE_COORDINATE_UNCERTAINTY * np.random.uniform(
-                        COORDINATE_SCALE_MIN, COORDINATE_SCALE_MAX)
-                    csp = cs + np.random.normal(0, cp_pert, cs.shape)
-                    vp = np.random.normal(svals, serrs)
+                    csp = perturb_positions(cs, rng)
+                    vp = rng.normal(svals, serrs)
                     with warnings.catch_warnings(), np.errstate(all='ignore'):
                         warnings.simplefilter('ignore')
                         rows = [self._jflux_predict_all(csp, vp, holes, rtype, complex_3d,
@@ -2461,6 +2545,7 @@ class FluxRegressionCalculator(QMainWindow):
                                  self._lack_of_fit(dd['standard_data'], '2d', False)))
 
         fit_ids = ({id(s) for s in all_std} if is_global else None)
+        joint = []          # (disk label, J draws) for the cross-disk blocks
         for dd, draws, (mswd, dof, scale) in jobs:
             label = dd['disk_label']
             holes = dd['all_data']
@@ -2476,6 +2561,7 @@ class FluxRegressionCalculator(QMainWindow):
                 draws = vmean + (draws - vmean) * np.where(is_mon, 1.0, scale)
             if mode == MODE_R:                          # convert R draws -> J draws
                 draws = const / draws
+            joint.append((label, draws))
             Jmean = draws.mean(axis=0)
             Jcov = np.cov(draws.T)
             # Monitors report their measured value and σ exactly (the draws
@@ -2528,6 +2614,21 @@ class FluxRegressionCalculator(QMainWindow):
                 fit_dof=int(dof),
                 sigma_scale=round(float(scale), 6),
             ))
+        # Correlation between holes on different disks of a global fit, from
+        # the same joint draws (the monitor rescaling above changes σ, not ρ).
+        cross = []
+        if is_global and len(joint) > 1:
+            C = np.cov(np.hstack([d for _, d in joint]).T)
+            sd = np.sqrt(np.clip(np.diag(C), 0, None))
+            den = np.outer(sd, sd)
+            with np.errstate(divide='ignore', invalid='ignore'):
+                rho_all = np.where(den > 0, C / den, 0.0)
+            edges = np.cumsum([0] + [d.shape[1] for _, d in joint])
+            for a in range(len(joint)):
+                for b in range(a + 1, len(joint)):
+                    blk = rho_all[edges[a]:edges[a + 1], edges[b]:edges[b + 1]]
+                    cross.append(dict(disk_a=joint[a][0], disk_b=joint[b][0],
+                                      J_corr=[[round(float(c), 6) for c in r] for r in blk]))
         self.progress_bar.setVisible(False)
 
         if not disks_out:
@@ -2539,7 +2640,10 @@ class FluxRegressionCalculator(QMainWindow):
             model=rtype + (" complex" if complex_3d else ""),
             lambdaYr=lam, stdAgeMa=t_fc, stdAgeErrMa=t_fc_err,
             stdAgeErrType="external", n_iter=n_iter, disks=disks_out,
+            fit_id=uuid.uuid4().hex,
         )
+        if cross:
+            payload['cross_disk_corr'] = cross
         path, _ = dfold.get_save_file_name(
             self, "Export flux config", f"{irr}.jflux",
             "Flux config (*.jflux);;All files (*)")
@@ -2548,17 +2652,14 @@ class FluxRegressionCalculator(QMainWindow):
         try:
             with open(path, 'w', encoding='utf-8') as fh:
                 json.dump(payload, fh, indent=2)
-            note = ("\n\nThis is a global fit through the standards of all disks: "
-                    "the J values match the results table, but the file stores the "
-                    "J correlation within each disk only, so the Plateau and "
-                    "Age distribution tools treat holes on different disks as "
-                    "independent. Export an individual-disk regression when "
-                    "samples from several disks are to be combined."
-                    if is_global and len(disks_out) > 1 else "")
+            note = ("\n\nThis is a global fit through the standards of all disks, "
+                    "so the file also stores the J correlation between holes on "
+                    "different disks."
+                    if cross else "")
             QMessageBox.information(
                 self, "Exported",
                 f"Wrote {len(disks_out)} disk(s) for irradiation '{irr}'.\n"
-                "Load this in the Plateau & isochron or Age distribution tool to combine same-disk "
+                "Load this in the Plateau & isochron or Age distribution tool to combine "
                 "samples with their true J covariance." + note)
         except Exception as e:
             QMessageBox.critical(self, "Export failed", str(e))
@@ -2710,11 +2811,11 @@ class FluxRegressionCalculator(QMainWindow):
                     all_standards.extend(disk_data['standard_data'])
 
             if len(enabled_disks) < 2:
-                QMessageBox.warning(self, "Error", "Need at least 2 enabled disks for method comparison!")
+                QMessageBox.warning(self, "Error", "Need at least 2 enabled disks for method comparison.")
                 return
 
             if len(all_standards) < 8:
-                QMessageBox.warning(self, "Error", "Need at least 8 total standards for meaningful comparison!")
+                QMessageBox.warning(self, "Error", "Need at least 8 total standards for meaningful comparison.")
                 return
 
             if self._n_heights(all_standards) < 2:
@@ -2854,10 +2955,10 @@ class FluxRegressionCalculator(QMainWindow):
                         errors = np.array([s['j_error'] for s in train_standards])
 
                     mc_predictions = []
+                    rng = np.random.default_rng(MONTE_CARLO_SEED)
                     for _ in range(MONTE_CARLO_ITERATIONS):
-                        coord_perturbation = BASE_COORDINATE_UNCERTAINTY * np.random.uniform(COORDINATE_SCALE_MIN, COORDINATE_SCALE_MAX)
-                        coords_perturbed = coords_2d + np.random.normal(0, coord_perturbation, coords_2d.shape)
-                        values_perturbed = np.random.normal(values, errors)
+                        coords_perturbed = perturb_positions(coords_2d, rng)
+                        values_perturbed = rng.normal(values, errors)
 
                         X = np.column_stack([coords_perturbed[:, 0], coords_perturbed[:, 1], np.ones(len(train_standards))])
                         try:
@@ -2939,10 +3040,10 @@ class FluxRegressionCalculator(QMainWindow):
                     errors = np.array([s['j_error'] for s in train_standards])
 
                 mc_predictions = []
+                rng = np.random.default_rng(MONTE_CARLO_SEED)
                 for _ in range(MONTE_CARLO_ITERATIONS):
-                    coord_perturbation = BASE_COORDINATE_UNCERTAINTY * np.random.uniform(COORDINATE_SCALE_MIN, COORDINATE_SCALE_MAX)
-                    coords_perturbed = coords_3d + np.random.normal(0, coord_perturbation, coords_3d.shape)
-                    values_perturbed = np.random.normal(values, errors)
+                    coords_perturbed = perturb_positions(coords_3d, rng)
+                    values_perturbed = rng.normal(values, errors)
 
                     if complex_3d:
                         x, y, z = coords_perturbed[:, 0], coords_perturbed[:, 1], coords_perturbed[:, 2]
@@ -3060,13 +3161,12 @@ class FluxRegressionCalculator(QMainWindow):
             else:
                 table_text += f"{method:<15} {'Failed':<12} {'N/A':<10} {'N/A':<8} {data['n_params']:<8} {data['standards_per_param']:<10.1f} {'N/A':<6}\n"
 
-        table_text += "\n\nMetric Explanations:\n"
-        table_text += "• CV RMSE: Cross-validation Root Mean Square Error (lower = better prediction accuracy)\n"
-        table_text += "• AIC: Akaike Information Criterion (lower = better balance of fit vs complexity)\n"
-        table_text += (f"• χ²ᵣₑᵈ: Reduced chi-squared of the leave-one-out residuals; within the Wendt & Carl 95% "
-                       f"limits for n = {n_standards} ({max(0.0, 1 - 2 * math.sqrt(2 / n_standards)):.2f}–{mswd_critical(n_standards + 1):.2f}) = realistic, "
-                       "below = conservative, above = overconfident\n")
-        table_text += "• Standards/Parameter: Ratio indicating overfitting risk (≥3 recommended, <2 risky)\n\n"
+        table_text += "\n\nCV RMSE: root-mean-square error of the leave-one-out predictions (lower is better).\n"
+        table_text += "AIC: Akaike information criterion (lower is better).\n"
+        table_text += (f"χ²ᵣₑᵈ: reduced χ² of the leave-one-out residuals; inside the Wendt & Carl 95% "
+                       f"limits for n = {n_standards} ({max(0.0, 1 - 2 * math.sqrt(2 / n_standards)):.2f}–{mswd_critical(n_standards + 1):.2f}) the "
+                       "uncertainties are realistic, below it too large, above it too small.\n")
+        table_text += "Std/Param: monitors per fitted parameter (3 or more recommended, below 2 overfits).\n\n"
 
         # Add recommendation
         best_method = sorted_methods[0][0] if sorted_methods[0][1]['rmse'] != float('inf') else None
@@ -3074,7 +3174,7 @@ class FluxRegressionCalculator(QMainWindow):
             table_text += self._generate_method_recommendation(best_method, sorted_methods,
                                                                n_standards)
         else:
-            table_text += "RECOMMENDATION: Unable to determine - all methods failed\n"
+            table_text += "No model could be fitted.\n"
 
         return table_text
 
@@ -3087,7 +3187,7 @@ class FluxRegressionCalculator(QMainWindow):
         predicted without itself), the rule the other tools use for the MSWD."""
         def realism(chi2):
             return mswd_classify(chi2, n_standards + 1)
-        recommendation_text = f"RECOMMENDATION: {best_method}\n"
+        recommendation_text = f"Lowest prediction error: {best_method}\n"
         best_data = sorted_methods[0][1]
 
         reasons = []
@@ -3101,32 +3201,32 @@ class FluxRegressionCalculator(QMainWindow):
         elif best_data['standards_per_param'] >= 2:
             warnings.append("borderline standards-to-parameters ratio")
         else:
-            warnings.append("WARNING: low standards-to-parameters ratio (high overfitting risk)")
+            warnings.append("few monitors per parameter (risk of overfitting)")
 
         if best_data['chi_squared'] != float('inf'):
             verdict = realism(best_data['chi_squared'])
             if verdict == 'acceptable':
-                reasons.append("realistic uncertainty estimates")
+                reasons.append("uncertainties consistent with the misfit")
             elif verdict == 'underdispersed':
-                warnings.append("possibly conservative uncertainties")
+                warnings.append("uncertainties may be too large")
             else:
-                warnings.append("possibly overconfident uncertainties")
+                warnings.append("uncertainties may be too small")
 
         if reasons:
             recommendation_text += f"Reasons: {', '.join(reasons)}\n"
         if warnings:
             recommendation_text += f"Notes: {', '.join(warnings)}\n"
 
-        recommendation_text += "\nUncertainty Assessment:\n"
+        recommendation_text += "\nUncertainties:\n"
         for method, data in sorted_methods:
             if data['chi_squared'] != float('inf') and data['rmse'] != float('inf'):
                 chi2 = data['chi_squared']
                 assessment = {
-                    'underdispersed': "Conservative (uncertainties larger than the misfit)",
-                    'acceptable':     "Realistic uncertainty estimates",
-                    'overdispersed':  "Overconfident (uncertainties smaller than the misfit)",
+                    'underdispersed': "uncertainties larger than the misfit",
+                    'acceptable':     "uncertainties consistent with the misfit",
+                    'overdispersed':  "uncertainties smaller than the misfit",
                 }.get(realism(chi2), "n/a")
-                recommendation_text += f"• {method}: χ²={chi2:.2f} - {assessment}\n"
+                recommendation_text += f"  {method}: χ² = {chi2:.2f}, {assessment}\n"
 
         return recommendation_text
 
@@ -3622,70 +3722,75 @@ class FluxRegressionCalculator(QMainWindow):
         self.calculate_individual_btn.setEnabled(False)
         self.compare_methods_btn.setEnabled(False)
 
+    def _export_constants_rows(self):
+        """[name, value, note] rows of the constants block of the results export."""
+        reg = getattr(self, 'regression_info', {})
+        model = {'2d': 'plane through all disks', 'individual': 'one plane per disk',
+                 '3d': '3D'}.get(reg.get('type'), '')
+        if reg.get('complex_3d'):
+            model = '3D with interaction terms'
+        rows = [
+            ['FC age (Ma)', self.standard_age_edit.text(), 'Flux monitor (Fish Canyon sanidine)'],
+            ['  ± (Ma, 1σ)', self.standard_age_err_edit.text(), ''],
+            ['40K decay constant λ (1/yr)', self.lambda_edit.text(), 'total (ε + β)'],
+            ['Regression on', 'R (40Ar*/39ArK)' if self.regression_mode == MODE_R else 'J', ''],
+            ['Model', model, ''],
+            ['Monte Carlo iterations', str(MONTE_CARLO_ITERATIONS), ''],
+            ['Position shift x, y (μm, 1σ)',
+             f'{LATERAL_SHIFT_CM * COORDINATE_SCALE_MIN * 1e4:.0f}–'
+             f'{LATERAL_SHIFT_CM * COORDINATE_SCALE_MAX * 1e4:.0f}', 'drawn per iteration'],
+            ['Errors entered at', f'{self.input_sigma}σ', ''],
+            ['Errors reported at', f'{self.output_sigma}σ', ''],
+            ['Value used', 'monitors: measured; unknowns: plane', ''],
+        ]
+        # MSWD of the monitors about the fit, as shown after the calculation
+        enabled = [dd for dd in (w.get_disk_data() for w in self.disk_widgets) if dd['enabled']]
+        if reg.get('type') == 'individual':
+            fits = [(dd.get('disk_label') or f"Disk {k + 1}", dd['standard_data'], '2d', False)
+                    for k, dd in enumerate(enabled) if len(dd['standard_data']) >= 3]
+        else:
+            fits = [('Fit', [st for dd in enabled for st in dd['standard_data']],
+                     reg.get('type', '2d'), bool(reg.get('complex_3d')))]
+        for label, standards, rtype, cplx in fits:
+            mswd, dof, scale = self._lack_of_fit(standards, rtype, cplx)
+            if mswd is not None:
+                rows.append([f'MSWD of the monitors about the fit ({label})', f'{mswd:.3f}',
+                             f'{dof} degrees of freedom; errors × {scale:.3f}'
+                             if scale != 1.0 else f'{dof} degrees of freedom'])
+        return rows
+
     def export_results(self):
-        """Export results table to CSV with a constants block in adjacent columns."""
+        """Export the results table and the constants behind it (.xlsx or .csv),
+        laid out as the exports of the other tools."""
         try:
-            filename, _ = dfold.get_save_file_name(
-                self, "Export Results", "arar_results.csv", "CSV files (*.csv)"
-            )
+            irr = self.irradiation_edit.text().strip()
+            filename, flt = dfold.get_save_file_name(
+                self, "Export Results", (irr or "flux_regression") + ".xlsx", dexp.save_filter())
+            if not filename:
+                return
+            filename = dexp.ensure_ext(filename, flt)
 
-            if filename:
-                # --- Main results table ---
-                export_data = []
-                for row in range(self.results_widget.rowCount()):
-                    row_data = []
-                    for col in range(self.results_widget.columnCount()):
-                        item = self.results_widget.item(row, col)
-                        row_data.append(item.text() if item else "")
-                    export_data.append(row_data)
+            t = self.results_widget
+            header = [t.horizontalHeaderItem(i).text() for i in range(t.columnCount())]
+            table = []
+            for row in range(t.rowCount()):
+                cells = [t.item(row, col).text() if t.item(row, col) else ""
+                         for col in range(t.columnCount())]
+                table.append(["" if c == "N/A" else c for c in cells])
+            results = [['FLUX REGRESSION RESULTS' + (f', {irr}' if irr else '')], header] + table
+            constants = ([['CONSTANTS'], ['Constant', irr or 'Irradiation', 'Note']]
+                         + self._export_constants_rows())
 
-                headers = [self.results_widget.horizontalHeaderItem(i).text()
-                           for i in range(self.results_widget.columnCount())]
-                df = pd.DataFrame(export_data, columns=headers)
-
-                # --- Constants block ---
-                try:
-                    std_age = self.standard_age_edit.text()
-                    lam     = self.lambda_edit.text()
-                except Exception:
-                    std_age = str(FC_AGE_DEFAULT)
-                    lam     = f"{DECAY_CONSTANT:.4e}"
-
-                reg_info = getattr(self, 'regression_info', {})
-                reg_type = reg_info.get('type', 'N/A').upper()
-                if reg_info.get('complex_3d'):
-                    reg_type += ' Complex'
-                mode_label = "R (40/39)" if getattr(self, 'regression_mode', MODE_J) == MODE_R else "J"
-
-                constants = [
-                    ("Standard Age (Ma)",   std_age),
-                    ("lambda (yr-1)",        lam),
-                    ("Input error",          f"{self.input_sigma}sigma"),
-                    ("Reported error",       f"{self.output_sigma}sigma"),
-                    ("Regression mode",      mode_label),
-                    ("Regression type",      reg_type),
-                    ("MC iterations",        str(MONTE_CARLO_ITERATIONS)),
-                    ("Value used",           "monitors: measured; unknowns: plane"),
-                ]
-                const_df = pd.DataFrame(constants, columns=["Parameter", "Value"])
-
-                # Pad shorter side so both have equal rows
-                n_data, n_const = len(df), len(const_df)
-                if n_data > n_const:
-                    pad = pd.DataFrame([["", ""]] * (n_data - n_const),
-                                       columns=["Parameter", "Value"])
-                    const_df = pd.concat([const_df, pad], ignore_index=True)
-                elif n_const > n_data:
-                    pad = pd.DataFrame([[""] * len(df.columns)] * (n_const - n_data),
-                                       columns=df.columns)
-                    df = pd.concat([df, pad], ignore_index=True)
-
-                # One blank separator column, then the constants block
-                sep = pd.DataFrame({"": [""] * len(df)})
-                combined = pd.concat([df, sep, const_df], axis=1)
-                combined.to_csv(filename, index=False, encoding='utf-8-sig')
-
-                QMessageBox.information(self, "Success", f"Results exported to {filename}")
+            if filename.lower().endswith('.xlsx'):
+                dexp.write_xlsx(filename, results, constants=constants)
+            else:
+                import csv
+                with open(filename, 'w', newline='', encoding='utf-8-sig') as fh:
+                    w = csv.writer(fh)
+                    w.writerows(constants)
+                    w.writerow([])
+                    w.writerows(results)
+            QMessageBox.information(self, "Success", f"Results exported to {filename}")
 
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Export failed: {str(e)}")
@@ -3751,6 +3856,107 @@ class FluxRegressionCalculator(QMainWindow):
 
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Save failed: {str(e)}")
+
+    def import_flux_monitors_export(self, path=None):
+        """Fill the monitor holes from a Flux monitors export (.xlsx).
+
+        A category named like 'C1' goes to the disk labelled 'C', hole 1, with
+        its reported R and 1σ SE, ticked for the regression.  In J mode J is
+        calculated from that R with this tool's FC age and λ, so J and R stay on
+        one calibration.  A disk label no disk has yet goes to the first disk
+        without values, otherwise to a new disk."""
+        if not path:
+            path, _ = dfold.get_open_file_name(
+                self, "Import Flux monitors export", "", "Excel files (*.xlsx)",
+                tool='flux_monitors')
+            if not path:
+                return
+        try:
+            rows, calib = read_flux_monitors_export(path)
+        except Exception as e:
+            QMessageBox.critical(self, "Import failed", f"{os.path.basename(path)}:\n{e}")
+            return
+
+        by_disk, skipped = {}, []
+        for r in rows:
+            pos = split_position_label(r['category'])
+            if pos is None or not (r['R'] or 0) > 0 or not (r['R_sigma'] or 0) > 0:
+                skipped.append(r['category'])
+                continue
+            by_disk.setdefault(pos[0], []).append((pos[1], r))
+        if not by_disk:
+            QMessageBox.warning(self, "Nothing imported",
+                                "No category with a position name (e.g. C1) and a reported R.")
+            return
+
+        def label(w):
+            return w.disk_label_edit.text().strip().upper()
+
+        def has_values(w):
+            t = w.table_widget
+            return any(t.item(i, 3) and t.item(i, 3).text().strip() for i in range(t.rowCount()))
+
+        wanted = {d.upper() for d in by_disk if d}
+        target, used = {}, set()
+        for d in sorted(by_disk, key=lambda d: not any(d and label(w) == d.upper()
+                                                       for w in self.disk_widgets)):
+            w = next((w for w in self.disk_widgets if d and label(w) == d.upper()), None)
+            if w is None:
+                w = next((w for w in self.disk_widgets if w not in used
+                          and not has_values(w) and label(w) not in wanted), None)
+                if w is None:
+                    self.add_disk()
+                    w = self.disk_widgets[-1]
+                if d:
+                    w.disk_label_edit.setText(d)
+            used.add(w)
+            target[d] = w
+
+        c = self.monitor_ingrowth()
+        k = self.input_sigma
+        lines, recalculated, n = [], False, 0
+        for d, items in by_disk.items():
+            w = target[d]
+            t = w.table_widget
+            holes = []
+            for hole, r in sorted(items, key=lambda h: h[0]):
+                if not 1 <= hole <= t.rowCount():
+                    skipped.append(f"{r['category']} (disk {w.disk_label_edit.text()} has a "
+                                   f"{t.rowCount()}-hole design; choose its design, then import again)")
+                    continue
+                R, sR = r['R'], r['R_sigma']
+                if self.regression_mode == MODE_R:
+                    val, err = R, sR
+                else:
+                    val, err = c / R, c / R * sR / R
+                    if r['J'] and abs(val / r['J'] - 1) > 1e-9:
+                        recalculated = True
+                i = hole - 1
+                t.setItem(i, 0, QTableWidgetItem(r['category']))
+                t.setItem(i, 3, QTableWidgetItem(repr(float(val))))
+                t.setItem(i, 4, QTableWidgetItem(repr(float(err * k))))
+                box = t.cellWidget(i, 2)
+                if box is not None:
+                    box.setChecked(True)
+                holes.append(str(hole))
+            if holes:
+                n += len(holes)
+                lines.append(f"Disk {w.disk_label_edit.text() or w.disk_number}: "
+                             f"hole {', '.join(holes)}")
+
+        msg = [f"{n} position(s) from {os.path.basename(path)}:"] + lines
+        if self.regression_mode == MODE_R:
+            msg.append(f"\nEach hole holds the reported R and its SE (as ±{k}σ), "
+                       f"ticked for the regression.")
+        else:
+            msg.append(f"\nEach hole holds J = (e^(λt) − 1)/R from the reported R, with the "
+                       f"FC age and λ set here, and its SE (as ±{k}σ), ticked for the regression.")
+            if recalculated:
+                msg.append("The J in the export used a different calibration"
+                           + (f" ({calib.split(':', 1)[1].strip()})" if calib else "") + ".")
+        if skipped:
+            msg.append("\nNot imported: " + "; ".join(skipped))
+        QMessageBox.information(self, "Flux monitors export imported", "\n".join(msg))
 
     def load_session(self):
         """Load a previously saved session from a JSON file."""
@@ -3879,39 +4085,32 @@ class FluxRegressionCalculator(QMainWindow):
         input_sigma  = getattr(self, 'input_sigma',  1)
         output_sigma = getattr(self, 'output_sigma', 1)
         lines = [
-            "Monte Carlo Configuration",
-            "─" * 40,
-            f"Iterations:         {MONTE_CARLO_ITERATIONS:,}",
-            f"Regression mode:    {mode_label}",
-            f"Coordinate noise:   {BASE_COORDINATE_UNCERTAINTY*COORDINATE_SCALE_MIN*1e4:.1f}–"
-            f"{BASE_COORDINATE_UNCERTAINTY*COORDINATE_SCALE_MAX*1e4:.0f} μm per iteration",
+            "Monte Carlo",
+            f"  Iterations:          {MONTE_CARLO_ITERATIONS:,}",
+            f"  Regression on:       {mode_label}",
+            f"  Position shift x, y: {LATERAL_SHIFT_CM*COORDINATE_SCALE_MIN*1e4:.0f}–"
+            f"{LATERAL_SHIFT_CM*COORDINATE_SCALE_MAX*1e4:.0f} μm (1σ, drawn per iteration)",
+            "  Height z:            not shifted",
+            f"  Random seed:         {MONTE_CARLO_SEED} (identical results on every run)",
             "",
-            "Error precision",
-            "─" * 40,
-            f"Input precision:    {input_sigma}σ  (user-entered errors divided by {input_sigma} for internal storage)",
-            f"Output precision:   {output_sigma}σ  (internal 1σ values multiplied by {output_sigma} for reporting)",
-            "Internal storage:   1σ throughout (MC perturbation, propagation, prediction)",
+            "Errors",
+            f"  Entered at {input_sigma}σ, reported at {output_sigma}σ; held at 1σ in between.",
             "",
-            "Regression models",
-            "─" * 40,
-            "2D planar:   f = ax + by + c                          (3 params, min 3 standards)",
-            "Simple 3D:   f = ax + by + cz + d                     (4 params, min 4 standards)",
-            "Complex 3D:  f = ax+by+cz+d+e(xz)+f(yz)+g(xy)+h(xyz) (8 params, min 8 standards)",
-            "Individual:  independent 2D plane per disk             (3 params per disk)",
+            "Models",
+            "  Planar:      f = ax + by + c                               3 parameters",
+            "  Simple 3D:   f = ax + by + cz + d                          4 parameters",
+            "  Complex 3D:  f = ax + by + cz + d + e·xz + f·yz + g·xy + h·xyz   8 parameters",
+            "  Individual:  one plane per disk                            3 parameters per disk",
             "",
-            "Uncertainty propagation",
-            "─" * 40,
-            "• Coordinate noise applied to all standard holes each iteration",
-            "• Measurement uncertainty perturbs each standard's value independently",
-            "• Every hole, monitor or unknown, reports the fitted-plane prediction;",
-            "  monitors also show their residual (measured − predicted)",
+            "Each iteration shifts the monitor positions, draws every monitor value",
+            "from its uncertainty and fits the model again.  A monitor hole keeps its",
+            "measured value; an unknown takes the fitted surface.  The Plane columns",
+            "show the fitted surface at every hole, and the residual of a monitor is",
+            "measured − plane.",
             "",
-            "Model comparison metrics",
-            "─" * 40,
-            "• Leave-one-out cross-validation (CV RMSE)",
-            "• Akaike Information Criterion (AIC)",
-            "• Reduced χ² of the leave-one-out residuals, judged against the",
-            "  Wendt & Carl (1991) 95% limits 1 ± 2√(2/n)",
+            "Compare Methods ranks the models by leave-one-out cross-validation",
+            "error and also gives the AIC and the reduced χ² of the leave-one-out",
+            "residuals, judged against the Wendt & Carl (1991) 95% limits.",
         ]
         return "\n".join(lines)
 

@@ -225,6 +225,28 @@ def test_anchor_reproduces_its_preset_fc_age():
         print(f"  OK  {name:<24} anchor -> {implied:.6f} == preset {preset}")
 
 
+def test_single_step_route_full_lambda():
+    """A standard age that scales as 1/λ: the λ term is the total derivative
+    dt/dλ = −t/λ, i.e. t·σλ/λ at any age, checked by moving λ and the standard
+    age together."""
+    import math as _m
+    lam, slam, t_std = 5.543e-10, 0.0554e-10, 28.02
+    cfg = dict(stdAgeMa=t_std, stdAgeErrMa=0.14, lambdaYr=lam, lambdaErrYr=slam,
+               stdAgeErrType='internal', calibClass='other')
+
+    def age(Q, l):
+        return _m.log1p(Q * _m.expm1(l * (t_std * lam / l) * 1e6)) / l / 1e6
+
+    for t in (1.0, 55.0, 500.0, 2000.0):
+        Q = _m.expm1(lam * t * 1e6) / _m.expm1(lam * t_std * 1e6)
+        h = 1e-6
+        num = (age(Q, lam * (1 + h)) - age(Q, lam * (1 - h))) / (2 * h * lam) * slam
+        got = dict(am.systematic_components(t, cfg))['Decay constant λ']
+        _close(got, num, 1e-6, f'lambda term at {t} Ma')
+        _close(got, -t * slam / lam, 1e-12, f'equals -t·σλ/λ at {t} Ma')
+        print(f"  OK  {t:7.1f} Ma: λ term {got:.5f} Ma = −t·σλ/λ")
+
+
 if __name__ == '__main__':
     test_carter_spreadsheet()
     test_astronomical_covariance_zero()
@@ -238,4 +260,5 @@ if __name__ == '__main__':
     test_anchor_reproduces_its_preset_fc_age()
     test_anchor_beats_uncorrelated_route()
     test_external_error_uses_anchor_when_available()
+    test_single_step_route_full_lambda()
     print("\nAll checks passed.")
