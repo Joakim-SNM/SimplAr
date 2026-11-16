@@ -55,16 +55,16 @@ def _finite(x):
 
 
 def _uniquify_ids(rows):
-    """Make every row's sampleId unique within its category (a Sample column
+    """Make every row's sample_id unique within its category (a Sample column
     repeated on every step would otherwise tie all those steps to one id)."""
     used = set()
     for r in rows:
-        base = str(r.get('sampleId') or 'row')
+        base = str(r.get('sample_id') or 'row')
         sid, k = base, 1
         while sid in used:
             k += 1
             sid = f"{base}#{k}"
-        r['sampleId'] = sid
+        r['sample_id'] = sid
         used.add(sid)
     return rows
 
@@ -195,15 +195,15 @@ def read_arar_rows(path, crystal_rule='auto', group_by='position'):
                 reason = None
             r, er1 = float(r), float(er) * ef
             rows.append({
-                'sampleId':         sid,
+                'sample_id':         sid,
                 'value40_39':       r,
                 'uncertainty40_39': er1,
                 'value':            r,
                 'uncertainty':      er1,
-                'measuredJ':        None,
-                'measuredJError':   None,
-                'importedJ':        None,   # J comes from R only, never the file's J
-                'importedJError':   None,
+                'measured_j':        None,
+                'measured_j_error':   None,
+                'imported_j':        None,   # J comes from R only, never the file's J
+                'imported_j_error':   None,
                 'power':            float(s['power']) if _finite(s.get('power')) else None,
                 'ar39':             float(s['pct39Ar']) if _finite(s.get('pct39Ar')) else None,
                 'grain_id':         crystals[k],
@@ -632,15 +632,15 @@ class DirectInputPanel(QWidget):
                 else:
                     grain = sid                      # no ID column: every row its own
                 rows.append({
-                    'sampleId':         sid,
+                    'sample_id':         sid,
                     'value40_39':       value,
                     'uncertainty40_39': uncertainty,
                     'value':            value,
                     'uncertainty':      uncertainty,
-                    'measuredJ':        None,
-                    'measuredJError':   None,
-                    'importedJ':        None,
-                    'importedJError':   None,
+                    'measured_j':        None,
+                    'measured_j_error':   None,
+                    'imported_j':        None,
+                    'imported_j_error':   None,
                     'power':            extra_val,   # step label (laser power / T)
                     'grain_id':         grain,
                     'ar39':             None,
@@ -733,7 +733,7 @@ class DirectInputPanel(QWidget):
                                                        if self.uncertainty_type.get() == '2sigma'
                                                        else 'Direct input, errors pasted as ±1σ'))
                 main_calc._run_analysis('=== DIRECT INPUT ANALYSIS ===')
-            main_calc.log('\n✅ Direct input analysis complete.')
+            main_calc.log('\nDirect input analysis complete.')
             n_pts = sum(len(v) for v in valid.values())
             main_calc._set_current_data(f"Direct Input: {n_pts} points in {len(valid)} groups")
 
@@ -1014,7 +1014,7 @@ class FluxMonitorsWindow(QMainWindow):
 
     def _build_category_data_from_df(self, df, col_map):
         """
-        Convert a DataFrame + column mapping to the categoryData dict.
+        Convert a DataFrame + column mapping to the category_data dict.
         col_map: {'value': col, 'error': col, 'category': col_or_None,
                   'sample_id', 'grain_id', 'pct_gas', 'ar39': col_or_None}
         No category column puts every row in one group.  All errors are
@@ -1105,15 +1105,15 @@ class FluxMonitorsWindow(QMainWindow):
                 grain_id = sample_id                # no crystal info: row is its own
 
             category_data[category].append({
-                'sampleId':          sample_id,
+                'sample_id':          sample_id,
                 'value40_39':        value,
                 'uncertainty40_39':  error,
                 'value':             value,
                 'uncertainty':       error,
-                'measuredJ':         None,
-                'measuredJError':    None,
-                'importedJ':         None,
-                'importedJError':    None,
+                'measured_j':         None,
+                'measured_j_error':    None,
+                'imported_j':         None,
+                'imported_j_error':    None,
                 'power':             power,
                 'grain_id':          grain_id,
                 'ar39':              ar39,
@@ -1282,9 +1282,9 @@ class FluxMonitorsWindow(QMainWindow):
         splitter.addWidget(results_box)
         splitter.setSizes([640, 960])
 
-        # State for manual exclusions: {category: {sampleId: reason}}
+        # State for manual exclusions: {category: {sample_id: reason}}
         self.manual_exclusions = {}
-        # Force-included points: {category: set(sampleId)}, kept despite auto-rejection
+        # Force-included points: {category: set(sample_id)}, kept despite auto-rejection
         self.manual_inclusions = {}
         # Raw unfiltered data per category, preserved for exclusion table
         self.raw_category_data = {}
@@ -1458,11 +1458,11 @@ class FluxMonitorsWindow(QMainWindow):
         # Automatic rejections of the last run, so they are visible here too.
         auto, derived = {}, {}
         try:
-            for p in self.results['ratio4039Results'][category]['plotData']['allPoints']:
+            for p in self.results['ratio4039_results'][category]['plot_data']['all_points']:
                 if p.get('status') in ('high_error', 'outlier', 'invalid'):
-                    auto[p['sampleId']] = p['status']
+                    auto[p['sample_id']] = p['status']
                 elif p.get('status') == 'manual':
-                    derived[p['sampleId']] = p.get('reason', '')   # e.g. all steps excluded
+                    derived[p['sample_id']] = p.get('reason', '')   # e.g. all steps excluded
         except (KeyError, TypeError):
             pass
         auto_txt = {'high_error': 'auto: relative error above limit',
@@ -1476,11 +1476,11 @@ class FluxMonitorsWindow(QMainWindow):
         mult = self._pt_err_mult()
         items = []
         for row_num, item in enumerate(data, start=1):
-            sid      = item['sampleId']
+            sid      = item['sample_id']
             v4039    = item.get('value40_39')
             e4039    = item.get('uncertainty40_39')
-            vj       = item.get('measuredJ') if self.value_is_ratio else None
-            ej       = item.get('measuredJError') if self.value_is_ratio else None
+            vj       = item.get('measured_j') if self.value_is_ratio else None
+            ej       = item.get('measured_j_error') if self.value_is_ratio else None
             rel_err  = (e4039 / abs(v4039) * 100) if (_finite(v4039) and _finite(e4039)
                                                        and v4039 != 0) else float('nan')
             if sid in excl_ids:
@@ -1582,11 +1582,11 @@ class FluxMonitorsWindow(QMainWindow):
                 r  = row.get('value40_39')
                 er = row.get('uncertainty40_39')
                 if self.value_is_ratio and _finite(r) and r > 0 and _finite(er):
-                    jc = self.calculateJFromAge(r, er)
-                    row['measuredJ']      = jc['jValue']
-                    row['measuredJError'] = jc['jError']
+                    jc = self.j_from_r(r, er)
+                    row['measured_j']      = jc['j_value']
+                    row['measured_j_error'] = jc['j_error']
                 else:
-                    row['measuredJ'] = row['measuredJError'] = None
+                    row['measured_j'] = row['measured_j_error'] = None
 
     # ---------------------------------------------------------------------
     # One analysis pipeline (Analyze, Apply exclusions, plot clicks,
@@ -1675,7 +1675,7 @@ class FluxMonitorsWindow(QMainWindow):
         to tell 'the same data again' from new data."""
         if not data:
             return None
-        return tuple((cat, tuple((r.get('sampleId'), r.get('value40_39'),
+        return tuple((cat, tuple((r.get('sample_id'), r.get('value40_39'),
                                   r.get('uncertainty40_39'), r.get('grain_id'),
                                   r.get('power'), r.get('ar39')) for r in rows))
                      for cat, rows in sorted(data.items()))
@@ -1686,7 +1686,7 @@ class FluxMonitorsWindow(QMainWindow):
             QMessageBox.warning(self, "No Data", "Run analysis first before applying exclusions.")
             return
         self._run_analysis("=== REANALYSIS WITH MANUAL EXCLUSIONS ===")
-        self.log("\n✅ Reanalysis with manual exclusions complete.")
+        self.log("\nReanalysis with manual exclusions complete.")
 
     def _run_analysis(self, title):
         """raw steps → crystal basis → rejection + weighted mean of R → J."""
@@ -1702,7 +1702,7 @@ class FluxMonitorsWindow(QMainWindow):
         mode = self.crystal_mode_var.get()
         self.log(f"Points averaged: {self.CRYSTAL_MODES.get(mode, mode)}")
 
-        ratioRes, jRes = OrderedDict(), OrderedDict()
+        ratio_res, j_res = OrderedDict(), OrderedDict()
         self.analysis_rows, self.crystal_stats, self.step_group_stats = {}, {}, {}
         cats = sorted(self.raw_category_data, key=self._natural_sort_key)
         for category in cats:
@@ -1713,17 +1713,17 @@ class FluxMonitorsWindow(QMainWindow):
             excl = dict(self.manual_exclusions.get(category, {}))
             excl.update(derived_excl)
             incl = set(self.manual_inclusions.get(category, set()))
-            row_ids = {r['sampleId'] for r in rows}
-            active = [r for r in rows if r['sampleId'] not in excl]
+            row_ids = {r['sample_id'] for r in rows}
+            active = [r for r in rows if r['sample_id'] not in excl]
             n_forced = len(incl & row_ids)
             if len(active) != len(rows) or n_forced:
                 self.log(f"  {len(rows) - len(active)} manually excluded, "
                          f"{n_forced} force-included → {len(active)} used")
-            ratioRes[category] = self.analyzeCategory(
+            ratio_res[category] = self.analyze_category(
                 category, active, 'value40_39', 'uncertainty40_39',
                 manual_exclusions=excl, all_data=rows, manual_inclusions=incl)
             if self.value_is_ratio:
-                jRes[category] = self._j_result_from_r(ratioRes[category])
+                j_res[category] = self._j_result_from_r(ratio_res[category])
             if any(t['crystal_n_steps'] > 1 for t in tagged):
                 self.crystal_stats[category]    = self._crystal_summary(category, tagged)
                 self.step_group_stats[category] = self._step_group_summary(category, tagged)
@@ -1735,14 +1735,14 @@ class FluxMonitorsWindow(QMainWindow):
                              f"of steps and mix within- and between-crystal scatter in the "
                              f"MSWD); 'One point per crystal' averages crystals instead.")
 
-        self.results = {'ratio4039Results': ratioRes, 'measuredJResults': jRes}
+        self.results = {'ratio4039_results': ratio_res, 'measured_j_results': j_res}
         self.plot_data = {}
         for category in cats:
             if self.value_is_ratio:
-                self.plot_data[category] = {'40_39_ratios': ratioRes[category]['plotData'],
-                                            'measured_j':   jRes[category]['plotData']}
+                self.plot_data[category] = {'40_39_ratios': ratio_res[category]['plot_data'],
+                                            'measured_j':   j_res[category]['plot_data']}
             else:
-                self.plot_data[category] = {self.value_label: ratioRes[category]['plotData']}
+                self.plot_data[category] = {self.value_label: ratio_res[category]['plot_data']}
 
         types = ["40/39 Ratios", "Calculated J"] if self.value_is_ratio else [self.value_label]
         set_combo_items(self.data_type_combo, types, self.data_type_var)
@@ -1793,7 +1793,7 @@ class FluxMonitorsWindow(QMainWindow):
             t = dict(item)
             gid = str(t.get('grain_id') or '').strip()
             t['grain_id'] = gid if gid and gid.lower() not in ('nan', 'none') \
-                else str(t['sampleId'])
+                else str(t['sample_id'])
             tagged.append(t)
         counts = Counter(t['grain_id'] for t in tagged)
         seen = Counter()
@@ -1807,7 +1807,7 @@ class FluxMonitorsWindow(QMainWindow):
 
     def _build_analysis_rows(self, category, tagged):
         """The rows that are averaged under the chosen crystal mode, and any
-        exclusions that follow from it ({sampleId: reason})."""
+        exclusions that follow from it ({sample_id: reason})."""
         mode = self.crystal_mode_var.get()
         if mode == 'fusion_only':
             return [t for t in tagged if t['step_type'] == 'fusion'], {}
@@ -1815,16 +1815,16 @@ class FluxMonitorsWindow(QMainWindow):
             return self._pool_crystal_steps(category, tagged)
         return tagged, {}
 
-    def _valid_row(self, t, valueKey='value40_39', uncertaintyKey='uncertainty40_39'):
+    def _valid_row(self, t, value_key='value40_39', uncertainty_key='uncertainty40_39'):
         """A row that can be weighted: finite value, positive finite error.
         For ⁴⁰Ar*/³⁹Ar ratios also R > 0 and, where known, ³⁹Ar > 0: a
         blank-level step (³⁹Ar ≈ 0) can give R = −567 ± 17, whose small
         relative error passes the relative-error filter although the ratio
         is meaningless."""
-        v, e = t.get(valueKey), t.get(uncertaintyKey)
+        v, e = t.get(value_key), t.get(uncertainty_key)
         if not (_finite(v) and _finite(e) and float(e) > 0):
             return False
-        if self.value_is_ratio and valueKey == 'value40_39':
+        if self.value_is_ratio and value_key == 'value40_39':
             if float(v) <= 0:
                 return False
             a = t.get('ar39')
@@ -1872,18 +1872,18 @@ class FluxMonitorsWindow(QMainWindow):
                 out.append(steps[0])
                 continue
             good = [s for s in steps if self._valid_row(s)]
-            use = [s for s in good if s['sampleId'] not in excl]
+            use = [s for s in good if s['sample_id'] not in excl]
             all_out = not use
             if all_out:
                 use = good
             if not use:
                 continue
-            R, sR, method = self._pool_value(use)
+            R, s_r, method = self._pool_value(use)
             sid = f"{gid}_pooled"
             row = dict(steps[-1])
             row.update({
-                'sampleId': sid, 'value40_39': R, 'uncertainty40_39': sR,
-                'value': R, 'uncertainty': sR, 'step_type': 'pooled',
+                'sample_id': sid, 'value40_39': R, 'uncertainty40_39': s_r,
+                'value': R, 'uncertainty': s_r, 'step_type': 'pooled',
                 'n_steps': len(use), 'crystal_n_steps': len(steps),
                 'step_index': None, 'power': None, 'label': 'Σ',
                 'pool_method': method, 'file_reason': None,
@@ -1891,14 +1891,14 @@ class FluxMonitorsWindow(QMainWindow):
                          if all(_finite(s.get('ar39')) for s in use) else None),
             })
             if self.value_is_ratio and R > 0:
-                jc = self.calculateJFromAge(R, sR)
-                row['measuredJ'], row['measuredJError'] = jc['jValue'], jc['jError']
+                jc = self.j_from_r(R, s_r)
+                row['measured_j'], row['measured_j_error'] = jc['j_value'], jc['j_error']
             else:
-                row['measuredJ'] = row['measuredJError'] = None
+                row['measured_j'] = row['measured_j_error'] = None
             if all_out:
                 derived[sid] = 'all steps excluded'
             self.log(f"    Crystal {gid}: {len(use)}/{len(steps)} steps → "
-                     f"{self._fmtv(R)} ± {sR:.3g} (1σ)  [{method}]")
+                     f"{self._fmtv(R)} ± {s_r:.3g} (1σ)  [{method}]")
             out.append(row)
         return out, derived
 
@@ -1910,7 +1910,7 @@ class FluxMonitorsWindow(QMainWindow):
         lim = self.error_threshold_var.get() if self.use_error_filter_var.get() else None
         out = []
         for t in tagged:
-            if t['sampleId'] in excl or not self._valid_row(t):
+            if t['sample_id'] in excl or not self._valid_row(t):
                 continue
             v, e = float(t['value40_39']), float(t['uncertainty40_39'])
             if lim is not None and (v == 0 or e / abs(v) * 100.0 > lim):
@@ -1942,7 +1942,7 @@ class FluxMonitorsWindow(QMainWindow):
         se = math.sqrt(1.0 / W)
         if n > 1:
             mswd = sum(wi * (v - m) ** 2 for wi, v in zip(w, vals)) / (n - 1)
-            p = self.mswdPValue(mswd, n)
+            p = self.mswd_p_value(mswd, n)
         else:
             mswd = p = nan
         wc = mswd_critical(n)
@@ -1952,9 +1952,9 @@ class FluxMonitorsWindow(QMainWindow):
                    overdispersed=over, reml_mean=nan, reml_se=nan, tau=nan)
         use_reml = self.use_reml_var.get() if reml is None else reml
         if use_reml and n >= 2:
-            r = self.remlRandomEffects([{'v': v, 'e': s} for v, s in zip(vals, sigs)], 'v', 'e')
+            r = self.reml_random_effects([{'v': v, 'e': s} for v, s in zip(vals, sigs)], 'v', 'e')
             if r:
-                out.update(reml_mean=r['weightedMean'], reml_se=r['se_1sigma'], tau=r['tau'])
+                out.update(reml_mean=r['weighted_mean'], reml_se=r['se_1sigma'], tau=r['tau'])
         if use_reml and _finite(out['reml_mean']):
             out.update(best_mean=out['reml_mean'], best_se=out['reml_se'], method='REML')
         else:
@@ -1980,13 +1980,13 @@ class FluxMonitorsWindow(QMainWindow):
         for gid, steps in crystals.items():
             if len(steps) < 2:
                 continue
-            good = [s for s in steps if self._valid_row(s) and s['sampleId'] not in excl]
+            good = [s for s in steps if self._valid_row(s) and s['sample_id'] not in excl]
             if not good:
                 continue
-            R, sR, method = self._pool_value(good)
+            R, s_r, method = self._pool_value(good)
             st = self._wm_stats([float(s['value40_39']) for s in good],
                                 [float(s['uncertainty40_39']) for s in good], reml=False)
-            out[gid] = dict(n_used=len(good), n_steps=len(steps), tg=R, tg_se=sR,
+            out[gid] = dict(n_used=len(good), n_steps=len(steps), tg=R, tg_se=s_r,
                             method=method, wm=st['mean'], wm_se=st['se'],
                             mswd=st['mswd'], p=st['p'])
         if out:
@@ -2012,7 +2012,7 @@ class FluxMonitorsWindow(QMainWindow):
             st = self._wm_stats([float(t['value40_39']) for t in items],
                                 [float(t['uncertainty40_39']) for t in items])
             st['n_crystals'] = len({t['grain_id'] for t in items})
-            st['ids'] = [t['sampleId'] for t in items]
+            st['ids'] = [t['sample_id'] for t in items]
             res[lab] = st
         between = None
         if len(res) >= 2:
@@ -2038,11 +2038,11 @@ class FluxMonitorsWindow(QMainWindow):
         preset has a chain, via arar_math.fc_ingrowth)."""
         try:
             lambda_val = float(self.lambda_var.get())
-            fcAge      = float(self.std_age_var.get())
-            fcAgeError = float(self.std_age_err_var.get())
+            fc_age      = float(self.std_age_var.get())
+            fc_age_error = float(self.std_age_err_var.get())
         except (ValueError, AttributeError):
-            lambda_val, fcAge, fcAgeError = LAMBDA_DEFAULT, STD_AGE_DEFAULT, STD_AGE_ERR
-        return fc_ingrowth(fcAge, lambda_val, fcAgeError)
+            lambda_val, fc_age, fc_age_error = LAMBDA_DEFAULT, STD_AGE_DEFAULT, STD_AGE_ERR
+        return fc_ingrowth(fc_age, lambda_val, fc_age_error)
 
     def _j_result_from_r(self, res):
         """The J result as the image of the R result under J = (e^{λt} − 1)/R.
@@ -2057,41 +2057,41 @@ class FluxMonitorsWindow(QMainWindow):
         def J(r):
             return c / r if (_finite(r) and r > 0) else nan
 
-        def sJ(s, r):
+        def s_j(s, r):
             return c * s / r ** 2 if (_finite(s) and _finite(r) and r > 0) else nan
 
-        pd0 = res.get('plotData') or {}
+        pd0 = res.get('plot_data') or {}
         pts = []
-        for p in pd0.get('allPoints', []):
+        for p in pd0.get('all_points', []):
             q = dict(p)
             q['value'] = J(p.get('value'))
-            q['uncertainty'] = sJ(p.get('uncertainty'), p.get('value'))
+            q['uncertainty'] = s_j(p.get('uncertainty'), p.get('value'))
             if _finite(q['value']):
                 pts.append(q)
         g = lambda k: pd0.get(k, res.get(k, nan))
-        wm, rm = g('weightedMean'), g('reml_mean')
+        wm, rm = g('weighted_mean'), g('reml_mean')
         new = dict(pd0)
         new.update(
-            allPoints=pts,
-            keptPoints=[q for q in pts if q.get('status') in ('kept', 'included')],
-            removedPoints=[q for q in pts if q.get('status') not in ('kept', 'included')],
-            weightedMean=J(wm), standardError=sJ(g('standardError'), wm),
-            fe_se_1s=sJ(g('fe_se_1s'), wm), od_se_1s=sJ(g('od_se_1s'), wm),
-            reml_mean=J(rm), reml_se_1s=sJ(g('reml_se_1s'), rm),
-            reml_tau=sJ(g('reml_tau'), rm))
+            all_points=pts,
+            kept_points=[q for q in pts if q.get('status') in ('kept', 'included')],
+            removed_points=[q for q in pts if q.get('status') not in ('kept', 'included')],
+            weighted_mean=J(wm), standard_error=s_j(g('standard_error'), wm),
+            fe_se_1s=s_j(g('fe_se_1s'), wm), od_se_1s=s_j(g('od_se_1s'), wm),
+            reml_mean=J(rm), reml_se_1s=s_j(g('reml_se_1s'), rm),
+            reml_tau=s_j(g('reml_tau'), rm))
         new['reml_tau2'] = new['reml_tau'] ** 2 if _finite(new['reml_tau']) else nan
         out = dict(res)
-        for k in ('weightedMean', 'standardError', 'fe_se_1s', 'od_se_1s',
+        for k in ('weighted_mean', 'standard_error', 'fe_se_1s', 'od_se_1s',
                   'reml_mean', 'reml_se_1s', 'reml_tau', 'reml_tau2'):
             out[k] = new[k]
-        out['plotData'] = new
+        out['plot_data'] = new
         return out
 
     # ---------------------------------------------------------------------
     # NMAD outlier rejection
     # ---------------------------------------------------------------------
 
-    def applyNMAD(self, data, valueKey='value', uncertaintyKey='uncertainty', k=2.5):
+    def apply_nmad(self, data, value_key='value', uncertainty_key='uncertainty', k=2.5):
         """
         Normalised Median Absolute Deviation outlier rejection.
 
@@ -2107,9 +2107,9 @@ class FluxMonitorsWindow(QMainWindow):
         Default k = 2.5, as in the Age distribution tool.
         """
         if len(data) < 3:
-            return {'finalData': data, 'removedItems': []}
+            return {'final_data': data, 'removed_items': []}
 
-        values = [item[valueKey] for item in data]
+        values = [item[value_key] for item in data]
         med    = sorted(values)[len(values) // 2] if len(values) % 2 else (
                  sorted(values)[len(values)//2 - 1] + sorted(values)[len(values)//2]) / 2.0
         abs_devs = [abs(v - med) for v in values]
@@ -2119,14 +2119,14 @@ class FluxMonitorsWindow(QMainWindow):
         nmad = 1.4826 * mad
 
         if nmad == 0:
-            return {'finalData': data, 'removedItems': []}
+            return {'final_data': data, 'removed_items': []}
 
         threshold = k * nmad
         kept, removed = [], []
         for item in data:
-            if abs(item[valueKey] - med) > threshold:
-                self.log(f"  NMAD: removing {item.get('sampleId','')} "
-                         f"(|{item[valueKey]:.4e} − {med:.4e}| = {abs(item[valueKey]-med):.4e} "
+            if abs(item[value_key] - med) > threshold:
+                self.log(f"  NMAD: removing {item.get('sample_id','')} "
+                         f"(|{item[value_key]:.4e} − {med:.4e}| = {abs(item[value_key]-med):.4e} "
                          f"> {threshold:.4e} = {k}×NMAD)")
                 removed.append(item)
             else:
@@ -2134,7 +2134,7 @@ class FluxMonitorsWindow(QMainWindow):
 
         self.log(f"NMAD result: {len(kept)} kept, {len(removed)} removed "
                  f"(NMAD={nmad:.4e}, threshold={threshold:.4e})")
-        return {'finalData': kept, 'removedItems': removed}
+        return {'final_data': kept, 'removed_items': removed}
 
     def setup_file_import_mode(self, page):
         lay = QVBoxLayout(page)
@@ -2350,110 +2350,110 @@ class FluxMonitorsWindow(QMainWindow):
         bar.setValue(bar.maximum())
         self.results_text.repaint()
 
-    def analyzeCategory(self, categoryName, categoryData, valueKey='value', uncertaintyKey='uncertainty',
+    def analyze_category(self, category_name, category_data, value_key='value', uncertainty_key='uncertainty',
                         manual_exclusions=None, all_data=None, manual_inclusions=None):
         # Total points including any manually excluded ones
-        total_points = len(all_data) if all_data is not None else len(categoryData)
+        total_points = len(all_data) if all_data is not None else len(category_data)
 
         _nan = float('nan')
-        _empty = {'allPoints': [], 'keptPoints': [], 'removedPoints': [],
-                  'weightedMean': _nan, 'standardError': _nan, 'mswd': _nan}
+        _empty = {'all_points': [], 'kept_points': [], 'removed_points': [],
+                  'weighted_mean': _nan, 'standard_error': _nan, 'mswd': _nan}
 
-        if not categoryData and not all_data:
+        if not category_data and not all_data:
             return {
-                'category': categoryName, 'initialPoints': total_points, 'finalPoints': 0,
-                'weightedMean': _nan, 'standardError': _nan,
-                'percentError2Sigma': _nan, 'percentError1Sigma': _nan,
-                'mswd': _nan, 'plotData': _empty
+                'category': category_name, 'initial_points': total_points, 'final_points': 0,
+                'weighted_mean': _nan, 'standard_error': _nan,
+                'percent_error_2sigma': _nan, 'percent_error_1sigma': _nan,
+                'mswd': _nan, 'plot_data': _empty
             }
 
         # A row without a finite value and a positive, finite error cannot be
         # weighted (1/σ² would fail); for ratios R ≤ 0 or ³⁹Ar ≤ 0 is not a
         # usable R either (see _valid_row).  Shown as rejected, not averaged.
-        invalidIds = {it['sampleId'] for it in categoryData
-                      if not self._valid_row(it, valueKey, uncertaintyKey)}
-        if invalidIds:
-            self.log(f"{len(invalidIds)} point(s) without a usable value/uncertainty "
+        invalid_ids = {it['sample_id'] for it in category_data
+                      if not self._valid_row(it, value_key, uncertainty_key)}
+        if invalid_ids:
+            self.log(f"{len(invalid_ids)} point(s) without a usable value/uncertainty "
                      f"(or R ≤ 0, ³⁹Ar ≤ 0) left out")
-            categoryData = [it for it in categoryData if it['sampleId'] not in invalidIds]
+            category_data = [it for it in category_data if it['sample_id'] not in invalid_ids]
 
-        originalData = categoryData.copy()
+        original_data = category_data.copy()
 
-        dataWithRelErr = []
+        data_with_rel_err = []
         apply_error_filter = self.use_error_filter_var.get()
         error_limit = self.error_threshold_var.get()
 
-        for item in categoryData:
-            denom = abs(item[valueKey])
-            relativeError = (item[uncertaintyKey] / denom * 100) if denom != 0 else float('inf')
-            newItem = item.copy()
-            newItem['relativeError'] = relativeError
-            dataWithRelErr.append(newItem)
+        for item in category_data:
+            denom = abs(item[value_key])
+            relative_error = (item[uncertainty_key] / denom * 100) if denom != 0 else float('inf')
+            new_item = item.copy()
+            new_item['relative_error'] = relative_error
+            data_with_rel_err.append(new_item)
 
         # Force-included points bypass every auto-rejection step. Split them out so
         # the error filter / NMAD / MSWD only ever act on the rest, then
         # add them back before the final weighted mean.
         incl_ids = set(manual_inclusions or set())
-        protected  = [it for it in dataWithRelErr if it['sampleId'] in incl_ids]
-        candidates = [it for it in dataWithRelErr if it['sampleId'] not in incl_ids]
+        protected  = [it for it in data_with_rel_err if it['sample_id'] in incl_ids]
+        candidates = [it for it in data_with_rel_err if it['sample_id'] not in incl_ids]
 
         if apply_error_filter:
-            filteredData = [item for item in candidates if item['relativeError'] <= error_limit]
-            self.log(f"After error filter (>{error_limit}%): {len(filteredData)}/{len(candidates)} points"
+            filtered_data = [item for item in candidates if item['relative_error'] <= error_limit]
+            self.log(f"After error filter (>{error_limit}%): {len(filtered_data)}/{len(candidates)} points"
                      + (f"  (+{len(protected)} force-included)" if protected else ""))
         else:
-            filteredData = candidates.copy()
-            self.log(f"Error filter disabled: {len(filteredData)} points"
+            filtered_data = candidates.copy()
+            self.log(f"Error filter disabled: {len(filtered_data)} points"
                      + (f"  (+{len(protected)} force-included)" if protected else ""))
 
-        def calculateWeightedMeanMSWD(data):
+        def calculate_weighted_mean_mswd(data):
             if len(data) == 0:
-                return {'weightedMean': float('nan'), 'standardError': float('nan'), 'mswd': float('nan'), 'n': 0}
+                return {'weighted_mean': float('nan'), 'standard_error': float('nan'), 'mswd': float('nan'), 'n': 0}
 
-            weights = [1 / (item[uncertaintyKey] ** 2) for item in data]
-            totalWeight = sum(weights)
-            weightedMean = sum(item[valueKey] * weights[i] for i, item in enumerate(data)) / totalWeight
+            weights = [1 / (item[uncertainty_key] ** 2) for item in data]
+            total_weight = sum(weights)
+            weighted_mean = sum(item[value_key] * weights[i] for i, item in enumerate(data)) / total_weight
 
-            squaredDeviations = [(item[valueKey] - weightedMean) ** 2 * weights[i] for i, item in enumerate(data)]
-            mswd = 0 if len(data) <= 1 else sum(squaredDeviations) / (len(data) - 1)
-            standardError = math.sqrt(1 / totalWeight)
+            squared_deviations = [(item[value_key] - weighted_mean) ** 2 * weights[i] for i, item in enumerate(data)]
+            mswd = 0 if len(data) <= 1 else sum(squared_deviations) / (len(data) - 1)
+            standard_error = math.sqrt(1 / total_weight)
 
-            return {'weightedMean': weightedMean, 'standardError': standardError, 'mswd': mswd, 'n': len(data)}
+            return {'weighted_mean': weighted_mean, 'standard_error': standard_error, 'mswd': mswd, 'n': len(data)}
 
-        currentData = filteredData.copy()
-        allRemovedItems = []
+        current_data = filtered_data.copy()
+        all_removed_items = []
 
         mswd_note = ""
         # Robust screen first (not masked by several outliers at once), then the
         # MSWD test on what remains.
-        if self.use_nmad_var.get() and len(currentData) > 2:
+        if self.use_nmad_var.get() and len(current_data) > 2:
             k = self.nmad_k_var.get()
             self.log(f"Applying NMAD rejection (k={k})...")
-            nmadResults = self.applyNMAD(currentData, valueKey, uncertaintyKey, k=k)
-            currentData = nmadResults['finalData']
-            allRemovedItems.extend(nmadResults['removedItems'])
+            nmad_results = self.apply_nmad(current_data, value_key, uncertainty_key, k=k)
+            current_data = nmad_results['final_data']
+            all_removed_items.extend(nmad_results['removed_items'])
 
-        if self.use_mswd_var.get() and len(currentData) + len(protected) > 3:
-            currentData, removed, mswd_note = self.sequentialMSWD(
-                currentData, valueKey, uncertaintyKey, protected=protected)
-            allRemovedItems.extend(removed)
+        if self.use_mswd_var.get() and len(current_data) + len(protected) > 3:
+            current_data, removed, mswd_note = self.sequential_mswd(
+                current_data, value_key, uncertainty_key, protected=protected)
+            all_removed_items.extend(removed)
 
         # Force-included points rejoin the kept set, whatever the algorithms decided.
-        currentData = protected + currentData
+        current_data = protected + current_data
 
-        finalResults = calculateWeightedMeanMSWD(currentData)
+        final_results = calculate_weighted_mean_mswd(current_data)
 
-        if math.isnan(finalResults['weightedMean']) or finalResults['weightedMean'] == 0:
-            finalPercentError2Sigma = float('nan')
-            finalPercentError1Sigma = float('nan')
+        if math.isnan(final_results['weighted_mean']) or final_results['weighted_mean'] == 0:
+            final_percent_error_2sigma = float('nan')
+            final_percent_error_1sigma = float('nan')
         else:
-            finalPercentError1Sigma = (finalResults['standardError'] / finalResults['weightedMean']) * 100
-            finalPercentError2Sigma = finalPercentError1Sigma * 2.0
+            final_percent_error_1sigma = (final_results['standard_error'] / final_results['weighted_mean']) * 100
+            final_percent_error_2sigma = final_percent_error_1sigma * 2.0
 
-        fe_se_1s = finalResults['standardError']
+        fe_se_1s = final_results['standard_error']
 
-        mswd_val = finalResults['mswd']
-        n_final  = finalResults['n']
+        mswd_val = final_results['mswd']
+        n_final  = final_results['n']
         # √MSWD scaling only for significant overdispersion: MSWD above the
         # Wendt & Carl (1991) 95% limit for n, as in the Plateau & isochron tool.
         wc_limit = mswd_critical(n_final)
@@ -2464,27 +2464,27 @@ class FluxMonitorsWindow(QMainWindow):
         run_reml = use_reml.get() if use_reml is not None else True
 
         if run_reml:
-            reml_result = self.remlRandomEffects(currentData, valueKey, uncertaintyKey)
+            reml_result = self.reml_random_effects(current_data, value_key, uncertainty_key)
         else:
             reml_result = None
 
         if reml_result:
-            reml_mean  = reml_result['weightedMean']
+            reml_mean  = reml_result['weighted_mean']
             reml_se_1s = reml_result['se_1sigma']
             reml_tau   = reml_result['tau']
             reml_tau2  = reml_result['tau2']
         else:
-            reml_mean  = finalResults['weightedMean']
+            reml_mean  = final_results['weighted_mean']
             reml_se_1s = fe_se_1s
             reml_tau   = 0.0
             reml_tau2  = 0.0
 
-        p_value = self.mswdPValue(mswd_val, n_final)
+        p_value = self.mswd_p_value(mswd_val, n_final)
 
-        plotData = {
-            'allPoints': [], 'keptPoints': [], 'removedPoints': [],
-            'weightedMean':   finalResults['weightedMean'],
-            'standardError':  finalResults['standardError'],
+        plot_data = {
+            'all_points': [], 'kept_points': [], 'removed_points': [],
+            'weighted_mean':   final_results['weighted_mean'],
+            'standard_error':  final_results['standard_error'],
             'mswd':           mswd_val,
             'wc_limit':       wc_limit,
             'overdispersed':  overdispersed,
@@ -2500,23 +2500,23 @@ class FluxMonitorsWindow(QMainWindow):
             'n_final':        n_final,
         }
 
-        highErrorIds = [item['sampleId'] for item in dataWithRelErr
-                       if apply_error_filter and item['relativeError'] > error_limit]
-        outlierIds   = [item['sampleId'] for item in allRemovedItems]
-        manualIds    = set((manual_exclusions or {}).keys())
+        high_error_ids = [item['sample_id'] for item in data_with_rel_err
+                       if apply_error_filter and item['relative_error'] > error_limit]
+        outlier_ids   = [item['sample_id'] for item in all_removed_items]
+        manual_ids    = set((manual_exclusions or {}).keys())
 
-        source_data = all_data if all_data is not None else originalData
+        source_data = all_data if all_data is not None else original_data
 
         for item in source_data:
-            if not _finite(item.get(valueKey)):
+            if not _finite(item.get(value_key)):
                 continue
-            unc = item.get(uncertaintyKey)
+            unc = item.get(uncertainty_key)
             unc = float(unc) if _finite(unc) else float('nan')
-            pointData = {
-                'sampleId':    item['sampleId'],
-                'value':       item[valueKey],
+            point_data = {
+                'sample_id':    item['sample_id'],
+                'value':       item[value_key],
                 'uncertainty': unc,
-                'relativeError': (unc / abs(item[valueKey]) * 100) if item[valueKey] != 0 else float('inf'),
+                'relative_error': (unc / abs(item[value_key]) * 100) if item[value_key] != 0 else float('inf'),
                 'power':       item.get('power'),
                 'label':       item.get('label'),
                 'ar39':        item.get('ar39'),
@@ -2529,39 +2529,39 @@ class FluxMonitorsWindow(QMainWindow):
                 'source':      item.get('source'),
             }
 
-            if item['sampleId'] in invalidIds:
-                pointData['status'] = 'invalid'
-                plotData['removedPoints'].append(pointData)
-            elif item['sampleId'] in manualIds:
-                reason = (manual_exclusions or {}).get(item['sampleId'], "")
-                pointData['status'] = 'manual'
-                pointData['reason'] = reason
-                plotData['removedPoints'].append(pointData)
-            elif item['sampleId'] in incl_ids:
-                pointData['status'] = 'included'   # force-kept by the user
-                plotData['keptPoints'].append(pointData)
-            elif item['sampleId'] in highErrorIds:
-                pointData['status'] = 'high_error'
-                plotData['removedPoints'].append(pointData)
-            elif item['sampleId'] in outlierIds:
-                pointData['status'] = 'outlier'
-                plotData['removedPoints'].append(pointData)
+            if item['sample_id'] in invalid_ids:
+                point_data['status'] = 'invalid'
+                plot_data['removed_points'].append(point_data)
+            elif item['sample_id'] in manual_ids:
+                reason = (manual_exclusions or {}).get(item['sample_id'], "")
+                point_data['status'] = 'manual'
+                point_data['reason'] = reason
+                plot_data['removed_points'].append(point_data)
+            elif item['sample_id'] in incl_ids:
+                point_data['status'] = 'included'   # force-kept by the user
+                plot_data['kept_points'].append(point_data)
+            elif item['sample_id'] in high_error_ids:
+                point_data['status'] = 'high_error'
+                plot_data['removed_points'].append(point_data)
+            elif item['sample_id'] in outlier_ids:
+                point_data['status'] = 'outlier'
+                plot_data['removed_points'].append(point_data)
             else:
-                pointData['status'] = 'kept'
-                plotData['keptPoints'].append(pointData)
+                point_data['status'] = 'kept'
+                plot_data['kept_points'].append(point_data)
 
-            plotData['allPoints'].append(pointData)
+            plot_data['all_points'].append(point_data)
 
-        n_manual = len(manualIds & {it['sampleId'] for it in source_data})
-        self.log(f"Final: {len(currentData)}/{len(categoryData)} points, "
-                f"Mean: {finalResults['weightedMean']:.6e}, MSWD: {finalResults['mswd']:.3f}"
+        n_manual = len(manual_ids & {it['sample_id'] for it in source_data})
+        self.log(f"Final: {len(current_data)}/{len(category_data)} points, "
+                f"Mean: {final_results['weighted_mean']:.6e}, MSWD: {final_results['mswd']:.3f}"
                 + (f", {n_manual} manually excluded" if n_manual else ""))
 
         return {
-            'category': categoryName, 'initialPoints': total_points, 'finalPoints': len(currentData),
-            'weightedMean': finalResults['weightedMean'], 'standardError': finalResults['standardError'],
-            'percentError2Sigma': finalPercentError2Sigma, 'percentError1Sigma': finalPercentError1Sigma,
-            'mswd': finalResults['mswd'], 'plotData': plotData,
+            'category': category_name, 'initial_points': total_points, 'final_points': len(current_data),
+            'weighted_mean': final_results['weighted_mean'], 'standard_error': final_results['standard_error'],
+            'percent_error_2sigma': final_percent_error_2sigma, 'percent_error_1sigma': final_percent_error_1sigma,
+            'mswd': final_results['mswd'], 'plot_data': plot_data,
             'fe_se_1s':   fe_se_1s,
             'od_se_1s':   od_se_1s,
             'reml_mean':  reml_mean,
@@ -2573,7 +2573,7 @@ class FluxMonitorsWindow(QMainWindow):
             'overdispersed': overdispersed,
         }
 
-    def sequentialMSWD(self, data, valueKey, uncertaintyKey, protected=()):
+    def sequential_mswd(self, data, value_key, uncertainty_key, protected=()):
         """MSWD-based outlier rejection, one point at a time.
 
         Each round, while the MSWD of the current set exceeds the threshold
@@ -2620,8 +2620,8 @@ class FluxMonitorsWindow(QMainWindow):
         while True:
             pool = prot + cur
             n = len(pool)
-            vals = [float(it[valueKey]) for it in pool]
-            sigs = [float(it[uncertaintyKey]) for it in pool]
+            vals = [float(it[value_key]) for it in pool]
+            sigs = [float(it[uncertainty_key]) for it in pool]
             _, _, chi2 = wm(vals, sigs)
             mswd = chi2 / (n - 1) if n > 1 else 0.0
             thr = mswd_critical(n) if use_wc else fixed
@@ -2641,9 +2641,9 @@ class FluxMonitorsWindow(QMainWindow):
                 ov = vals[:k] + vals[k + 1:]
                 os_ = sigs[:k] + sigs[k + 1:]
                 if test:
-                    rr = self.remlRandomEffects(
+                    rr = self.reml_random_effects(
                         [{'v': v, 'e': s} for v, s in zip(ov, os_)], 'v', 'e')
-                    mu, se, tau2 = rr['weightedMean'], rr['se_1sigma'], rr['tau2']
+                    mu, se, tau2 = rr['weighted_mean'], rr['se_1sigma'], rr['tau2']
                     den = math.sqrt(sigs[k] ** 2 + tau2 + se ** 2)
                 else:
                     mu, W, _ = wm(ov, os_)
@@ -2657,7 +2657,7 @@ class FluxMonitorsWindow(QMainWindow):
                 if best_r <= crit:
                     self.log(f"  MSWD {mswd:.3f} > {thr:.3f} (n = {n}), but no point is "
                              f"discordant with the others: largest studentized residual "
-                             f"{best_r:.2f} ({item.get('sampleId', '')}) ≤ {crit:.2f}. The "
+                             f"{best_r:.2f} ({item.get('sample_id', '')}) ≤ {crit:.2f}. The "
                              f"remaining scatter is overdispersion, not outliers; it is "
                              f"carried by the REML / √MSWD uncertainty.")
                     note = ("MSWD rejection: " + (f"{len(removed)} removed, then " if removed else "")
@@ -2669,7 +2669,7 @@ class FluxMonitorsWindow(QMainWindow):
                 why = f"|r| = {best_r:.2f}, χ² drop {best_r ** 2:.2f}"
             cur.remove(item)
             removed.append(item)
-            self.log(f"  removing {item.get('sampleId', '')} ({why}; MSWD was {mswd:.3f} "
+            self.log(f"  removing {item.get('sample_id', '')} ({why}; MSWD was {mswd:.3f} "
                      f"> {thr:.3f}, n = {n})")
         return cur, removed, note
 
@@ -2678,7 +2678,7 @@ class FluxMonitorsWindow(QMainWindow):
     # ---------------------------------------------------------------------
 
 
-    def remlRandomEffects(self, data, valueKey, uncertaintyKey):
+    def reml_random_effects(self, data, value_key, uncertainty_key):
         """
         REML (restricted maximum likelihood) random-effects model.
 
@@ -2706,8 +2706,8 @@ class FluxMonitorsWindow(QMainWindow):
         if n < 2:
             return None
 
-        sigmas_in = [float(item[uncertaintyKey]) for item in data]
-        values_in = [float(item[valueKey]) for item in data]
+        sigmas_in = [float(item[uncertainty_key]) for item in data]
+        values_in = [float(item[value_key]) for item in data]
         scale = sorted(sigmas_in)[n // 2] or (max(sigmas_in) or 1.0)
         shift = sum(values_in) / n
         sigmas = [s / scale for s in sigmas_in]
@@ -2754,14 +2754,14 @@ class FluxMonitorsWindow(QMainWindow):
         se  = math.sqrt(1.0 / W)
 
         return {
-            'weightedMean': mu,
+            'weighted_mean': mu,
             'se_1sigma':    se,
             'tau2':         tau2,
             'tau':          tau,
             'n':            n
         }
 
-    def mswdPValue(self, mswd, n):
+    def mswd_p_value(self, mswd, n):
         """
         Upper-tail p-value for MSWD under H0: no overdispersion.
         Uses chi-squared distribution with (n-1) degrees of freedom.
@@ -2778,7 +2778,7 @@ class FluxMonitorsWindow(QMainWindow):
         """Survival function P(χ² > x) for chi-squared distribution."""
         return float(chi2_dist.sf(x, df))
 
-    def calculateJFromAge(self, rValue, rError):
+    def j_from_r(self, r_value, r_error):
         """J = (e^{λ t_FCs} − 1) / R for a monitor ratio R, and its 1σ error.
 
         The ingrowth factor comes from arar_math.fc_ingrowth (the anchored chain
@@ -2789,9 +2789,9 @@ class FluxMonitorsWindow(QMainWindow):
         calibration and λ are systematics shared by every J and every age on
         that calibration; folding them into each J would let a weighted mean
         average them down.  They belong in the age's external tier."""
-        jValue = self._ingrowth() / rValue
-        jError = abs(jValue) * abs(rError / rValue)
-        return {'jValue': jValue, 'jError': jError}
+        j_value = self._ingrowth() / r_value
+        j_error = abs(j_value) * abs(r_error / r_value)
+        return {'j_value': j_value, 'j_error': j_error}
 
     def _pt_err_mult(self):
         """Multiplier to convert stored 1σ to the display σ (1σ or 2σ)."""
@@ -2834,10 +2834,10 @@ class FluxMonitorsWindow(QMainWindow):
         ax  = fig.add_subplot(111)
 
         nan = float('nan')
-        all_points     = plot_data.get('allPoints', [])
-        kept_points    = plot_data.get('keptPoints', [])
-        weighted_mean  = plot_data.get('weightedMean', nan)
-        standard_error = plot_data.get('standardError', nan)
+        all_points     = plot_data.get('all_points', [])
+        kept_points    = plot_data.get('kept_points', [])
+        weighted_mean  = plot_data.get('weighted_mean', nan)
+        standard_error = plot_data.get('standard_error', nan)
         mswd           = plot_data.get('mswd', nan)
 
         fe_se_1s   = plot_data.get('fe_se_1s',   standard_error)
@@ -2855,12 +2855,12 @@ class FluxMonitorsWindow(QMainWindow):
             ax.text(0.5, 0.5, 'No data points', ha='center', va='center', transform=ax.transAxes)
             ax.set_title(f"{category}: {data_type}")
         else:
-            x_of = {p['sampleId']: i + 1 for i, p in enumerate(all_points)}
+            x_of = {p['sample_id']: i + 1 for i, p in enumerate(all_points)}
 
-            # Register every plotted point for click-to-toggle (x, value, sampleId).
+            # Register every plotted point for click-to-toggle (x, value, sample_id).
             self._pick_ax = ax
             self._pick_category = category
-            self._pick_pts = [(x_of[p['sampleId']], p['value'], p['sampleId'])
+            self._pick_pts = [(x_of[p['sample_id']], p['value'], p['sample_id'])
                               for p in all_points]
 
             # Circle = single-step (fusion) crystal, triangle = a step of a
@@ -2877,7 +2877,7 @@ class FluxMonitorsWindow(QMainWindow):
             def _grain_label(point):
                 """Crystal ID, unless the point is its own crystal (no ID given)."""
                 gid = str(point.get('grain_id') or '').strip()
-                return gid if gid and gid != str(point.get('sampleId')) else ''
+                return gid if gid and gid != str(point.get('sample_id')) else ''
 
             def _draw(pts, color, edge, label, size=5, z=3, ann_color='dimgray',
                       per_kind=False):
@@ -2886,7 +2886,7 @@ class FluxMonitorsWindow(QMainWindow):
                     sel = [p for p in pts if _marker_for(p) == fmt]
                     if not sel:
                         continue
-                    xs   = [x_of[p['sampleId']] for p in sel]
+                    xs   = [x_of[p['sample_id']] for p in sel]
                     ys   = [p['value'] for p in sel]
                     yerr = [p['uncertainty'] * mult if _finite(p['uncertainty']) else 0.0
                             for p in sel]
@@ -2963,8 +2963,8 @@ class FluxMonitorsWindow(QMainWindow):
             wc = plot_data.get('wc_limit', float('nan'))
             p_str = f",  p = {p_value:.4f}" if _finite(p_value) else ""
             if _finite(wc):
-                sig_str = (f"  ⚠ above W&C limit {wc:.2f}" if plot_data.get('overdispersed')
-                           else f"  ✓ within W&C limit {wc:.2f}")
+                sig_str = (f",  above W&C limit {wc:.2f}" if plot_data.get('overdispersed')
+                           else f",  within W&C limit {wc:.2f}")
             else:
                 sig_str = ""
             mswd_str = f"{mswd:.3f}" if _finite(mswd) else "n/a"
@@ -3040,10 +3040,10 @@ class FluxMonitorsWindow(QMainWindow):
             return
 
         if data_type == "Calculated J":
-            res_map = results.get('measuredJResults', {})
+            res_map = results.get('measured_j_results', {})
             xlabel  = "Calculated J"
         else:
-            res_map = results.get('ratio4039Results', {})
+            res_map = results.get('ratio4039_results', {})
             xlabel  = "40/39 Ratio" if self.value_is_ratio else data_type
 
         mult      = self._pt_err_mult()
@@ -3053,15 +3053,15 @@ class FluxMonitorsWindow(QMainWindow):
 
         rows = []   # (group, mean, se_display, n, mswd)
         for cat, r in res_map.items():
-            wm = r.get('weightedMean')
+            wm = r.get('weighted_mean')
             if wm is None or (isinstance(wm, float) and math.isnan(wm)):
                 continue
             reml_mean = r.get('reml_mean')
             if use_reml and reml_mean is not None and not math.isnan(reml_mean):
-                m, se1 = reml_mean, r.get('reml_se_1s', r.get('standardError'))
+                m, se1 = reml_mean, r.get('reml_se_1s', r.get('standard_error'))
             else:
-                m, se1 = wm, r.get('od_se_1s', r.get('standardError'))
-            pdat = r.get('plotData', {})
+                m, se1 = wm, r.get('od_se_1s', r.get('standard_error'))
+            pdat = r.get('plot_data', {})
             rows.append((cat, m, (se1 or 0.0) * mult,
                          pdat.get('n_final'), r.get('mswd', float('nan'))))
 
@@ -3145,10 +3145,10 @@ class FluxMonitorsWindow(QMainWindow):
     def _category_reference(self, category, f):
         """The category's reported mean (REML or WM), in plotted units."""
         try:
-            r = self.results['ratio4039Results'][category]
+            r = self.results['ratio4039_results'][category]
         except (KeyError, TypeError):
             return float('nan')
-        m = r.get('reml_mean') if r.get('plotData', {}).get('run_reml') else r.get('weightedMean')
+        m = r.get('reml_mean') if r.get('plot_data', {}).get('run_reml') else r.get('weighted_mean')
         return f(m, 0.0)[0] if _finite(m) else float('nan')
 
     def _plot_by_crystal(self, category, data_type):
@@ -3191,7 +3191,7 @@ class FluxMonitorsWindow(QMainWindow):
                 return False
             if full:
                 return True
-            if t['sampleId'] in excl:
+            if t['sample_id'] in excl:
                 return False
             v, e = float(t['value40_39']), float(t['uncertainty40_39'])
             return lim is None or (v != 0 and e / abs(v) * 100.0 <= lim)
@@ -3222,7 +3222,7 @@ class FluxMonitorsWindow(QMainWindow):
                 y, s = f(t['value40_39'], t['uncertainty40_39'])
                 if not _finite(y):
                     continue
-                out = t['sampleId'] in excl
+                out = t['sample_id'] in excl
                 ax.errorbar(i, y, yerr=mult * s if _finite(s) else 0.0, fmt='o',
                             color='#b0b0b0' if out else '#1f77b4',
                             mfc='white' if out else '#1f77b4', capsize=2, markersize=4)
@@ -3279,7 +3279,7 @@ class FluxMonitorsWindow(QMainWindow):
         mult = self._pt_err_mult()
         sig = "2σ" if mult == 2.0 else "1σ"
         tagged = self._parse_crystal_structure(self.raw_category_data.get(category, []))
-        by_id = {t['sampleId']: t for t in tagged}
+        by_id = {t['sample_id']: t for t in tagged}
         groups = stats['groups']
         n_g = len(groups)
         npan = n_g + (1 if n_g >= 2 else 0)
@@ -3379,7 +3379,7 @@ class FluxMonitorsWindow(QMainWindow):
         for cat, rows in data.items():
             for r in rows:
                 if r.get('file_reason'):
-                    self.manual_exclusions.setdefault(cat, {})[r['sampleId']] = r['file_reason']
+                    self.manual_exclusions.setdefault(cat, {})[r['sample_id']] = r['file_reason']
                     n += 1
         return n
 
@@ -3510,7 +3510,7 @@ class FluxMonitorsWindow(QMainWindow):
         if self.loaded_source == 'direct' and self.raw_category_data:
             try:
                 self._run_analysis('=== RE-ANALYSIS of the Direct Input data (exclusions kept) ===')
-                self.log('\n✅ Analysis completed successfully!')
+                self.log('\nAnalysis complete.')
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Error analyzing data: {str(e)}")
             return
@@ -3524,14 +3524,14 @@ class FluxMonitorsWindow(QMainWindow):
             self.analyze_btn.setEnabled(False)
 
             if source == 'arar':
-                categoryData, _info = self._read_arar_files(self.arar_paths, **self.arar_opts)
+                category_data, _info = self._read_arar_files(self.arar_paths, **self.arar_opts)
             else:
                 if self.loaded_df is None or not self.loaded_col_map:
                     QMessageBox.critical(self, "Error", "No data loaded. Please import a file first.")
                     return
-                categoryData = self._build_category_data_from_df(
+                category_data = self._build_category_data_from_df(
                     self.loaded_df, self.loaded_col_map)
-            if not categoryData:
+            if not category_data:
                 QMessageBox.critical(self, "Error", "No valid data found. Check column mapping.")
                 return
 
@@ -3539,15 +3539,15 @@ class FluxMonitorsWindow(QMainWindow):
                 # back from Direct Input: its exclusions do not belong to this file
                 self._reset_overrides()
                 if source == 'arar':
-                    self._seed_file_exclusions(categoryData)
+                    self._seed_file_exclusions(category_data)
             self.loaded_source  = source
             self.value_is_ratio = self.file_value_is_ratio
             self.value_label    = self.file_value_label
             self.input_name     = (os.path.basename(self.input_file) if source == 'table'
                                    else self.input_name)
-            self.raw_category_data = categoryData
+            self.raw_category_data = category_data
             self._run_analysis('=== WEIGHTED MEAN ANALYSIS ===')
-            self.log('\n✅ Analysis completed successfully!')
+            self.log('\nAnalysis complete.')
 
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Error analyzing data: {str(e)}")
@@ -3566,9 +3566,6 @@ class FluxMonitorsWindow(QMainWindow):
         'invalid':    'Rejected: unusable (no error, R ≤ 0 or ³⁹Ar ≤ 0)',
         'manual':     'Excluded: manual',
     }
-
-    _STATUS_FILL = {'kept': "D9EAD3", 'included': "CFE2F3", 'high_error': "FCE5CD",
-                    'outlier': "F4CCCC", 'invalid': "F4CCCC", 'manual': "FFF2CC"}
 
     def export_results(self):
         if not self.results:
@@ -3591,7 +3588,7 @@ class FluxMonitorsWindow(QMainWindow):
     def _summary_rows(self):
         """(header, rows) of the Results sheet, one row per category."""
         nan = float('nan')
-        R = self.results['ratio4039Results']
+        R = self.results['ratio4039_results']
         cats = sorted(R, key=self._natural_sort_key)
         ratio = self.value_is_ratio
         vn = "R" if ratio else (self.value_label or "Value")
@@ -3608,11 +3605,11 @@ class FluxMonitorsWindow(QMainWindow):
         rows = []
         for cat in cats:
             r = R[cat]
-            pdat = r.get('plotData') or {}
-            n = r.get('finalPoints', 0)
+            pdat = r.get('plot_data') or {}
+            n = r.get('final_points', 0)
             mswd = r.get('mswd', nan)
             run_reml = bool(pdat.get('run_reml'))
-            wm, se, od = r.get('weightedMean', nan), r.get('fe_se_1s', nan), r.get('od_se_1s', nan)
+            wm, se, od = r.get('weighted_mean', nan), r.get('fe_se_1s', nan), r.get('od_se_1s', nan)
             rm, rse, tau = ((r.get('reml_mean', nan), r.get('reml_se_1s', nan), r.get('reml_tau', nan))
                             if run_reml else (nan, nan, nan))
             if run_reml and _finite(rm):
@@ -3621,7 +3618,7 @@ class FluxMonitorsWindow(QMainWindow):
                 rep, rep_se = wm, od
                 method = 'WM + √MSWD (W&C)' if pdat.get('overdispersed') else 'WM'
             wc = mswd_critical(n) if n > 1 else nan
-            row = [cat, basis, n, r.get('initialPoints'), mswd, r.get('p_value', nan), wc,
+            row = [cat, basis, n, r.get('initial_points'), mswd, r.get('p_value', nan), wc,
                    'yes' if pdat.get('overdispersed') else ('no' if n > 1 else ''),
                    wm, se, od, rm, rse, tau, rep, rep_se,
                    2.0 * rep_se if _finite(rep_se) else nan, method,
@@ -3629,8 +3626,8 @@ class FluxMonitorsWindow(QMainWindow):
             if ratio:
                 if _finite(rep) and rep > 0 and _finite(rep_se):
                     J = c / rep
-                    sJ = J * rep_se / rep
-                    row += [J, sJ, 2.0 * sJ, 100.0 * sJ / J]
+                    s_j = J * rep_se / rep
+                    row += [J, s_j, 2.0 * s_j, 100.0 * s_j / J]
                 else:
                     row += [nan, nan, nan, nan]
             rows.append(row)
@@ -3642,8 +3639,8 @@ class FluxMonitorsWindow(QMainWindow):
             crit.append(f"Ar-Ar files: {', '.join(os.path.basename(p) for p in self.arar_paths)}")
             crit.append(f"Categories: {'irradiation position' if self.arar_opts.get('group_by') == 'position' else 'file'};"
                         f" crystals: {ARAR_CRYSTAL_RULES.get(self.arar_opts.get('crystal_rule'), '')}")
-            crit.append("Step errors read at 1σ (arar_math.file_err_div); steps excluded in the "
-                        "files loaded as manual exclusions")
+            crit.append("Step errors read at 1σ; steps excluded in the files loaded as "
+                        "manual exclusions")
         elif self.loaded_source == 'table':
             sm = getattr(self, 'import_sigma_var', None)
             crit.append(f"Errors in file: {'±2σ (halved)' if sm and sm.get() == '2sigma' else '±1σ'}")
@@ -3671,8 +3668,7 @@ class FluxMonitorsWindow(QMainWindow):
             "Reported = REML random-effects mean and SE when REML is ticked, else the weighted "
             "mean with SE × √MSWD when the MSWD exceeds the Wendt & Carl limit.",
             "MSWD 95% limit: Wendt & Carl (1991), 1 + 2√(2/(n−1)); above it the scatter is "
-            "significant overdispersion and only then is the SE multiplied by √MSWD "
-            "(the rule of the Plateau & isochron tool, arar_math.mswd_critical).",
+            "significant overdispersion and only then is the SE multiplied by √MSWD.",
         ]
         if self.value_is_ratio:
             crit.append("J = (e^(λt) − 1)/R of the reported R. Its error is from R only: the FC age "
@@ -3685,37 +3681,19 @@ class FluxMonitorsWindow(QMainWindow):
 
     def _write_results_xlsx(self, path):
         from openpyxl import Workbook
-        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+        from openpyxl.styles import Font
 
         nan = float('nan')
-        BLUE_FILL = PatternFill("solid", fgColor="1F497D")
-        thin = Side(style="thin", color="AAAAAA")
-        box = Border(left=thin, right=thin, top=thin, bottom=thin)
+        bold = Font(bold=True)
 
-        def table(ws, start, header, rows, fills=None, widths=None):
+        def table(ws, start, header, rows, widths=None):
             for ci, h in enumerate(header, 1):
-                c = ws.cell(row=start, column=ci, value=h)
-                c.font = Font(bold=True, color="FFFFFF", name="Arial", size=10)
-                c.fill = BLUE_FILL
-                c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-                c.border = box
-            ws.row_dimensions[start].height = 30
+                ws.cell(row=start, column=ci, value=h).font = bold
             for ri, row in enumerate(rows):
-                fill = None
-                if fills and fills[ri]:
-                    fill = PatternFill("solid", fgColor=fills[ri])
                 for ci, v in enumerate(row, 1):
                     if isinstance(v, float) and not math.isfinite(v):
                         v = None
-                    c = ws.cell(row=start + 1 + ri, column=ci, value=v)
-                    c.font = Font(name="Arial", size=10)
-                    c.border = box
-                    if fill:
-                        c.fill = fill
-                    if isinstance(v, float):
-                        c.alignment = Alignment(horizontal="right")
-                        c.number_format = ("0.000000E+00" if v != 0 and (abs(v) < 1e-3 or abs(v) >= 1e5)
-                                           else "0.000000")
+                    ws.cell(row=start + 1 + ri, column=ci, value=v)
             for ci in range(1, len(header) + 1):
                 w = (widths or {}).get(ci, 16)
                 ws.column_dimensions[ws.cell(row=start, column=ci).column_letter].width = w
@@ -3724,15 +3702,16 @@ class FluxMonitorsWindow(QMainWindow):
         wb = Workbook()
         ws = wb.active
         ws.title = "Results"
-        ws.cell(row=1, column=1, value="WEIGHTED MEAN RESULTS").font = Font(bold=True, size=12, name="Arial")
-        ws.cell(row=2, column=1, value=f"Run: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}").font = \
-            Font(italic=True, size=9, name="Arial", color="555555")
+        ws.cell(row=1, column=1, value="WEIGHTED MEAN RESULTS").font = bold
+        ws.cell(row=2, column=1, value=f"Run: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}")
         header, rows = self._summary_rows()
         end = table(ws, 4, header, rows, widths={1: 18, 2: 30, 8: 14, 11: 20, 18: 20, 19: 50})
         r0 = end + 1
-        ws.cell(row=r0, column=1, value="ANALYSIS PARAMETERS").font = Font(bold=True, name="Arial", size=10)
+        ws.cell(row=r0, column=1, value="ANALYSIS PARAMETERS").font = bold
         for i, line in enumerate(self._parameter_lines(), start=1):
-            ws.cell(row=r0 + i, column=1, value=line).font = Font(name="Arial", size=9)
+            c = ws.cell(row=r0 + i, column=1, value=line)
+            if line == "NOTES":
+                c.font = bold
         ws.freeze_panes = "B5"
 
         # Points: what was averaged in each category, with its status
@@ -3744,19 +3723,19 @@ class FluxMonitorsWindow(QMainWindow):
         if ratio:
             ph += ['J', 'J σ (1σ)']
         ph += ['Status', 'Reason']
-        prow, pfill = [], []
+        prow = []
         tname = {'fusion': 'fusion (1 step)', 'incremental': 'step', 'pooled': 'crystal total gas'}
-        for cat in sorted(self.results['ratio4039Results'], key=self._natural_sort_key):
-            pdat = self.results['ratio4039Results'][cat].get('plotData') or {}
-            for p in pdat.get('allPoints', []):
+        for cat in sorted(self.results['ratio4039_results'], key=self._natural_sort_key):
+            pdat = self.results['ratio4039_results'][cat].get('plot_data') or {}
+            for p in pdat.get('all_points', []):
                 st = p.get('status', 'kept')
                 step = (f"Σ {p.get('n_steps')}/{p.get('crystal_n_steps')} steps"
                         if p.get('step_type') == 'pooled' else
                         (f"{float(p['power']):g}" if _finite(p.get('power')) else (p.get('label') or '')))
-                row = [cat, p.get('grain_id') or '', p['sampleId'],
+                row = [cat, p.get('grain_id') or '', p['sample_id'],
                        tname.get(p.get('step_type'), ''), step,
                        float(p['ar39']) if _finite(p.get('ar39')) else None,
-                       float(p['value']), p.get('uncertainty', nan), p.get('relativeError', nan)]
+                       float(p['value']), p.get('uncertainty', nan), p.get('relative_error', nan)]
                 if ratio:
                     v = float(p['value'])
                     if v > 0 and _finite(p.get('uncertainty')):
@@ -3766,9 +3745,8 @@ class FluxMonitorsWindow(QMainWindow):
                         row += [nan, nan]
                 row += [self._STATUS_LABEL.get(st, st), p.get('reason', '') or (p.get('pool_method') or '')]
                 prow.append(row)
-                pfill.append(self._STATUS_FILL.get(st))
         ws2 = wb.create_sheet("Points")
-        end = table(ws2, 1, ph, prow, pfill, widths={1: 16, 2: 20, 3: 18, 4: 16, 12: 30, 13: 36})
+        end = table(ws2, 1, ph, prow, widths={1: 16, 2: 20, 3: 18, 4: 16, 12: 30, 13: 36})
         ws2.freeze_panes = "A2"
         ws2.auto_filter.ref = f"A1:{ws2.cell(row=1, column=len(ph)).column_letter}{max(end - 1, 1)}"
 
@@ -3776,19 +3754,18 @@ class FluxMonitorsWindow(QMainWindow):
         if self.crystal_mode_var.get() != 'steps' or self.crystal_stats:
             sh = ['Category', 'Crystal', 'Step #', 'Steps in crystal', 'Step ID', 'Step', '³⁹Ar',
                   vn, f'{vn} σ (1σ)', 'Manual exclusion']
-            srow, sfill = [], []
+            srow = []
             for cat in sorted(self.raw_category_data, key=self._natural_sort_key):
                 excl = self.manual_exclusions.get(cat, {})
                 for t in self._parse_crystal_structure(self.raw_category_data[cat]):
-                    reason = excl.get(t['sampleId'])
+                    reason = excl.get(t['sample_id'])
                     srow.append([cat, t['grain_id'], t['step_index'], t['crystal_n_steps'],
-                                 t['sampleId'], self._step_text(t),
+                                 t['sample_id'], self._step_text(t),
                                  float(t['ar39']) if _finite(t.get('ar39')) else None,
                                  t.get('value40_39'), t.get('uncertainty40_39'),
                                  ('excluded' + (f": {reason}" if reason else "")) if reason is not None else ''])
-                    sfill.append(self._STATUS_FILL['manual'] if reason is not None else None)
             ws3 = wb.create_sheet("Steps")
-            end = table(ws3, 1, sh, srow, sfill, widths={1: 16, 2: 20, 5: 18, 10: 30})
+            end = table(ws3, 1, sh, srow, widths={1: 16, 2: 20, 5: 18, 10: 30})
             ws3.freeze_panes = "A2"
 
         if self.crystal_stats:
@@ -3807,22 +3784,20 @@ class FluxMonitorsWindow(QMainWindow):
             gh = ['Category', 'Grouped by', 'Group', 'n steps', 'n crystals', f'{vn} weighted mean',
                   'SE (1σ)', 'MSWD', 'p', 'REML mean', 'REML SE (1σ)', 'τ (1σ)',
                   f'Reported {vn}', 'Reported SE (1σ)', 'Method']
-            grow, gfill = [], []
+            grow = []
             for cat in sorted(self.step_group_stats, key=self._natural_sort_key):
                 sg = self.step_group_stats[cat]
                 for lab, s in sg['groups'].items():
                     grow.append([cat, sg['by'], lab, s['n'], s['n_crystals'], s['mean'], s['se'],
                                  s['mswd'], s['p'], s['reml_mean'], s['reml_se'], s['tau'],
                                  s['best_mean'], s['best_se'], s['method']])
-                    gfill.append(None)
                 b = sg.get('between')
                 if b:
                     grow.append([cat, sg['by'], 'BETWEEN GROUPS', len(sg['groups']), None,
                                  b['mean'], b['se'], b['mswd'], b['p'], None, None, None,
                                  None, None, 'WM of group means'])
-                    gfill.append("EEEEEE")
             ws5 = wb.create_sheet("Step groups")
-            table(ws5, 1, gh, grow, gfill, widths={1: 16, 2: 14, 3: 18, 15: 22})
+            table(ws5, 1, gh, grow, widths={1: 16, 2: 14, 3: 18, 15: 22})
             ws5.freeze_panes = "A2"
 
         wb.save(path)

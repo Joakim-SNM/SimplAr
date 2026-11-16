@@ -307,10 +307,17 @@ def build_about_html(base_dir):
           the monitor age does not depend on &lambda;, which cancels to below 0.01%.
           This also holds against U&ndash;Pb, where the comparison is between the
           astronomical and the uranium timescales;</li>
-      <li>jointly optimised calibrations (Renne 2010/2011, Carter 2025): &lambda; already
+      <li>the jointly optimised calibration of Carter et&nbsp;al. (2025): &lambda; already
           enters the external tier through its covariance with the monitor age, and
           adding it again would count it twice.</li>
     </ul>
+    <p>Renne et&nbsp;al. (2010, 2011) also calibrated the monitor age and &lambda;
+    jointly, but the covariances they publish are rounded too far to be propagated
+    for ages below about 1&nbsp;Ga; they recommend their Monte Carlo triplets instead,
+    which are not included here. For these two calibrations SimplAr therefore treats
+    the monitor age and &lambda; as independent and adds the full term. This
+    overstates the external error, by about a factor of four at 56&nbsp;Ma, and the
+    tools say so when they are selected.</p>
     <p>The term applies if the monitor age would change with &lambda;, and not
     otherwise.</p>
     """

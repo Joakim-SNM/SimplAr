@@ -76,7 +76,7 @@ from arar_math import (
     cfg_j_err_frac, r_to_age, rr_from_age, fsig, ff,
     paired_lambda_index, paired_lambda, DEFAULT_STD_AGE_ERR_TYPE,
     external_sigma_array, age_error_budget,
-    full_systematics_warning, force_light, calibration_group_key,
+    full_systematics_warning, calibration_warning, force_light, calibration_group_key,
     internal_sigma_array, systematic_matrix, dt_dlnR, fc_ingrowth, j_correlation, match_flux_hole, flux_hole_matches,
     external_route, DEFAULT_FC_NAME, DEFAULT_LAMBDA_NAME,
     cfg_J, scale_sem, position_ident, read_jflux, serialize_disk_flux,
@@ -1646,6 +1646,16 @@ def _plateau_summary(p, eff):
     return out
 
 
+def _show_r_standard(cfg):
+    """False when the R standard of a cfg is the placeholder of an Imported-ages
+    session (see _fo_rr), so the export leaves the column blank; else None, the
+    default of data_export.flux_cells."""
+    if (cfg.get('ageFluxMode', 'imported') == 'imported'
+            and (cfg.get('rStd') or 0.0) == _SESSION_CFG_DEFAULTS['rStd']):
+        return False
+    return None
+
+
 def _export_j_cells(cfg):
     """(J, 1σ J) in force for a cfg whose J is not read from the steps, else None.
 
@@ -2555,7 +2565,7 @@ class IsochronCanvas(FigureCanvas):
         if getattr(self, '_show_init_label', False) and init_ratio is not None:
             t = f'\u2074\u2070Ar/\u00b3\u2076Ar\u2080 = {init_ratio:.1f}'
             if init_2s:
-                t += f' \u00b1 {init_2s:.1f}'
+                t += f' \u00b1 {init_2s:.1f} (2\u03c3)'
             lines.append(t)
         lines += [t for t in extra_lines if t]
         if not lines:
@@ -2745,10 +2755,10 @@ class IsochronCanvas(FigureCanvas):
                 _v, _tag, _ = self._tier_text(age_2s_ana, age_2s_int, age_2s_ext,
                                               age_ma, '  ')
                 pct = (_v / age_ma * 100.0) if age_ma > 0 else 0.0
-                lines.append(f'Age = {age_ma:.2f} ± {_v:.2f} Ma ({pct:.1f}%{_tag})')
+                lines.append(f'Age = {age_ma:.2f} ± {_v:.2f} Ma (2σ, {pct:.1f}%{_tag})')
             if init_ratio is not None and not getattr(self, '_show_init_label', False):
                 lines.append(
-                    f'⁴⁰Ar/³⁶Ar₀ = {init_ratio:.1f} ± {init_ratio_2s:.1f}')
+                    f'⁴⁰Ar/³⁶Ar₀ = {init_ratio:.1f} ± {init_ratio_2s:.1f} (2σ)')
             lines.append(
                 f'MSWD = {fit["mswd"]:.2f},  p = {fit["prob"]:.3f}  '
                 f'(n = {fit["n"]})')
@@ -2774,7 +2784,6 @@ class IsochronCanvas(FigureCanvas):
                 ax.text(_sx, _sy, '\n'.join(lines),
                         transform=ax.transAxes, ha=_ha, va=_va,
                         fontsize=getattr(self, '_stats_fs', 7.5),
-                        family='monospace',
                         bbox=dict(boxstyle='round,pad=0.3',
                                   facecolor='white', edgecolor='#ccc',
                                   alpha=0.85),
@@ -3046,9 +3055,9 @@ class IsochronCanvas(FigureCanvas):
                         _v2, _tag2, _ = self._tier_text(age2_sig_ana, age2_sig_int,
                                                         age2_sig_ext, age2_ma, _gap)
                         pct2 = (_v2 / age2_ma * 100.0) if age2_ma > 0 else 0.0
-                        lines2.append(f'Age = {age2_ma:.2f} ± {_v2:.2f} Ma ({pct2:.1f}%{_tag2})')
+                        lines2.append(f'Age = {age2_ma:.2f} ± {_v2:.2f} Ma (2σ, {pct2:.1f}%{_tag2})')
                     if init2_ratio is not None and not getattr(self, '_show_init_label', False):
-                        lines2.append(f'⁴⁰Ar/³⁶Ar₀ = {init2_ratio:.1f} ± {init2_ratio_2s:.1f}')
+                        lines2.append(f'⁴⁰Ar/³⁶Ar₀ = {init2_ratio:.1f} ± {init2_ratio_2s:.1f} (2σ)')
                     lines2.append(
                         f'MSWD = {fit2["mswd"]:.2f},  p = {fit2["prob"]:.3f}'
                         f'  (n = {fit2["n"]})')
@@ -3075,7 +3084,6 @@ class IsochronCanvas(FigureCanvas):
                                      transform=self.ax.transAxes,
                                      ha=_ha, va=_va,
                                      fontsize=getattr(self, '_stats_fs', 7.5),
-                                     family='monospace',
                                      bbox=dict(boxstyle='round,pad=0.3',
                                                facecolor='white', edgecolor='#ccc',
                                                alpha=0.85), zorder=6)
@@ -5780,6 +5788,11 @@ class PlateauWindow(QMainWindow):
             _w = full_systematics_warning(self.cfg)
             if _w:
                 QMessageBox.information(self, "Full external: heads up", _w)
+        # Warn once each time the calibration becomes one of Renne et al.
+        _cw = calibration_warning(self.cfg)
+        if _cw and _cw != getattr(self, '_calib_warned', ''):
+            QMessageBox.information(self, "Calibration", _cw)
+        self._calib_warned = _cw
         self._update_flux_ui()
         # Sync plateau detection keys + display to _global_cfg so stack mode uses same values
         for _k in ('minPct', 'minN', 'pCut', 'errMode', 'ageDec', 'fullSystematics'):
@@ -8287,8 +8300,8 @@ class PlateauWindow(QMainWindow):
         for i, s in enumerate(self.steps_c):
             cak = s['caK']
             if cak and cak != 0:
-                kca_str   = ff(1.0 / cak, 1)
-                kca_e_str = ff(s["err_cak"] / (cak * cak), 1)
+                kca_str   = fsig(1.0 / cak, 5)
+                kca_e_str = fsig(s["err_cak"] / (cak * cak), 3)
             else:
                 kca_str = kca_e_str = ''
             w.writerow([
@@ -8296,7 +8309,8 @@ class PlateauWindow(QMainWindow):
                 s['label'],
                 f"{s['power']:.3f}",
                 s.get('run_dt', ''), dexp.fmt_days(_metas[i]),
-                *dexp.flux_cells(_cfg_e, *(_jc or (s.get('j_val'), s.get('j_err')))),
+                *dexp.flux_cells(_cfg_e, *(_jc or (s.get('j_val'), s.get('j_err'))),
+                                 show_r=_show_r_standard(_cfg_e)),
                 f"{s['age']:.8f}",
                 f"{s['err1s']:.8f}",
                 f"{s['pct39Ar']:.3f}",
@@ -8367,11 +8381,11 @@ class PlateauWindow(QMainWindow):
         w.writerow(['Type', 'Age (Ma)',
                     f'±{sig_lbl} Ana (Ma)', f'±{sig_lbl} Int (Ma)', f'±{sig_lbl} Ext (Ma)',
                     'R_unk/R_std', f'±{sig_lbl} Ana R', f'±{sig_lbl} Int R', f'±{sig_lbl} Ext R',
-                    'Init ⁴⁰Ar/³⁶Ar', '±1σ', 'MSWD', 'p', 'n'])
+                    'Initial 40Ar/36Ar', f'±{sig_lbl}', 'MSWD', 'p', 'n'])
         for label, res in [('Normal', norm_r), ('Inverse', inv_r)]:
             if res:
                 ir40_36 = (f"{res['init_ratio']:.2f}" if res['init_ratio'] is not None else '')
-                ir40_36_e = (f"{res['init_ratio_1s']:.2f}" if res['init_ratio_1s'] is not None else '')
+                ir40_36_e = (f"{res['init_ratio_1s'] * sig_scale:.2f}" if res['init_ratio_1s'] is not None else '')
                 _rr_iso, _drdt_iso = rr_from_age(res['age_ma'], _cfg_e)
                 w.writerow([label,
                             f"{res['age_ma']:.8f}",
@@ -10191,8 +10205,8 @@ class PlateauWindow(QMainWindow):
                     for i, s in enumerate(sess.get('steps_c', [])):
                         cak = s['caK']
                         if cak and cak != 0:
-                            kca_str   = ff(1.0 / cak, 1)
-                            kca_e_str = ff(s["err_cak"] / (cak * cak), 1)
+                            kca_str   = fsig(1.0 / cak, 5)
+                            kca_e_str = fsig(s["err_cak"] / (cak * cak), 3)
                         else:
                             kca_str = kca_e_str = ''
                         w.writerow([
@@ -10200,6 +10214,7 @@ class PlateauWindow(QMainWindow):
                             s['label'], f"{s['power']:.3f}",
                             s.get('run_dt', ''), dexp.fmt_days(dexp.step_meta(s)),
                             *dexp.flux_cells(eff_cfg_s, *(_jc_s or (s.get('j_val'), s.get('j_err'))),
+                                             show_r=_show_r_standard(eff_cfg_s),
                                              r_val=_rv_s, r_err=_re_s),
                             f"{s['age']:.8f}", f"{s['err1s']:.8f}",
                             f"{s['pct39Ar']:.3f}",
@@ -10266,7 +10281,7 @@ class PlateauWindow(QMainWindow):
                 w.writerow(['Sample', 'Type', 'Age (Ma)',
                             f'±{sig_lbl} Ana (Ma)', f'±{sig_lbl} Int (Ma)', f'±{sig_lbl} Ext (Ma)',
                             'R_unk/R_std', f'±{sig_lbl} Ana R', f'±{sig_lbl} Int R', f'±{sig_lbl} Ext R',
-                            'Init ⁴⁰Ar/³⁶Ar', '±1σ', 'MSWD', 'p', 'n'])
+                            'Initial 40Ar/36Ar', f'±{sig_lbl}', 'MSWD', 'p', 'n'])
                 for si, sess in _inc:
                     title  = sess.get('title', f'#{si+1}')
                     # the aliquot's plateau steps on the J its plateau age uses
@@ -10283,7 +10298,7 @@ class PlateauWindow(QMainWindow):
                         if res:
                             ir40 = (f"{res['init_ratio']:.2f}"
                                     if res['init_ratio'] is not None else '')
-                            ir40e = (f"{res['init_ratio_1s']:.2f}"
+                            ir40e = (f"{res['init_ratio_1s'] * sig_scale:.2f}"
                                      if res['init_ratio_1s'] is not None else '')
                             _rr_iso, _drdt_iso = rr_from_age(res['age_ma'], cfg_s)
                             w.writerow([title, label,
@@ -10308,7 +10323,7 @@ class PlateauWindow(QMainWindow):
                 w.writerow(['Sample', 'Type', 'Age (Ma)',
                             f'±{sig_lbl} Ana (Ma)', f'±{sig_lbl} Int (Ma)', f'±{sig_lbl} Ext (Ma)',
                             'R_unk/R_std', f'±{sig_lbl} Ana R', f'±{sig_lbl} Int R', f'±{sig_lbl} Ext R',
-                            'Init ⁴⁰Ar/³⁶Ar', '±1σ', 'MSWD', 'p', 'n'])
+                            'Initial 40Ar/36Ar', f'±{sig_lbl}', 'MSWD', 'p', 'n'])
                 for label, is_inv in [('Normal', False), ('Inverse', True)]:
                     res = self._stacked_isochron_result(is_inv)
                     if res:
@@ -10324,7 +10339,7 @@ class PlateauWindow(QMainWindow):
                                     ff(_drdt_st * res['e1s_ext'] * sig_scale, 8) if _drdt_st else '',
                                     (f"{res['init_ratio']:.2f}"
                                      if res['init_ratio'] is not None else ''),
-                                    (f"{res['init_ratio_1s']:.2f}"
+                                    (f"{res['init_ratio_1s'] * sig_scale:.2f}"
                                      if res['init_ratio_1s'] is not None else ''),
                                     f"{res['mswd']:.3f}",
                                     f"{res['prob']:.4f}",

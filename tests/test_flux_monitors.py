@@ -42,9 +42,9 @@ def test_reml_vs_metafor():
            (27, 16886, 29, 17825)]
     data = [{'v': math.log((a / (a + b)) / (c / (c + d))),
              'e': math.sqrt(1 / a - 1 / (a + b) + 1 / c - 1 / (c + d))} for a, b, c, d in bcg]
-    r = window().remlRandomEffects(data, 'v', 'e')
+    r = window().reml_random_effects(data, 'v', 'e')
     close(r['tau2'], 0.3132, 2e-4, 'tau^2')
-    close(r['weightedMean'], -0.7145, 1e-4, 'mu')
+    close(r['weighted_mean'], -0.7145, 1e-4, 'mu')
     close(r['se_1sigma'], 0.1798, 1e-4, 'se')
 
 
@@ -55,9 +55,9 @@ def test_weighted_mean_and_j():
     rows = [r for r in synth.monitor_rows(1)['E1'] if r['uncertainty40_39'] > 0]
     w._set_loaded_data({'E1': copy.deepcopy(rows)}, 'direct', True, 'R', 'synthetic')
     w._run_analysis('test')
-    res = w.results['ratio4039Results']['E1']
+    res = w.results['ratio4039_results']['E1']
     ref = am.weighted_mean([r['value40_39'] for r in rows], [r['uncertainty40_39'] for r in rows])
-    close(res['weightedMean'], ref['mean'], 1e-12, 'weighted mean R')
+    close(res['weighted_mean'], ref['mean'], 1e-12, 'weighted mean R')
     close(res['fe_se_1s'], ref['sem'], 1e-10, 'SE (1σ)')
     close(res['mswd'], ref['mswd'], 1e-10, 'MSWD')
     over = res['mswd'] > am.mswd_critical(len(rows))
@@ -95,7 +95,7 @@ def test_window_and_export():
     w.file_source = 'arar'; w.loaded_source = None   # the file tab, not the pasted data
     w.input_file = w.arar_paths[0]; w.input_name = 'synthetic files'
     w.analyze_data()
-    cats = list(w.results['ratio4039Results'])
+    cats = list(w.results['ratio4039_results'])
     assert cats == ['TEST1-E3', 'TEST1-E7'], cats
     assert any(r == 'excluded in file' for r in w.manual_exclusions['TEST1-E3'].values())
     path = os.path.join(d, 'out.xlsx')
