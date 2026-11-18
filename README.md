@@ -20,13 +20,21 @@ In the order they are normally used:
    the combination of several aliquots (stack mode).
 5. **Age distribution**: probability density plots, pooled ages of many analyses or
    samples, and mixture and minimum-age models.
+6. **Recalculator and age combiner**: recasts published ages to another calibration
+   (any monitor, through its R relative to Fish Canyon sanidine) with the external
+   error of the new calibration, and combines ages published on different calibrations.
+
+The launcher's **Standards** window holds the monitors, Fish Canyon calibrations and
+decay constants that all tools use, with their sources. The published values ship
+with SimplAr; your edits are kept separately and can be reset.
 
 The launcher's **About** window describes the methods and equations in full, with
 references.
 
 ## Installation
 
-SimplAr runs on Windows, macOS and Linux. You need Python with the requirements automatically installed at first start. 
+SimplAr runs on Windows, macOS and Linux. It needs Python; the packages it uses are
+installed at the first start.
 
 1. **Install Python 3.10 or later** from
    [python.org/downloads](https://www.python.org/downloads/).
@@ -63,28 +71,35 @@ From a terminal, the same is:
 
 Results and sessions go to a data folder outside the program folder, by default
 `SimplAr data` in your Documents folder, with one subfolder per tool
-(`1 Data converter` … `5 Age distribution`). Every open and save dialog starts in its
-tool's subfolder; .jflux files are looked for in `3 Flux regression`. The launcher shows
-the data folder and can open it or point the tools at another one. Figure-export presets
-and the rendered equations of the About window are kept in the user's settings and
-cache folders, so the program folder never changes when you use it.
+(`1 Data converter` … `6 Recalculator and age combiner`). Every open and save dialog
+starts in its tool's subfolder; .jflux files are looked for in `3 Flux regression`.
+The launcher shows the data folder and can open it or point the tools at another one.
+Figure-export presets, edited standards and the rendered equations of the About window
+are kept in the user's settings and cache folders, so the program folder never changes
+when you use it.
 
 ## Layout
 
 | Path | Contents |
 | --- | --- |
-| `launcher.py`, `about_text.py` | launcher and the Methods & Reference document |
-| `arar_math.py` | statistics, calibration presets and constants shared by all tools |
-| `data_export.py`, `figure_export.py`, `flux_dialog.py`, `mixture_model.py` | shared data export, figure export, disk-flux dialog and mixture models |
+| `launcher.py` | launcher and the Methods & Reference document |
+| `arar_math.py` | statistics, mixture models, calibration presets and constants shared by all tools |
+| `standards.py`, `standards_default.json` | the standards library with its editor, and its published values |
+| `export.py` | data export (.xlsx / .csv) and the figure-export dialog |
+| `flux_dialog.py` | the disk-flux dialog |
 | `data_folders.py` | the data folder and the open / save dialogs |
-| `1_data_converter/` … `5_age_distribution/` | one folder per tool |
+| `1_data_converter/` … `6_recalculator/` | one folder per tool |
 | `tests/` | checks against published values and independent implementations |
 
 ## Tests
 
     python tests/run_all.py
 
-runs every test (the windows open off-screen). The tests use made-up data
+runs every test (the windows open off-screen): calibrations and external errors
+(`test_calibration.py`), the combination statistics and mixture models
+(`test_statistics.py`), Flux monitors and Flux regression (`test_flux.py`), the figure
+exports (`test_figures.py`), and the tools opening, saving and agreeing with each other
+(`test_tools.py`). The tests use made-up data
 (`tests/synthetic_data.py`) and check the tools against published values (the
 calibration papers, the metafor random-effects example) and against implementations
 written separately from the published equations (`tests/reference_framework.py`).
@@ -93,9 +108,9 @@ On GitHub they run on Windows, macOS and Linux for every push
 
 ## Calibration
 
-All tools open on the Phillips et al. (2022) Fish Canyon age with the Min et al. (2000)
-decay constant. Changing `DEFAULT_FC_NAME` in `arar_math.py` moves every tool to
-another preset. Uncertainties are held at 1σ internally; 1σ or 2σ is chosen at display
+All tools open on the calibration marked as the default in the Standards window; as
+shipped, the Phillips et al. (2022) Fish Canyon age with the Min et al. (2000) decay
+constant. Uncertainties are held at 1σ internally; 1σ or 2σ is chosen at display
 and export.
 
 ## Citing

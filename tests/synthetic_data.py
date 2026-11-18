@@ -87,6 +87,22 @@ def ratio_set(n=43, seed=3):
     return R, sR, R * RSTD, sR * RSTD
 
 
+def load_ratios():
+    """The 43 made-up single-crystal analyses of ratio_set()."""
+    return ratio_set()
+
+
+# the calibration of the made-up irradiation, for ratios to R_std (CFG) and
+# for ratios to FCs (CFG_R), on Phillips et al. (2022) with the Min et al. λ
+PHILLIPS = 'Phillips et al. (2022)'
+LAM, SLAM = 5.463e-10, 0.054e-10
+CFG = dict(ageFluxMode='ratio_R_std', rStd=RSTD, rStdErrPct=FLUX_PCT,
+           rStdErrMode='pct', stdAgeMa=28.176, stdAgeErrMa=0.0115,
+           stdAgeErrType='external', lambdaYr=LAM, lambdaErrYr=SLAM)
+CFG_R = dict(CFG, ageFluxMode='ratio_R_FCs', rfcsErrPct=FLUX_PCT,
+             pasteTier='analytical')
+
+
 # ── a step-heating experiment ──────────────────────────────────────────────
 
 def plateau_steps(seed=4):

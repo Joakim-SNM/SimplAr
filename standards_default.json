@@ -1,0 +1,635 @@
+{
+ "format": "SimplAr standards 1",
+ "notes": "All uncertainties are 1σ. Values published at 2σ have been halved. Each R is stored the way its paper prints it: 'std/FCs' is (⁴⁰Ar*/³⁹Ar_K of the standard) / (that of Fish Canyon sanidine, FCs), 'FCs/std' the inverse. R is measured in one irradiation, so it does not depend on any age or decay constant.",
+ "decay_constants": [
+  {
+   "name": "Steiger & Jäger (1977)",
+   "lambda": 5.543e-10,
+   "lambda_1s": 0.0,
+   "reference": "Steiger, R.H., Jäger, E. (1977) Earth and Planetary Science Letters 36, 359–362",
+   "doi": "10.1016/0012-821X(77)90060-7",
+   "notes": "IUGS convention. No uncertainty was assigned."
+  },
+  {
+   "name": "Min et al. (2000)",
+   "lambda": 5.463e-10,
+   "lambda_1s": 5.4e-12,
+   "reference": "Min, K., Mundil, R., Renne, P.R., Ludwig, K.R. (2000) Geochimica et Cosmochimica Acta 64, 73–98",
+   "doi": "10.1016/S0016-7037(99)00204-5",
+   "notes": "Published as 5.463 ± 0.107 × 10⁻¹⁰ yr⁻¹ (2σ)."
+  },
+  {
+   "name": "Renne et al. (2010)",
+   "lambda": 5.5492e-10,
+   "lambda_1s": 9.3e-13,
+   "reference": "Renne, P.R., Mundil, R., Balco, G., Min, K., Ludwig, K.R. (2010) Geochimica et Cosmochimica Acta 74, 5349–5367",
+   "doi": "10.1016/j.gca.2010.06.017",
+   "notes": "Optimised jointly with the FCs age."
+  },
+  {
+   "name": "Renne et al. (2011)",
+   "lambda": 5.5305e-10,
+   "lambda_1s": 1.32e-12,
+   "reference": "Renne, P.R., Balco, G., Ludwig, K.R., Mundil, R., Min, K. (2011) Geochimica et Cosmochimica Acta 75, 5097–5100",
+   "doi": "10.1016/j.gca.2011.06.021",
+   "notes": "Revision of Renne et al. (2010) without the liquid-scintillation data."
+  },
+  {
+   "name": "Carter et al. (2025)",
+   "lambda": 5.5042e-10,
+   "lambda_1s": 5.4e-13,
+   "reference": "Carter, J., Hasler, C., Fuentes, A., Tholt, A., Morgan, L.E., Renne, P.R. (2025) Geochimica et Cosmochimica Acta 397, 149–163",
+   "doi": "10.1016/j.gca.2025.03.024",
+   "notes": "Calibrated jointly with the FCs age (Bayesian)."
+  }
+ ],
+ "calibrations": [
+  {
+   "name": "Renne et al. (1998)  [S&J λ]",
+   "standard": "FCs",
+   "age": 28.02,
+   "age_1s": 0.16,
+   "decay_constant": "Steiger & Jäger (1977)",
+   "basis": "k-ar",
+   "sigma_includes_lambda": false,
+   "reference": "Renne, P.R., Swisher, C.C., Deino, A.L., Karner, D.B., Owens, T.L., DePaolo, D.J. (1998) Chemical Geology 145, 117–152",
+   "doi": "10.1016/S0009-2541(97)00159-9",
+   "notes": "Relative to the K–Ar age of GA1550 biotite (98.79 ± 0.54 Ma). ± 0.16 Ma excludes the decay-constant uncertainty; 28.02 ± 0.28 Ma includes it."
+  },
+  {
+   "name": "Kuiper et al. (2008)",
+   "standard": "FCs",
+   "age": 28.201,
+   "age_1s": 0.023,
+   "decay_constant": "Min et al. (2000)",
+   "basis": "astronomical",
+   "sigma_includes_lambda": true,
+   "anchor": {
+    "name": "Melilla tephras (composite)",
+    "age": 6.5,
+    "age_1s": 0.005,
+    "R_fcs_anchor": 4.3664,
+    "R_1s": 0.0009,
+    "standard": "Melilla"
+   },
+   "reference": "Kuiper, K.F., Deino, A., Hilgen, F.J., Krijgsman, W., Renne, P.R., Wijbrans, J.R. (2008) Science 320, 500–504",
+   "doi": "10.1126/science.1154339",
+   "notes": "Published as 28.201 ± 0.046 Ma (2σ). Anchor inputs from the supplementary material (already 1σ); 6.500 Ma is a composite reference for the Melilla tephras."
+  },
+  {
+   "name": "Renne et al. (2010)",
+   "standard": "FCs",
+   "age": 28.305,
+   "age_1s": 0.036,
+   "decay_constant": "Renne et al. (2010)",
+   "basis": "joint",
+   "sigma_includes_lambda": false,
+   "reference": "Renne, P.R., Mundil, R., Balco, G., Min, K., Ludwig, K.R. (2010) Geochimica et Cosmochimica Acta 74, 5349–5367",
+   "doi": "10.1016/j.gca.2010.06.017",
+   "notes": "Joint optimisation with λ. The published covariances are too rounded to use, so SimplAr treats the FCs age and λ as independent, which overstates the external uncertainty."
+  },
+  {
+   "name": "Renne et al. (2011)",
+   "standard": "FCs",
+   "age": 28.294,
+   "age_1s": 0.036,
+   "decay_constant": "Renne et al. (2011)",
+   "basis": "joint",
+   "sigma_includes_lambda": false,
+   "reference": "Renne, P.R., Balco, G., Ludwig, K.R., Mundil, R., Min, K. (2011) Geochimica et Cosmochimica Acta 75, 5097–5100",
+   "doi": "10.1016/j.gca.2011.06.021",
+   "notes": "As Renne et al. (2010); the covariances are not used."
+  },
+  {
+   "name": "Rivera et al. (2011)",
+   "standard": "FCs",
+   "age": 28.172,
+   "age_1s": 0.014,
+   "decay_constant": "Min et al. (2000)",
+   "basis": "astronomical",
+   "sigma_includes_lambda": true,
+   "anchor": {
+    "name": "A1 tephra, Faneromeni, Crete",
+    "age": 6.943,
+    "age_1s": 0.0025,
+    "R_fcs_anchor": 4.0813,
+    "R_1s": 0.0013,
+    "standard": "A1"
+   },
+   "reference": "Rivera, T.A., Storey, M., Zeeden, C., Hilgen, F.J., Kuiper, K. (2011) Earth and Planetary Science Letters 311, 420–426",
+   "doi": "10.1016/j.epsl.2011.09.017",
+   "notes": "Published as 28.172 ± 0.028 Ma and R = 4.0813 ± 0.0026 (2σ)."
+  },
+  {
+   "name": "Phillips et al. (2022)",
+   "standard": "FCs",
+   "age": 28.176,
+   "age_1s": 0.0115,
+   "decay_constant": "Min et al. (2000)",
+   "basis": "astronomical",
+   "sigma_includes_lambda": true,
+   "default": true,
+   "anchor": {
+    "name": "A1 tephra, Faneromeni, Crete",
+    "age": 6.943,
+    "age_1s": 0.0025,
+    "R_fcs_anchor": 4.0819,
+    "R_1s": 0.0007,
+    "standard": "A1"
+   },
+   "reference": "Phillips, D., Matchan, E.L., Dalton, H., Kuiper, K.F. (2022) Chemical Geology 597, 120815",
+   "doi": "10.1016/j.chemgeo.2022.120815",
+   "notes": "Recommended inter-laboratory value, A1 route. Published as 28.176 ± 0.023 Ma, R = 4.0819 ± 0.0014 and t(A1) = 6.943 ± 0.005 Ma (2σ)."
+  },
+  {
+   "name": "Carter et al. (2025)",
+   "standard": "FCs",
+   "age": 28.183,
+   "age_1s": 0.017,
+   "decay_constant": "Carter et al. (2025)",
+   "basis": "joint",
+   "sigma_includes_lambda": true,
+   "covariance": 1.866205e-20,
+   "reference": "Carter, J., Hasler, C., Fuentes, A., Tholt, A., Morgan, L.E., Renne, P.R. (2025) Geochimica et Cosmochimica Acta 397, 149–163",
+   "doi": "10.1016/j.gca.2025.03.024",
+   "notes": "Joint Bayesian calibration with λ. Covariance cov(λ, t_FCs) in yr⁻¹·yr from the authors' notebook (figshare doi:10.6084/m9.figshare.27284775)."
+  },
+  {
+   "name": "Historical S&J — 27.84 Ma",
+   "standard": "FCs",
+   "age": 27.84,
+   "age_1s": 0.0,
+   "decay_constant": "Steiger & Jäger (1977)",
+   "basis": "k-ar",
+   "sigma_includes_lambda": false,
+   "reference": "Deino, A., Potts, R. (1990) Journal of Geophysical Research 95, 8453–8470",
+   "doi": "10.1029/JB095iB06p08453",
+   "notes": "Relative to MMhb-1 at 520.4 Ma (Samson, S.D., Alexander, E.C. (1987) Chemical Geology 66, 27–34). Kept for recalculating older ages."
+  }
+ ],
+ "standards": [
+  {
+   "id": "FCs",
+   "name": "Fish Canyon sanidine",
+   "mineral": "sanidine",
+   "locality": "Fish Canyon Tuff, San Juan volcanic field, Colorado, USA",
+   "notes": "Reference standard: every R in this library is relative to FCs, and its ages are the calibrations.",
+   "intercalibrations": [
+    {
+     "R": 1.0,
+     "R_1s": 0.0,
+     "reference": "By definition",
+     "doi": "",
+     "notes": "",
+     "recommended": true,
+     "ratio": "std/FCs"
+    }
+   ],
+   "published_ages": []
+  },
+  {
+   "id": "ACs",
+   "name": "Alder Creek sanidine",
+   "mineral": "sanidine",
+   "locality": "Alder Creek rhyolite, Cobb Mountain, California, USA",
+   "notes": "Quaternary standard. Older R values (before 2006) are about 1.4 % higher than recent ones.",
+   "intercalibrations": [
+    {
+     "R": 0.041707,
+     "R_1s": 1.1e-05,
+     "reference": "Niespolo, E.M., Rutte, D., Deino, A.L., Renne, P.R. (2017) Quaternary Geochronology 39, 205–213",
+     "doi": "",
+     "notes": "Recommended inter-laboratory value.",
+     "recommended": true,
+     "ratio": "std/FCs"
+    },
+    {
+     "R": 0.041702,
+     "R_1s": 1.4e-05,
+     "reference": "Niespolo, E.M., Rutte, D., Deino, A.L., Renne, P.R. (2017) Quaternary Geochronology 39, 205–213",
+     "doi": "",
+     "notes": "Intra-laboratory weighted mean.",
+     "ratio": "std/FCs"
+    },
+    {
+     "R": 0.04176,
+     "R_1s": 4e-05,
+     "reference": "Jicha, B.R., Singer, B.S., Sobol, P. (2016) Chemical Geology 431, 54–66",
+     "doi": "10.1016/j.chemgeo.2016.03.024",
+     "notes": "As compiled in Niespolo et al. (2017), Table 1.",
+     "ratio": "std/FCs"
+    },
+    {
+     "R": 0.04175,
+     "R_1s": 3e-05,
+     "reference": "Rivera, T.A. et al. (2013) Chemical Geology 345, 87–98",
+     "doi": "",
+     "notes": "As compiled in Niespolo et al. (2017), Table 1.",
+     "ratio": "std/FCs"
+    },
+    {
+     "R": 0.04169,
+     "R_1s": 2e-05,
+     "reference": "Phillips, D., Matchan, E.L. (2013) Geochimica et Cosmochimica Acta 121, 229–239",
+     "doi": "",
+     "notes": "As compiled in Niespolo et al. (2017), Table 1.",
+     "ratio": "std/FCs"
+    },
+    {
+     "R": 0.0423,
+     "R_1s": 6e-05,
+     "reference": "Nomade, S. et al. (2005) Chemical Geology 218, 315–338",
+     "doi": "10.1016/j.chemgeo.2005.01.005",
+     "notes": "As compiled in Niespolo et al. (2017), Table 1.",
+     "ratio": "std/FCs"
+    },
+    {
+     "R": 0.04229,
+     "R_1s": 6e-05,
+     "reference": "Renne, P.R., Swisher, C.C., Deino, A.L., Karner, D.B., Owens, T.L., DePaolo, D.J. (1998) Chemical Geology 145, 117–152",
+     "doi": "10.1016/S0009-2541(97)00159-9",
+     "notes": "",
+     "ratio": "std/FCs"
+    }
+   ],
+   "published_ages": [
+    {
+     "age": 1.194,
+     "age_1s": 0.007,
+     "decay_constant": "Steiger & Jäger (1977)",
+     "reference": "Renne, P.R., Swisher, C.C., Deino, A.L., Karner, D.B., Owens, T.L., DePaolo, D.J. (1998) Chemical Geology 145, 117–152",
+     "doi": "",
+     "notes": "FCs 28.02 Ma; excludes the decay-constant uncertainty."
+    },
+    {
+     "age": 1.193,
+     "age_1s": 0.001,
+     "decay_constant": "Steiger & Jäger (1977)",
+     "reference": "Nomade, S. et al. (2005) Chemical Geology 218, 315–338",
+     "doi": "10.1016/j.chemgeo.2005.01.005",
+     "notes": "FCs 28.02 Ma."
+    },
+    {
+     "age": 1.2061,
+     "age_1s": 0.0019,
+     "decay_constant": "Renne et al. (2010)",
+     "reference": "Renne, P.R., Mundil, R., Balco, G., Min, K., Ludwig, K.R. (2010) Geochimica et Cosmochimica Acta 74, 5349–5367",
+     "doi": "",
+     "notes": "Includes systematic uncertainties."
+    },
+    {
+     "age": 1.2056,
+     "age_1s": 0.0019,
+     "decay_constant": "Renne et al. (2011)",
+     "reference": "Renne, P.R., Balco, G., Ludwig, K.R., Mundil, R., Min, K. (2011) Geochimica et Cosmochimica Acta 75, 5097–5100",
+     "doi": "",
+     "notes": "Includes systematic uncertainties."
+    },
+    {
+     "age": 1.185,
+     "age_1s": 0.0008,
+     "decay_constant": "Min et al. (2000)",
+     "reference": "Rivera, T.A. et al. (2013) Chemical Geology 345, 87–98",
+     "doi": "",
+     "notes": "Relative to the A1 tephra. Published as ± 0.0016 Ma (2σ, external)."
+    },
+    {
+     "age": 1.1848,
+     "age_1s": 0.0006,
+     "decay_constant": "Min et al. (2000)",
+     "reference": "Niespolo, E.M., Rutte, D., Deino, A.L., Renne, P.R. (2017) Quaternary Geochronology 39, 205–213",
+     "doi": "",
+     "notes": "Astronomical weighted mean."
+    },
+    {
+     "age": 1.1891,
+     "age_1s": 0.0008,
+     "decay_constant": "Renne et al. (2011)",
+     "reference": "Niespolo, E.M., Rutte, D., Deino, A.L., Renne, P.R. (2017) Quaternary Geochronology 39, 205–213",
+     "doi": "",
+     "notes": "On the Renne et al. (2011) optimisation."
+    }
+   ]
+  },
+  {
+   "id": "TCs",
+   "name": "Taylor Creek sanidine",
+   "mineral": "sanidine",
+   "locality": "Taylor Creek Rhyolite, Black Range, New Mexico, USA",
+   "notes": "",
+   "intercalibrations": [
+    {
+     "R": 1.0112,
+     "R_1s": 0.001,
+     "reference": "Renne, P.R., Swisher, C.C., Deino, A.L., Karner, D.B., Owens, T.L., DePaolo, D.J. (1998) Chemical Geology 145, 117–152",
+     "doi": "10.1016/S0009-2541(97)00159-9",
+     "notes": "",
+     "recommended": true,
+     "ratio": "std/FCs"
+    }
+   ],
+   "published_ages": [
+    {
+     "age": 28.34,
+     "age_1s": 0.16,
+     "decay_constant": "Steiger & Jäger (1977)",
+     "reference": "Renne, P.R., Swisher, C.C., Deino, A.L., Karner, D.B., Owens, T.L., DePaolo, D.J. (1998) Chemical Geology 145, 117–152",
+     "doi": "",
+     "notes": "Excludes the decay-constant uncertainty."
+    },
+    {
+     "age": 28.619,
+     "age_1s": 0.034,
+     "decay_constant": "Renne et al. (2010)",
+     "reference": "Renne, P.R., Mundil, R., Balco, G., Min, K., Ludwig, K.R. (2010) Geochimica et Cosmochimica Acta 74, 5349–5367",
+     "doi": "",
+     "notes": "Includes systematic uncertainties."
+    },
+    {
+     "age": 28.608,
+     "age_1s": 0.033,
+     "decay_constant": "Renne et al. (2011)",
+     "reference": "Renne, P.R., Balco, G., Ludwig, K.R., Mundil, R., Min, K. (2011) Geochimica et Cosmochimica Acta 75, 5097–5100",
+     "doi": "",
+     "notes": "Includes systematic uncertainties."
+    }
+   ]
+  },
+  {
+   "id": "GA1550",
+   "name": "GA1550 biotite",
+   "mineral": "biotite",
+   "locality": "Mount Dromedary monzonite, New South Wales, Australia",
+   "notes": "Primary K–Ar standard.",
+   "intercalibrations": [
+    {
+     "R": 3.5958,
+     "R_1s": 0.0031,
+     "reference": "Jourdan, F., Renne, P.R. (2007) Geochimica et Cosmochimica Acta 71, 387–402",
+     "doi": "10.1016/j.gca.2006.09.002",
+     "notes": "As listed in Renne et al. (2010), Table 5.",
+     "recommended": true,
+     "ratio": "std/FCs"
+    },
+    {
+     "R": 3.5957,
+     "R_1s": 0.0038,
+     "reference": "Renne, P.R., Swisher, C.C., Deino, A.L., Karner, D.B., Owens, T.L., DePaolo, D.J. (1998) Chemical Geology 145, 117–152",
+     "doi": "10.1016/S0009-2541(97)00159-9",
+     "notes": "",
+     "ratio": "std/FCs"
+    }
+   ],
+   "published_ages": [
+    {
+     "age": 98.79,
+     "age_1s": 0.54,
+     "decay_constant": "Steiger & Jäger (1977)",
+     "reference": "Renne, P.R., Swisher, C.C., Deino, A.L., Karner, D.B., Owens, T.L., DePaolo, D.J. (1998) Chemical Geology 145, 117–152",
+     "doi": "",
+     "notes": "K–Ar age; excludes the decay-constant uncertainty."
+    },
+    {
+     "age": 99.769,
+     "age_1s": 0.108,
+     "decay_constant": "Renne et al. (2010)",
+     "reference": "Renne, P.R., Mundil, R., Balco, G., Min, K., Ludwig, K.R. (2010) Geochimica et Cosmochimica Acta 74, 5349–5367",
+     "doi": "",
+     "notes": "Includes systematic uncertainties."
+    },
+    {
+     "age": 99.738,
+     "age_1s": 0.104,
+     "decay_constant": "Renne et al. (2011)",
+     "reference": "Renne, P.R., Balco, G., Ludwig, K.R., Mundil, R., Min, K. (2011) Geochimica et Cosmochimica Acta 75, 5097–5100",
+     "doi": "",
+     "notes": "Includes systematic uncertainties."
+    }
+   ]
+  },
+  {
+   "id": "MMhb-1",
+   "name": "McClure Mountain hornblende (MMhb-1)",
+   "mineral": "hornblende",
+   "locality": "McClure Mountain syenite, Colorado, USA",
+   "notes": "Heterogeneous at small sample sizes (Renne et al., 1998).",
+   "intercalibrations": [
+    {
+     "R": 21.4876,
+     "R_1s": 0.0079,
+     "reference": "Renne, P.R., Swisher, C.C., Deino, A.L., Karner, D.B., Owens, T.L., DePaolo, D.J. (1998) Chemical Geology 145, 117–152",
+     "doi": "10.1016/S0009-2541(97)00159-9",
+     "notes": "",
+     "recommended": true,
+     "ratio": "std/FCs"
+    }
+   ],
+   "published_ages": [
+    {
+     "age": 520.4,
+     "age_1s": 1.7,
+     "decay_constant": "Steiger & Jäger (1977)",
+     "reference": "Samson, S.D., Alexander, E.C. (1987) Chemical Geology 66, 27–34",
+     "doi": "",
+     "notes": "As published."
+    },
+    {
+     "age": 523.1,
+     "age_1s": 2.6,
+     "decay_constant": "Steiger & Jäger (1977)",
+     "reference": "Renne, P.R., Swisher, C.C., Deino, A.L., Karner, D.B., Owens, T.L., DePaolo, D.J. (1998) Chemical Geology 145, 117–152",
+     "doi": "",
+     "notes": "Excludes the decay-constant uncertainty."
+    }
+   ]
+  },
+  {
+   "id": "GHC-305",
+   "name": "GHC-305 biotite",
+   "mineral": "biotite",
+   "locality": "",
+   "notes": "Heterogeneous at small sample sizes (Renne et al., 1998). R from a single irradiation.",
+   "intercalibrations": [
+    {
+     "R": 3.8367,
+     "R_1s": 0.0143,
+     "reference": "Renne, P.R., Swisher, C.C., Deino, A.L., Karner, D.B., Owens, T.L., DePaolo, D.J. (1998) Chemical Geology 145, 117–152",
+     "doi": "10.1016/S0009-2541(97)00159-9",
+     "notes": "",
+     "recommended": true,
+     "ratio": "std/FCs"
+    }
+   ],
+   "published_ages": [
+    {
+     "age": 105.2,
+     "age_1s": 0.7,
+     "decay_constant": "Steiger & Jäger (1977)",
+     "reference": "Renne, P.R., Swisher, C.C., Deino, A.L., Karner, D.B., Owens, T.L., DePaolo, D.J. (1998) Chemical Geology 145, 117–152",
+     "doi": "",
+     "notes": "Excludes the decay-constant uncertainty."
+    }
+   ]
+  },
+  {
+   "id": "Hb3gr",
+   "name": "Hb3gr hornblende",
+   "mineral": "hornblende",
+   "locality": "Lienz amphibolite, Tirol, Austria",
+   "notes": "",
+   "intercalibrations": [
+    {
+     "R": 51.878,
+     "R_1s": 0.0592,
+     "reference": "Jourdan, F., Renne, P.R. (2007) Geochimica et Cosmochimica Acta 71, 387–402",
+     "doi": "10.1016/j.gca.2006.09.002",
+     "notes": "As listed in Renne et al. (2010), Table 5.",
+     "recommended": true,
+     "ratio": "std/FCs"
+    },
+    {
+     "R": 51.945,
+     "R_1s": 0.167,
+     "reference": "Jourdan, F., Verati, C., Féraud, G. (2006) Chemical Geology 231, 177–189",
+     "doi": "",
+     "notes": "Arithmetic mean and standard error of three irradiations.",
+     "ratio": "std/FCs"
+    }
+   ],
+   "published_ages": [
+    {
+     "age": 1073.6,
+     "age_1s": 5.3,
+     "decay_constant": "Steiger & Jäger (1977)",
+     "reference": "Jourdan, F., Verati, C., Féraud, G. (2006) Chemical Geology 231, 177–189",
+     "doi": "",
+     "notes": "FCs 28.02 Ma; excludes the decay-constant uncertainty."
+    },
+    {
+     "age": 1080.4,
+     "age_1s": 1.1,
+     "decay_constant": "Renne et al. (2010)",
+     "reference": "Renne, P.R., Mundil, R., Balco, G., Min, K., Ludwig, K.R. (2010) Geochimica et Cosmochimica Acta 74, 5349–5367",
+     "doi": "",
+     "notes": "Includes systematic uncertainties."
+    },
+    {
+     "age": 1081.0,
+     "age_1s": 1.2,
+     "decay_constant": "Renne et al. (2011)",
+     "reference": "Renne, P.R., Balco, G., Ludwig, K.R., Mundil, R., Min, K. (2011) Geochimica et Cosmochimica Acta 75, 5097–5100",
+     "doi": "",
+     "notes": "Includes systematic uncertainties."
+    }
+   ]
+  },
+  {
+   "id": "NL-25",
+   "name": "NL-25 hornblende",
+   "mineral": "hornblende",
+   "locality": "",
+   "notes": "",
+   "intercalibrations": [
+    {
+     "R": 211.42,
+     "R_1s": 1.52,
+     "reference": "Jourdan, F., Renne, P.R. (2007) Geochimica et Cosmochimica Acta 71, 387–402",
+     "doi": "10.1016/j.gca.2006.09.002",
+     "notes": "As listed in Renne et al. (2010), Table 5.",
+     "recommended": true,
+     "ratio": "std/FCs"
+    }
+   ],
+   "published_ages": [
+    {
+     "age": 2648.1,
+     "age_1s": 10.1,
+     "decay_constant": "Renne et al. (2010)",
+     "reference": "Renne, P.R., Mundil, R., Balco, G., Min, K., Ludwig, K.R. (2010) Geochimica et Cosmochimica Acta 74, 5349–5367",
+     "doi": "",
+     "notes": "Includes systematic uncertainties."
+    },
+    {
+     "age": 2651.8,
+     "age_1s": 10.5,
+     "decay_constant": "Renne et al. (2011)",
+     "reference": "Renne, P.R., Balco, G., Ludwig, K.R., Mundil, R., Min, K. (2011) Geochimica et Cosmochimica Acta 75, 5097–5100",
+     "doi": "",
+     "notes": "Includes systematic uncertainties."
+    }
+   ]
+  },
+  {
+   "id": "A1",
+   "name": "A1 tephra sanidine",
+   "mineral": "sanidine",
+   "locality": "Faneromeni section, Crete, Greece",
+   "notes": "Astronomically dated anchor of the Rivera et al. (2011) and Phillips et al. (2022) FCs ages.",
+   "intercalibrations": [
+    {
+     "R": 4.0819,
+     "R_1s": 0.0007,
+     "ratio": "FCs/std",
+     "reference": "Phillips, D., Matchan, E.L., Dalton, H., Kuiper, K.F. (2022) Chemical Geology 597, 120815",
+     "doi": "10.1016/j.chemgeo.2022.120815",
+     "notes": "Published as 4.0819 ± 0.0014 (2σ).",
+     "recommended": true
+    },
+    {
+     "R": 4.0813,
+     "R_1s": 0.0013,
+     "ratio": "FCs/std",
+     "reference": "Rivera, T.A., Storey, M., Zeeden, C., Hilgen, F.J., Kuiper, K. (2011) Earth and Planetary Science Letters 311, 420–426",
+     "doi": "10.1016/j.epsl.2011.09.017",
+     "notes": "Published as 4.0813 ± 0.0026 (2σ)."
+    },
+    {
+     "R": 0.244686,
+     "R_1s": 0.000178,
+     "ratio": "std/FCs",
+     "reference": "Niespolo, E.M., Rutte, D., Deino, A.L., Renne, P.R. (2017) Quaternary Geochronology 39, 205–213",
+     "doi": "",
+     "notes": "This study (Table 5)."
+    }
+   ],
+   "published_ages": [
+    {
+     "age": 6.943,
+     "age_1s": 0.0025,
+     "decay_constant": null,
+     "reference": "Rivera, T.A. et al. (2011); Phillips, D. et al. (2022)",
+     "doi": "",
+     "notes": "Astronomical age; does not depend on λ. Published as ± 0.005 Ma (2σ)."
+    }
+   ]
+  },
+  {
+   "id": "Melilla",
+   "name": "Melilla tephras (composite)",
+   "mineral": "sanidine",
+   "locality": "Melilla Basin, Morocco",
+   "notes": "Composite astronomical reference of Kuiper et al. (2008), not a single tuff.",
+   "intercalibrations": [
+    {
+     "R": 4.3664,
+     "R_1s": 0.0009,
+     "ratio": "FCs/std",
+     "reference": "Kuiper, K.F. et al. (2008) Science 320, 500–504",
+     "doi": "10.1126/science.1154339",
+     "notes": "Supplementary material (1σ).",
+     "recommended": true
+    }
+   ],
+   "published_ages": [
+    {
+     "age": 6.5,
+     "age_1s": 0.005,
+     "decay_constant": null,
+     "reference": "Kuiper, K.F. et al. (2008) Science 320, 500–504",
+     "doi": "",
+     "notes": "Astronomical age; does not depend on λ."
+    }
+   ]
+  }
+ ]
+}

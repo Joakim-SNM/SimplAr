@@ -9,6 +9,7 @@ subfolder per tool:
         3 Flux regression/
         4 Plateau & isochron/
         5 Age distribution/
+        6 Recalculator and age combiner/
 
 The data folder defaults to "SimplAr data" in the user's Documents folder and
 can be changed from the launcher (stored with QSettings, so it is the same for
@@ -19,8 +20,8 @@ The get_*_file_name functions take the same arguments as the QFileDialog
 functions they wrap.  Each dialog opens in its tool's folder, or in the folder
 last used for that tool when that lies inside the data folder; a suggested file
 name is made safe for Windows.  Settings and caches that are not results (figure
-export presets, rendered equations) go to the user's configuration and cache
-folders.
+export presets, edited standards, rendered equations) go to the user's
+configuration and cache folders.
 """
 
 import os
@@ -35,6 +36,7 @@ TOOL_FOLDERS = {
     'flux_regression':  '3 Flux regression',
     'plateau_isochron': '4 Plateau & isochron',
     'age_distribution': '5 Age distribution',
+    'recalculator':     '6 Recalculator and age combiner',
 }
 
 _current_tool = None

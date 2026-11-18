@@ -12,8 +12,12 @@ import tempfile
 
 sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 HERE = os.path.dirname(os.path.abspath(__file__))
+_tmp = tempfile.mkdtemp()
+# SIMPLAR_STANDARDS_FILE points at a file that does not exist, so the tests run
+# on the published standards whatever the user has edited.
 env = dict(os.environ, QT_QPA_PLATFORM='offscreen', MPLBACKEND='Agg',
-           SIMPLAR_DATA_DIR=tempfile.mkdtemp(), PYTHONIOENCODING='utf-8')
+           SIMPLAR_DATA_DIR=_tmp, PYTHONIOENCODING='utf-8',
+           SIMPLAR_STANDARDS_FILE=os.path.join(_tmp, 'standards.json'))
 failed = []
 for path in sorted(glob.glob(os.path.join(HERE, 'test_*.py'))):
     name = os.path.basename(path)

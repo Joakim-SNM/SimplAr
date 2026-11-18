@@ -1,6 +1,6 @@
 """The export dialog and both hosts render without touching the screen view.
 
-Run:  QT_QPA_PLATFORM=offscreen python tests/test_figure_export.py
+Run:  QT_QPA_PLATFORM=offscreen python tests/test_figures.py
 """
 import copy, importlib.util, os, sys, tempfile
 import numpy as np
@@ -10,8 +10,8 @@ HERE = os.path.dirname(os.path.abspath(__file__)); ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT); sys.path.insert(0, HERE)
 from PyQt5.QtWidgets import QApplication
 from matplotlib.figure import Figure
-import figure_export as figexp
-from test_anchored_framework import load_ratios, CFG_R
+import export
+from synthetic_data import load_ratios, CFG_R
 from synthetic_data import plateau_steps
 
 app = QApplication.instance() or QApplication([])
@@ -30,7 +30,7 @@ def load_demo(w, title='synthetic'):
 
 
 def render(win, spec, what):
-    fig = Figure(figsize=figexp.figsize(spec), facecolor='white')
+    fig = Figure(figsize=export.figsize(spec), facecolor='white')
     win._export_render(fig, spec)
     n = len([a for a in fig.axes])
     print(f'  ok  {what:<52} {n} axes')
@@ -42,7 +42,7 @@ def test_plateau():
     pl = load('4_plateau_isochron/plateau_isochron.py', 'pl')
     w = pl.PlateauWindow()
     load_demo(w)
-    base = figexp.default_spec(w._export_panels(), w._export_options())
+    base = export.default_spec(w._export_panels(), w._export_options())
     render(w, base, 'three panels (default)')
     s = copy.deepcopy(base)
     for p in s['panels']:
@@ -82,7 +82,7 @@ def test_probability():
         s = w.add_sample(); s.name = nm; s.input_mode = 'ratio'; s.reject = 'none'
         s.j_cfg.update(CFG_R)
         s.r_vals = np.array(R[sl]); s.r_uncs = np.array(sR[sl]); s.recompute()
-    base = figexp.default_spec(w._export_panels(), w._export_options())
+    base = export.default_spec(w._export_panels(), w._export_options())
     f = render(w, base, 'default')
     assert f.axes[0].get_legend() is not None
     s = copy.deepcopy(base); s['legend'] = 'off'
@@ -104,7 +104,7 @@ def test_dialog_and_presets():
     print('Dialog: preview, panel edits and preset round-trip')
     pl = load('4_plateau_isochron/plateau_isochron.py', 'pl')
     w = pl.PlateauWindow(); load_demo(w)
-    dlg = figexp.FigureExportDialog(w, '_selftest', w._export_panels(),
+    dlg = export.FigureExportDialog(w, '_selftest', w._export_panels(),
                                     w._export_options(), w._export_render)
     dlg.show(); app.processEvents()
     dlg._refresh_preview()
@@ -118,14 +118,14 @@ def test_dialog_and_presets():
     assert dlg.spec['font_scale'] == 1.4
     dlg._move(0, 1)
     assert [p['id'] for p in dlg.spec['panels']][:2] == ['cak', 'p40']
-    store = figexp._load_store()
+    store = export._load_store()
     store.setdefault('_selftest', {})['presets'] = {'T': copy.deepcopy(dlg.spec)}
-    figexp._save_store(store)
-    back = figexp._merge(figexp._load_store()['_selftest']['presets']['T'],
+    export._save_store(store)
+    back = export._merge(export._load_store()['_selftest']['presets']['T'],
                          w._export_panels(), w._export_options())
     assert back['font_scale'] == 1.4
     assert [p['id'] for p in back['panels']][:2] == ['cak', 'p40']
-    store = figexp._load_store(); store.pop('_selftest', None); figexp._save_store(store)
+    store = export._load_store(); store.pop('_selftest', None); export._save_store(store)
     print('  ok  preview, edits, ordering and presets')
 
 
@@ -163,14 +163,14 @@ def test_isochron_variants():
     print('Isochron: inverse and normal, inset, own page')
     pl = load('4_plateau_isochron/plateau_isochron.py', 'pl2')
     w = _synthetic_window(pl)
-    base = figexp.default_spec(w._export_panels(), w._export_options())
+    base = export.default_spec(w._export_panels(), w._export_options())
     for mode in ('inverse', 'normal'):
         s = copy.deepcopy(base); s['options']['iso_type'] = mode
         fig = Figure(figsize=(6.0, 5.0), facecolor='white')
         w._export_render_isochron_only(fig, s)
         txt = [t.get_text() for t in fig.findobj(lambda o: hasattr(o, 'get_text'))]
         assert not any('No isochron data' in t for t in txt if isinstance(t, str)), mode
-        # an artist escaping the axes used to make the tight bbox explode
+        # an artist outside the axes would make the tight bounding box huge
         import io
         buf = io.BytesIO()
         fig.savefig(buf, format='png', dpi=60, bbox_inches='tight')
@@ -192,11 +192,11 @@ def test_isochron_variants():
     s['options'].update(iso_inset=True, iso_x=95, iso_y=95, iso_w=40, iso_h=42,
                         title='Renamed sample', y_min='55.15', y_max='55.60')
     # 'Main window' (default): the sample name in the main window wins over typed text
-    fig = Figure(figsize=figexp.figsize(s), facecolor='white')
+    fig = Figure(figsize=export.figsize(s), facecolor='white')
     w._export_render(fig, s)
     assert fig.axes[0].get_title() == w.title_edit.text(), fig.axes[0].get_title()
     s['options']['names_from'] = 'typed'
-    fig = Figure(figsize=figexp.figsize(s), facecolor='white')
+    fig = Figure(figsize=export.figsize(s), facecolor='white')
     w._export_render(fig, s)
     ax = fig.axes[0]
     assert ax.get_title() == 'Renamed sample', ax.get_title()
@@ -252,9 +252,9 @@ def test_isochron_variants():
     from matplotlib.backends.backend_pdf import PdfPages
     with tempfile.TemporaryDirectory() as d:
         path = os.path.join(d, 'both.pdf')
-        f1 = Figure(figsize=figexp.figsize(base), facecolor='white')
+        f1 = Figure(figsize=export.figsize(base), facecolor='white')
         w._export_render(f1, base)
-        f2 = Figure(figsize=figexp.figsize(base), facecolor='white')
+        f2 = Figure(figsize=export.figsize(base), facecolor='white')
         w._export_render_isochron_only(f2, base)
         with PdfPages(path) as pdf:
             pdf.savefig(f1, bbox_inches='tight')
@@ -264,7 +264,7 @@ def test_isochron_variants():
 
 
 def test_isochron_spread():
-    print('Isochron spread: a lever, not a scatter statistic')
+    print('Isochron spread: how much of the radiogenic range the steps cover')
     import math
     pl = load('4_plateau_isochron/plateau_isochron.py', 'pl4')
 
@@ -292,7 +292,7 @@ def test_isochron_spread():
         return w
 
     def measure(w, **opts):
-        spec = figexp.default_spec(w._export_panels(), w._export_options())
+        spec = export.default_spec(w._export_panels(), w._export_options())
         spec['options'].update(iso_spread=True, **opts)
         fig = Figure(figsize=(6.5, 5.0), facecolor='white')
         w._export_render_isochron_only(fig, spec)
@@ -328,7 +328,7 @@ def test_page_switcher_and_range():
     pl = load('4_plateau_isochron/plateau_isochron.py', 'pl3')
     w = pl.PlateauWindow()
     load_demo(w)
-    dlg = figexp.FigureExportDialog(
+    dlg = export.FigureExportDialog(
         w, '_selftest2', w._export_panels(), w._export_options(),
         w._export_render, default_name='demo',
         extra_render=w._export_render_isochron_only,
@@ -347,20 +347,20 @@ def test_page_switcher_and_range():
     dlg.sp_w.setValue(24.0); dlg.sp_h.setValue(12.0); app.processEvents()
     assert dlg.spec['p2_width_cm'] == 24.0 and dlg.spec['p2_height_cm'] == 12.0
     assert dlg.spec['width_cm'] != 24.0, 'page 1 size must not follow page 2'
-    assert abs(figexp.figsize(dlg.spec, 1)[0] - 24.0 * figexp.CM) < 1e-9
+    assert abs(export.figsize(dlg.spec, 1)[0] - 24.0 * export.CM) < 1e-9
     dlg.page_sel.setCurrentIndex(0); app.processEvents()
     assert abs(dlg.sp_w.value() - dlg.spec['width_cm']) < 1e-9
     dlg._refresh_preview()
     print('  ok  page 2 previews the isochron, has its own size, and says when '
           'it is not exported')
     assert 'iso_zoom' not in {o.id for o in w._export_options()}
-    print('  ok  the isochron y range option is gone (intercept always shown)')
+    print('  ok  no isochron y-range option (the intercept is always shown)')
     # an age window must not push the plateau bracket out of the figure
     w2 = _synthetic_window(pl)
     assert w2.plateau, 'the synthetic sample should have a plateau'
-    spec = figexp.default_spec(w2._export_panels(), w2._export_options())
+    spec = export.default_spec(w2._export_panels(), w2._export_options())
     spec['options'].update(y_min='50', y_max='60')
-    fig = Figure(figsize=figexp.figsize(spec), facecolor='white')
+    fig = Figure(figsize=export.figsize(spec), facecolor='white')
     w2._export_render(fig, spec)
     ax = [a for a in fig.axes if a.get_ylabel().startswith('Apparent')][0]
     lo, hi = ax.get_ylim()
@@ -372,6 +372,10 @@ def test_page_switcher_and_range():
     assert all(lo < t.get_position()[1] < hi for t in data_txt), \
         'the plateau label fell outside the age window'
     print('  ok  the plateau label stays inside a hand-set age window')
+    txt = [t.get_text() for t in ax.texts]
+    assert any(t.startswith('Analytical:') and '\nExternal:' in t for t in txt), txt
+    assert not any('Full external' in t for t in txt)
+    print('  ok  error box: analytical and external, no full external by default')
 
 
 def test_probability_names_and_ranges():
@@ -384,10 +388,10 @@ def test_probability_names_and_ranges():
     s0 = w.add_sample(); s0.name = 'raw name'; s0.input_mode = 'ratio'
     s0.reject = 'none'; s0.j_cfg.update(CFG_R)
     s0.r_vals = np.array(R); s0.r_uncs = np.array(sR); s0.recompute()
-    spec = figexp.default_spec(w._export_panels(), w._export_options())
+    spec = export.default_spec(w._export_panels(), w._export_options())
     spec['options'].update(title='Test samples', name_0='Sample A', names_from='typed',
                            x_min='54.8', x_max='55.9')
-    fig = Figure(figsize=figexp.figsize(spec), facecolor='white')
+    fig = Figure(figsize=export.figsize(spec), facecolor='white')
     w._export_render(fig, spec)
     ax = fig.axes[0]
     assert ax.get_title() == 'Test samples'
@@ -414,15 +418,17 @@ def test_isochron_batch():
     w = pl.PlateauWindow()
     load_demo(w)
     opts = w._batch_options()
-    spec = figexp.default_spec(w._batch_panels(), opts)
+    spec = export.default_spec(w._batch_panels(), opts)
     spec['options']['text_style'] = 'big'
-    f = Figure(figsize=figexp.figsize(spec))
+    f = Figure(figsize=export.figsize(spec))
     w._export_render_batch(f, spec)
     assert f.axes
     with tempfile.TemporaryDirectory() as d:
         spec['fmt'] = 'png'; spec['options']['batch_one_pdf'] = False
         lines = w._export_samples_all(spec, d, lambda i, n, l='': False)
-        print('  ok ', lines[:1])
+        pngs = [f for f in os.listdir(d) if f.endswith('.png')]
+        assert pngs and all(os.path.getsize(os.path.join(d, f)) > 1000 for f in pngs), pngs
+        print(f'  ok  {len(pngs)} PNG file(s) written', lines[:1])
 
 
 if __name__ == '__main__':

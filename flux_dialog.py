@@ -1,10 +1,11 @@
-"""Shared disk-flux assignment dialog for the Plateau & isochron and Age distribution tools.
+"""Shared disk-flux assignment dialog of the Plateau & isochron, Age distribution and
+Recalculator and age combiner tools.
 
 One window: load .jflux, view the disk (holes coloured by R or J, matched holes
 ringed red), and assign each item (sample / session / aliquot) to a hole, either
 automatically by identity, by a per-row override, or by selecting a disk and
 applying it to the ticked rows. Every tool-specific behaviour lives in a small
-host adapter (see FluxHost), so the two tools share one window.
+host adapter (see FluxHost), so the tools share one window.
 
 The dialog talks to its host through canonical override values:
   'auto'                → match by the item's own disk_id / hole_id
@@ -16,7 +17,7 @@ The adapter translates those to and from whatever the host actually stores.
 from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QWidget, QPushButton, QLabel, QComboBox,
     QSplitter, QTableWidget, QTableWidgetItem, QHeaderView, QCheckBox,
-    QMessageBox, QApplication,
+    QMessageBox, QApplication, QLineEdit,
 )
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QColor
@@ -54,6 +55,7 @@ class FluxHost:
     title = 'Load disk flux'
     item_noun = 'Item'          # column header + message wording ('Sample' etc.)
     caption = ''                # optional explanatory line above the table
+    manual = False              # True: rows can be given a J or R typed by hand
 
     # --- registry / loading ------------------------------------------------
     def disk_flux(self):
@@ -104,6 +106,14 @@ class FluxHost:
     def hole_R(self, key, idx):
         """Monitor R (or J) the hole encodes, for the 'Matched R' cell."""
         return None
+
+    # --- manual flux (hosts with manual = True) ------------------------------
+    def get_manual(self, row, item):
+        """('J' or 'R', value, 1σ) typed for this row, or None."""
+        return None
+
+    def set_manual(self, row, item, val):
+        """Store ('J' or 'R', value, 1σ), or None to clear it."""
 
     # --- apply -------------------------------------------------------------
     def apply(self):
@@ -177,9 +187,11 @@ class FluxAssignDialog(QDialog):
             'keeps its own R_std / J and is independent of the rows on the disk.')
         how.setWordWrap(True)
         rv.addWidget(how)
-        self.tbl = QTableWidget(0, 5)
-        self.tbl.setHorizontalHeaderLabels(
-            ['Use\nshown disk', host.item_noun, 'disk/hole\nin file', 'Hole', 'Matched R'])
+        heads = ['Use\nshown disk', host.item_noun, 'disk/hole\nin file', 'Hole', 'Matched R']
+        if host.manual:
+            heads += ['Manual', 'J or R', '±1σ']
+        self.tbl = QTableWidget(0, len(heads))
+        self.tbl.setHorizontalHeaderLabels(heads)
         self.tbl.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
         self.tbl.setFont(mono_font(9))
         rv.addWidget(self.tbl)
@@ -279,8 +291,43 @@ class FluxAssignDialog(QDialog):
             chk = QCheckBox()
             self._row_checks.append(chk)
             self.tbl.setCellWidget(row, 0, chk)
+            if self.host.manual:
+                self._manual_cells(row, item)
             self._update_match_cell(row)
         self.tbl.resizeColumnsToContents()
+
+    def _manual_cells(self, row, item):
+        """Kind, value and 1σ editors of a row's hand-typed J or R."""
+        cur = self.host.get_manual(row, item)
+        kind = QComboBox()
+        kind.addItems(['—', 'J', 'R'])
+        kind.setCurrentIndex({'J': 1, 'R': 2}.get(cur[0], 0) if cur else 0)
+        val = QLineEdit('' if not cur else f'{cur[1]:.8g}')
+        err = QLineEdit('' if not cur else f'{cur[2]:.8g}')
+        for w in (val, err):
+            w.setFixedWidth(90)
+            w.editingFinished.connect(lambda r=row: self._on_manual(r))
+        kind.currentIndexChanged.connect(lambda _i, r=row: self._on_manual(r))
+        self.tbl.setCellWidget(row, 5, kind)
+        self.tbl.setCellWidget(row, 6, val)
+        self.tbl.setCellWidget(row, 7, err)
+
+    def _on_manual(self, row):
+        item = self.host.items()[row]
+        kind = self.tbl.cellWidget(row, 5).currentText()
+
+        def num(c):
+            try:
+                return float(self.tbl.cellWidget(row, c).text().replace(',', '.'))
+            except ValueError:
+                return None
+        v, e = num(6), num(7)
+        if kind in ('J', 'R') and v and v > 0 and e is not None and e >= 0:
+            self.host.set_manual(row, item, (kind, v, e))
+        else:
+            self.host.set_manual(row, item, None)
+        self.host.on_row_change(row, item)
+        self._update_match_cell(row)
 
     @staticmethod
     def _choice_index(choices, ov):
@@ -307,6 +354,9 @@ class FluxAssignDialog(QDialog):
             else:
                 txt = '—'
             self.tbl.setItem(row, 4, self._ro(txt))
+        elif self.host.manual and self.host.get_manual(row, item):
+            kind, v, e = self.host.get_manual(row, item)
+            self.tbl.setItem(row, 4, self._ro(f'manual {kind}'))
         else:
             it = self._ro('not matched')
             it.setForeground(QColor('#c0392b'))

@@ -41,8 +41,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from arar_math import (
     FC_PRESETS, FC_PAIRED_LAMBDA, LAMBDA_PRESETS, fc_ingrowth, file_err_div,
     mswd_critical, DEFAULT_FC_NAME, STD_AGE_DEFAULT, STD_AGE_ERR,
-    LAMBDA_DEFAULT, LAMBDA_ERR, force_light, mono_font,
+    LAMBDA_DEFAULT, LAMBDA_ERR, force_light, mono_font, monitor_keys,
+    calibration_notes, edited_standards_note,
 )
+from standards import MonitorCombo, monitor_text
 import data_folders as dfold
 
 
@@ -1127,7 +1129,7 @@ class FluxMonitorsWindow(QMainWindow):
     def browse_raw_file(self):
         path, _ = dfold.get_open_file_name(
             self, "Select Data File", "",
-            "All supported (*.csv *.xlsx *.xls);;CSV (*.csv);;Excel (*.xlsx *.xls);;"
+            "All supported (*.csv *.xlsx);;CSV (*.csv);;Excel (*.xlsx);;"
             "All files (*)")
         if not path:
             return
@@ -1589,7 +1591,7 @@ class FluxMonitorsWindow(QMainWindow):
                     row['measured_j'] = row['measured_j_error'] = None
 
     # ---------------------------------------------------------------------
-    # One analysis pipeline (Analyze, Apply exclusions, plot clicks,
+    # One analysis pipeline (Analyse, Apply exclusions, plot clicks,
     # crystal-mode changes and Direct Input all run this)
     # ---------------------------------------------------------------------
 
@@ -1632,8 +1634,8 @@ class FluxMonitorsWindow(QMainWindow):
         """True when every numeric option field holds a number (a field being
         typed in can briefly hold '' or '2.')."""
         checks = [("Relative error threshold", self.error_threshold_var),
-                  ("MSWD threshold", self.mswd_threshold_var),
                   ("NMAD k threshold", self.nmad_k_var),
+                  ("MSWD threshold", self.mswd_threshold_var),
                   ("Standard age", self.std_age_var),
                   ("Standard age error", self.std_age_err_var),
                   ("λ", self.lambda_var), ("λ error", self.lambda_err_var)]
@@ -1664,9 +1666,9 @@ class FluxMonitorsWindow(QMainWindow):
             QMessageBox.critical(self, "Error", f"Error analysing data: {str(e)}")
 
     def _set_current_data(self, text):
-        """Show what 'Analyze Data' will re-run, and allow it."""
+        """Show what 'Analyse Data' will re-run, and allow it."""
         self.format_info_var.set(f"Current data: {text}. Change any option below to re-run "
-                                 f"it, or press Analyze Data.")
+                                 f"it, or press Analyse Data.")
         self.analyze_btn.setEnabled(True)
 
     @staticmethod
@@ -1706,7 +1708,7 @@ class FluxMonitorsWindow(QMainWindow):
         self.analysis_rows, self.crystal_stats, self.step_group_stats = {}, {}, {}
         cats = sorted(self.raw_category_data, key=self._natural_sort_key)
         for category in cats:
-            self.log(f"\nAnalyzing category {category}...")
+            self.log(f"\nAnalysing category {category}...")
             tagged = self._parse_crystal_structure(self.raw_category_data[category])
             rows, derived_excl = self._build_analysis_rows(category, tagged)
             self.analysis_rows[category] = rows
@@ -1842,8 +1844,7 @@ class FluxMonitorsWindow(QMainWindow):
         it can be averaged with single-step fusions.
         Without ³⁹Ar: the inverse-variance mean of the steps, its error × √MSWD
         when the MSWD exceeds the Wendt & Carl limit.  That weights steps by
-        precision, not by gas, so it is
-        not a total-gas value."""
+        precision, not by gas, so it is not a total-gas value."""
         vals = [float(s['value40_39']) for s in steps]
         sigs = [float(s['uncertainty40_39']) for s in steps]
         a39  = [s.get('ar39') for s in steps]
@@ -2033,16 +2034,35 @@ class FluxMonitorsWindow(QMainWindow):
                      f"test conservative)")
         return {'groups': res, 'between': between, 'by': by}
 
+    def _monitor_cfg(self):
+        """Calibration and monitor keys of the current settings."""
+        try:
+            cfg = dict(stdAgeMa=float(self.std_age_var.get()),
+                       stdAgeErrMa=float(self.std_age_err_var.get()),
+                       lambdaYr=float(self.lambda_var.get()),
+                       lambdaErrYr=float(self.lambda_err_var.get()))
+        except (ValueError, AttributeError):
+            cfg = dict(stdAgeMa=STD_AGE_DEFAULT, stdAgeErrMa=STD_AGE_ERR,
+                       lambdaYr=LAMBDA_DEFAULT, lambdaErrYr=LAMBDA_ERR)
+        mc = getattr(self, 'monitor_combo', None)
+        cfg.update(mc.keys() if mc is not None else monitor_keys('FCs'))
+        return cfg
+
+    def _monitor_R(self):
+        """R of the monitor relative to FCs (1 for FCs)."""
+        return self._monitor_cfg()['monitorR']
+
     def _ingrowth(self):
-        """e^{λ t_FCs} − 1 for the current calibration (anchored where the
-        preset has a chain, via arar_math.fc_ingrowth)."""
+        """e^{λ t_M} − 1 of the monitor on the current calibration, so that
+        J = this / R for a measured monitor ratio R: R_M/FCs (e^{λ t_FCs} − 1),
+        anchored where the preset has a chain (arar_math.fc_ingrowth)."""
         try:
             lambda_val = float(self.lambda_var.get())
             fc_age      = float(self.std_age_var.get())
             fc_age_error = float(self.std_age_err_var.get())
         except (ValueError, AttributeError):
             lambda_val, fc_age, fc_age_error = LAMBDA_DEFAULT, STD_AGE_DEFAULT, STD_AGE_ERR
-        return fc_ingrowth(fc_age, lambda_val, fc_age_error)
+        return fc_ingrowth(fc_age, lambda_val, fc_age_error) * self._monitor_R()
 
     def _j_result_from_r(self, res):
         """The J result as the image of the R result under J = (e^{λt} − 1)/R.
@@ -2181,6 +2201,12 @@ class FluxMonitorsWindow(QMainWindow):
         # Outlier rejection
         outl = QGroupBox("Outlier Rejection")
         orl = QVBoxLayout(outl)
+        self.use_nmad_var = Value(True)
+        orl.addWidget(bind_check(self.use_nmad_var, QCheckBox("NMAD outlier rejection")))
+        self.nmad_k_var = Value(2.5)
+        orl.addLayout(_row(20, QLabel("k threshold:"),
+                           bind_spin(self.nmad_k_var, _spin(0.5, 20.0, 0.5)),
+                           _note("(flag if |x − median| > k × NMAD)")))
         self.use_mswd_var = Value(False)
         orl.addWidget(bind_check(self.use_mswd_var,
                                  QCheckBox("MSWD outlier rejection (one point at a time)")))
@@ -2203,12 +2229,6 @@ class FluxMonitorsWindow(QMainWindow):
                   "√MSWD. Without the test the point whose removal lowers χ² most goes "
                   "each round until the MSWD is reached, which trims real scatter.")
         orl.addLayout(_row(20, n, stretch=False))
-        self.use_nmad_var = Value(True)
-        orl.addWidget(bind_check(self.use_nmad_var, QCheckBox("NMAD outlier rejection")))
-        self.nmad_k_var = Value(2.5)
-        orl.addLayout(_row(20, QLabel("k threshold:"),
-                           bind_spin(self.nmad_k_var, _spin(0.5, 20.0, 0.5)),
-                           _note("(flag if |x − median| > k × NMAD)")))
         ol.addWidget(outl)
 
         # Statistical Models
@@ -2301,16 +2321,28 @@ class FluxMonitorsWindow(QMainWindow):
             if self.calib_var.get() != 'Custom':
                 self.calib_var.set('Custom')
 
+        self.monitor_combo = MonitorCombo()
+        stl.addWidget(QLabel("Monitor:"), 0, 0)
+        stl.addWidget(self.monitor_combo, 0, 1, 1, 2)
         self.calib_combo = QComboBox()
         self.calib_combo.addItems(_calib_names + ['Custom'])
         bind_combo(self.calib_var, self.calib_combo, _apply_calib_preset)
-        stl.addWidget(QLabel("Calibration:"), 0, 0)
-        stl.addWidget(self.calib_combo, 0, 1, 1, 2)
+        stl.addWidget(QLabel("Calibration:"), 1, 0)
+        stl.addWidget(self.calib_combo, 1, 1, 1, 2)
+        self.monitor_info = _note('')
+        stl.addWidget(self.monitor_info, 7, 0, 1, 3)
+
+        def _show_monitor(*_):
+            txt = '\n'.join(t for t in [monitor_text(self._monitor_cfg())]
+                            + calibration_notes(self._monitor_cfg()) if t)
+            self.monitor_info.setText(txt)
+            self.monitor_info.setVisible(bool(txt))
+        self.monitor_combo.currentIndexChanged.connect(_show_monitor)
         for i, (label, var, unit) in enumerate([
                 ("Standard age (Ma):",       self.std_age_var,     ""),
                 ("Standard age error (Ma):", self.std_age_err_var, "1σ"),
                 ("λ (yr⁻¹):",                self.lambda_var,      ""),
-                ("λ error (yr⁻¹):",          self.lambda_err_var,  "1σ")], start=1):
+                ("λ error (yr⁻¹):",          self.lambda_err_var,  "1σ")], start=2):
             stl.addWidget(QLabel(label), i, 0)
             stl.addWidget(bind_line_edit(var, QLineEdit()), i, 1)
             stl.addWidget(_note(unit), i, 2)
@@ -2318,15 +2350,19 @@ class FluxMonitorsWindow(QMainWindow):
         for _v in (self.std_age_var, self.std_age_err_var,
                    self.lambda_var, self.lambda_err_var):
             _v.on_change(_on_std_edit)
+            _v.on_change(_show_monitor)
 
         # the suite-wide default calibration (arar_math.DEFAULT_FC_NAME)
         self.calib_var.set(DEFAULT_FC_NAME)
         _apply_calib_preset()
-        stl.addWidget(_note("Calibration presets read from the shared math module. "
-                            "Pick one, or edit a field to switch to Custom."), 5, 0, 1, 3)
+        stl.addWidget(_note("The monitor is the standard measured here; with one other than "
+                            "FCs, J uses its age on the calibration (Standards…) and the "
+                            "export adds its R as FCs-equivalent. Pick a calibration, or edit "
+                            "a field to switch to Custom."), 6, 0, 1, 3)
+        _show_monitor()
         ol.addWidget(std)
 
-        self.analyze_btn = QPushButton("Analyze Data")
+        self.analyze_btn = QPushButton("Analyse Data")
         self.analyze_btn.setEnabled(False)
         self.analyze_btn.clicked.connect(self.analyze_data)
         lay.addWidget(self.analyze_btn)
@@ -2334,7 +2370,7 @@ class FluxMonitorsWindow(QMainWindow):
         self.export_btn.setEnabled(False)
         self.export_btn.clicked.connect(self.export_results)
         lay.addWidget(self.export_btn)
-        lay.addWidget(_note("Analyze Data runs the current data (the files loaded, "
+        lay.addWidget(_note("Analyse Data runs the current data (the files loaded, "
                             "or the Direct Input data if that was analysed last). "
                             "After a first analysis, changing any option above "
                             "re-runs it by itself; manual exclusions are kept."))
@@ -2676,7 +2712,6 @@ class FluxMonitorsWindow(QMainWindow):
     # ---------------------------------------------------------------------
     # Statistics: random-effects model and p-value
     # ---------------------------------------------------------------------
-
 
     def reml_random_effects(self, data, value_key, uncertainty_key):
         """
@@ -3512,7 +3547,7 @@ class FluxMonitorsWindow(QMainWindow):
                 self._run_analysis('=== RE-ANALYSIS of the Direct Input data (exclusions kept) ===')
                 self.log('\nAnalysis complete.')
             except Exception as e:
-                QMessageBox.critical(self, "Error", f"Error analyzing data: {str(e)}")
+                QMessageBox.critical(self, "Error", f"Error analysing data: {str(e)}")
             return
 
         source = getattr(self, 'file_source', None)
@@ -3550,7 +3585,7 @@ class FluxMonitorsWindow(QMainWindow):
             self.log('\nAnalysis complete.')
 
         except Exception as e:
-            QMessageBox.critical(self, "Error", f"Error analyzing data: {str(e)}")
+            QMessageBox.critical(self, "Error", f"Error analysing data: {str(e)}")
         finally:
             self.analyze_btn.setEnabled(True)
 
@@ -3600,8 +3635,12 @@ class FluxMonitorsWindow(QMainWindow):
                   f'{vn} REML mean', 'REML SE (1σ)', 'τ (1σ)',
                   f'Reported {vn}', 'Reported SE (1σ)', 'Reported SE (2σ)', 'Method',
                   'MSWD rejection']
+        mon = self._monitor_cfg()
+        fcs_eq = ratio and mon['monitor'] != 'FCs'
         if ratio:
             header += ['J', 'J SE (1σ, R only)', 'J SE (2σ)', 'J % (1σ)']
+        if fcs_eq:
+            header += ['Reported R (FCs-equivalent)', 'Reported SE (FCs-equivalent, 1σ)']
         rows = []
         for cat in cats:
             r = R[cat]
@@ -3630,6 +3669,9 @@ class FluxMonitorsWindow(QMainWindow):
                     row += [J, s_j, 2.0 * s_j, 100.0 * s_j / J]
                 else:
                     row += [nan, nan, nan, nan]
+            if fcs_eq:
+                k = mon['monitorR']
+                row += [rep / k if _finite(rep) else nan, rep_se / k if _finite(rep_se) else nan]
             rows.append(row)
         return header, rows
 
@@ -3648,6 +3690,15 @@ class FluxMonitorsWindow(QMainWindow):
             crit.append(f"Calibration for J: {self.calib_var.get()}  FC {self.std_age_var.get()} "
                         f"± {self.std_age_err_var.get()} Ma (1σ), λ {self.lambda_var.get()} "
                         f"± {self.lambda_err_var.get()} /yr (1σ)")
+            mon = self._monitor_cfg()
+            crit += [f"Note: {n}" for n in calibration_notes(mon)]
+            if edited_standards_note():
+                crit.append(edited_standards_note())
+            if mon['monitor'] != 'FCs':
+                crit.append(f"Monitor: {mon['monitor']}, R({mon['monitor']}/FCs) = "
+                            f"{mon['monitorR']:.8g} ± {mon['monitorRErr']:.3g} (1σ); "
+                            f"{monitor_text(mon)}. R (FCs-equivalent) = measured R / "
+                            f"R({mon['monitor']}/FCs)")
         crit += [
             f"Points averaged: {self.CRYSTAL_MODES.get(self.crystal_mode_var.get(), '')}",
             f"Step groups by: {'laser power' if self.step_group_var.get() == 'power' else 'step number'}",
@@ -3802,7 +3853,6 @@ class FluxMonitorsWindow(QMainWindow):
 
         wb.save(path)
         self.log(f"Exported (xlsx, {len(wb.sheetnames)} sheets: {', '.join(wb.sheetnames)})")
-
 
 
 def main():

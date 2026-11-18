@@ -6,7 +6,8 @@ abstract: >-
   Desktop tools for 40Ar/39Ar geochronology, from the laboratory's data export
   to plateau, isochron and combined ages: data conversion, flux-monitor
   reduction, J regression across the irradiation disk, step-heating plateau and
-  isochron ages, and age distributions with mixture and minimum-age models.
+  isochron ages, age distributions with mixture and minimum-age models, and
+  recalculation of published ages between calibrations.
   Every age carries analytical, internal and external uncertainties.
 authors:
   - given-names: Joakim Gyrup

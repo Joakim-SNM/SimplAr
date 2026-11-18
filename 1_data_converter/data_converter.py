@@ -34,14 +34,30 @@ from arar_math import (
     LAMBDA_DEFAULT as _LAMBDA_DEFAULT, LAMBDA_ERR as _LAMBDA_ERR,
     STD_AGE_DEFAULT as _STD_AGE_DEFAULT, STD_AGE_ERR as _STD_AGE_ERR,
     calibration_for as _calibration_for, FC_PRESETS, DEFAULT_FC_NAME,
+    monitor_keys as _monitor_keys, fcs_equivalent_age as _fcs_equivalent_age,
+    paired_lambda as _paired_lambda, standard_age_on as _standard_age_on,
 )
 import data_folders as dfold
+from standards import MonitorCombo
+
+
+def _monitor_calibration(t_m, lam, err, monitor):
+    """(FCs-equivalent age, cfg calibration keys incl. the monitor) for a
+    file whose J was derived from monitor `monitor` at age t_m (Ma) with λ."""
+    mk = _monitor_keys(monitor)
+    if mk['monitor'] == 'FCs':
+        return t_m, dict(_calibration_for(t_m, lam, err), **mk)
+    t_eq = _fcs_equivalent_age(t_m, lam, mk['monitorR'])
+    return t_eq, dict(_calibration_for(t_eq, lam, err), **mk)
+
 
 _HEADER_ROW = 0
 
 # The FC age the Mass Spec software derived J with, offered from the shared
 # presets (1σ), the suite default first.  It is stored in the .arar cfg so the
 # other tools know the original calibration when recasting to another one.
+
+
 def _fc_label(name, age):
     return name if '—' in name else f"{name} — {age:g} Ma"
 
@@ -110,6 +126,21 @@ def _alpha_label(i: int) -> str:
         i, r = divmod(i - 1, 26)
         s = chr(65 + r) + s
     return s
+
+
+def _order_steps(steps: list) -> None:
+    """Put the steps in the order they were run and label them A, B, … in that
+    order.  Files do not always list the steps chronologically, so the run time
+    is used when every step has one, else the days since irradiation; without
+    either, the file order is kept.  A step without a power gets its position."""
+    for key in ("run_dt", "days_irr"):
+        if all(s.get(key) not in (None, "") for s in steps):
+            steps.sort(key=lambda s: s[key])
+            break
+    for n, s in enumerate(steps):
+        s["label"] = _alpha_label(n)
+        if not math.isfinite(s["power"]):
+            s["power"] = float(n + 1)
 
 
 def _parse_irrad_label(irrad: str) -> dict:
@@ -261,7 +292,7 @@ def _arc_constants_block(grp):
 # ── FORMAT 1: ArArCALC summary ───────────────────────────────────────────────
 
 def _convert_ararcalc_summary(df: pd.DataFrame, output_dir: str,
-                               cm: dict) -> tuple:
+                               cm: dict, monitor: str = 'FCs') -> tuple:
     sample_col  = cm.get("sample",    "Sample Name")
     exp_cn      = cm.get("experiment","Experiment")
     irrad_cn    = cm.get("irrad",     "Irradiation Label")
@@ -311,7 +342,7 @@ def _convert_ararcalc_summary(df: pd.DataFrame, output_dir: str,
             steps.append(dict(
                 label     = _alpha_label(len(steps)),
                 power     = _gc(row, cm.get("temp", "Analysis Temperature"),
-                                float(len(steps) + 1)),
+                                float("nan")),
                 age       = _gc(row, cm.get("age",    "Analysis Age")),
                 err2s     = _gc(row, cm.get("age_sd", "Analysis Age SD")),
                 pct39Ar   = float(pct39[i]),
@@ -348,6 +379,7 @@ def _convert_ararcalc_summary(df: pd.DataFrame, output_dir: str,
         if not steps:
             warnings.append(f"{sample_name}: no valid steps, skipped")
             continue
+        _order_steps(steps)
 
         j_val     = steps[0]["j_val"]
         j_err     = steps[0]["j_err"]
@@ -371,15 +403,22 @@ def _convert_ararcalc_summary(df: pd.DataFrame, output_dir: str,
         _t = float(_ta[_ta > 0].median()) if _ta is not None and (_ta > 0).any() else _STD_AGE_DEFAULT
         _l = float(_la[_la > 0].median()) if _la is not None and (_la > 0).any() else _LAMBDA_DEFAULT
         _e = float(_te[_te > 0].median()) if _te is not None and (_te > 0).any() else None
-        file_calib = _calibration_for(_t, _l, _e)
+        if monitor == 'FCs' and _t < 20.0:
+            warnings.append(f"{sample_name}: the file's monitor age is {_t:g} Ma, not a Fish "
+                            "Canyon age; choose the monitor it belongs to and convert again")
+        _t_m = _t
+        _t, file_calib = _monitor_calibration(_t, _l, _e, monitor)
 
         # ArArCALC leaves "Standard Ar40/39" at 0 for some irradiations. The
         # monitor ratio is then recomputed from the file's own J, FC age and
         # decay constant, (e^(lambda*t) - 1)/J, which reproduces the column
         # wherever the file does give it.
         if r_std <= 0 and j_val > 0:
-            r_std = (math.exp(_l * _t * 1e6) - 1.0) / j_val
+            r_std = (math.exp(_l * _t_m * 1e6) - 1.0) / j_val
             r_std_err_pct = j_err_pct
+        # stored FCs-equivalent: measured monitor ratio / R(monitor/FCs)
+        if r_std > 0:
+            r_std /= file_calib['monitorR']
 
         irr = _parse_irrad_label(irrad) if irrad else dict(disk_id="", hole_id="")
         cfg = dict(
@@ -534,7 +573,6 @@ def _constants_block(grp):
     return out
 
 
-
 def _fix_run_dates(df, irrad_col=None):
     """Repair day/month swaps in Run_Date.
 
@@ -593,7 +631,10 @@ def _fix_run_dates(df, irrad_col=None):
 def _convert_mass_spec_raw(df: pd.DataFrame, output_dir: str,
                             cm: dict,
                             fc_age_ma: float = _STD_AGE_DEFAULT,
-                            fc_age_err_ma: float = _STD_AGE_ERR) -> tuple:
+                            fc_age_err_ma: float = _STD_AGE_ERR,
+                            monitor: str = 'FCs') -> tuple:
+    """fc_age_ma is the age of the monitor the J was derived with (an FCs
+    age when monitor is 'FCs')."""
     sample_col = cm.get("sample", "Sample")
     rid_cn     = cm.get("run_id", "Run_ID")
     irrad_cn   = cm.get("irrad",  "Irrad")
@@ -672,7 +713,7 @@ def _convert_mass_spec_raw(df: pd.DataFrame, output_dir: str,
 
             step = dict(
                 label     = _alpha_label(len(steps)),
-                power     = _gc(row, cm.get("pwr", "Pwr_Requested"), float(len(steps) + 1)),
+                power     = _gc(row, cm.get("pwr", "Pwr_Requested"), float("nan")),
                 age       = _gc(row, cm.get("age",    "Age")),
                 err2s     = _gc(row, cm.get("age_er", "Age_Er")),
                 pct39Ar   = float(pct39[i]),
@@ -707,6 +748,7 @@ def _convert_mass_spec_raw(df: pd.DataFrame, output_dir: str,
         if not steps:
             warnings.append(f"{sample_name}: no valid steps, skipped")
             continue
+        _order_steps(steps)
 
         # one J per sample: the mean over its steps (they normally share it)
         j_steps = [(s["j_val"], s["j_err"]) for s in steps if s.get("j_val", 0) > 0]
@@ -750,6 +792,9 @@ def _convert_mass_spec_raw(df: pd.DataFrame, output_dir: str,
         # (arar_math.fc_ingrowth), identical to this at the calibration's own λ.
         r_std = (math.exp(lam_used * fc_age_ma * 1e6) - 1.0) / j_val \
                 if j_val > 0 else 70.0
+        t_eq, mcal = _monitor_calibration(fc_age_ma, lam_used, fc_age_err_ma, monitor)
+        if j_val > 0:
+            r_std /= mcal['monitorR']          # FCs-equivalent
 
         irr = _parse_irrad_label(irrad) if irrad else dict(disk_id="", hole_id="")
         cfg = dict(
@@ -757,8 +802,9 @@ def _convert_mass_spec_raw(df: pd.DataFrame, output_dir: str,
             zoomMode="auto", yMin=50.0, yMax=70.0, ageFluxMode="imported",
             jVal=j_val, jErrPct=round(j_err_pct, 6),
             rStd=round(r_std, 6), rStdErrPct=round(j_err_pct, 6),
-            stdAgeMa=fc_age_ma, stdAgeErrMa=fc_age_err_ma,
+            stdAgeMa=t_eq, stdAgeErrMa=fc_age_err_ma, stdAgeErrType=mcal['stdAgeErrType'],
             lambdaYr=round(lam_used, 15), lambdaErrYr=round(lam_err_used, 18),
+            monitor=mcal['monitor'], monitorR=mcal['monitorR'], monitorRErr=mcal['monitorRErr'],
             disk_id=irr["disk_id"], hole_id=irr["hole_id"],
             stepSigma=1,
         )
@@ -782,13 +828,14 @@ def _convert_mass_spec_raw(df: pd.DataFrame, output_dir: str,
 
 def convert(input_path: str, output_dir: str, fmt: str, col_map: dict,
             fc_age_ma: float = _STD_AGE_DEFAULT,
-            fc_age_err_ma: float = _STD_AGE_ERR) -> tuple:
+            fc_age_err_ma: float = _STD_AGE_ERR, monitor: str = 'FCs') -> tuple:
     df = pd.read_excel(input_path, header=_HEADER_ROW, engine="openpyxl")
     df.columns = [str(c).strip() for c in df.columns]
     if fmt == "ararcalc":
-        return _convert_ararcalc_summary(df, output_dir, col_map)
+        return _convert_ararcalc_summary(df, output_dir, col_map, monitor)
     else:
-        return _convert_mass_spec_raw(df, output_dir, col_map, fc_age_ma, fc_age_err_ma)
+        return _convert_mass_spec_raw(df, output_dir, col_map, fc_age_ma, fc_age_err_ma,
+                                      monitor)
 
 
 # ── GUI dialog ────────────────────────────────────────────────────────────────
@@ -840,8 +887,20 @@ class ConvertDialog(QDialog):
         self._rb_mass.toggled.connect(self._refresh_table)
         root.addWidget(fg)
 
+        # ── Monitor (both formats) ────────────────────────────────────────────
+        mg = QGroupBox("Flux monitor")
+        ml = QHBoxLayout(mg)
+        self._mon_combo = MonitorCombo()
+        ml.addWidget(self._mon_combo)
+        mnote = QLabel("The standard the J values were derived from. ArArCALC files\n"
+                       "give its age; for another monitor than FCs the R values are\n"
+                       "written FCs-equivalent.")
+        mnote.setStyleSheet("color: #666; font-size: 10px;")
+        ml.addWidget(mnote, 1)
+        root.addWidget(mg)
+
         # ── FC age reference (mass spec only) ────────────────────────────────
-        self._fc_group = QGroupBox("FC sanidine age used to derive J")
+        self._fc_group = QGroupBox("Monitor age used to derive J")
         fc_layout = QVBoxLayout(self._fc_group)
 
         self._fc_combo = QComboBox()
@@ -872,6 +931,8 @@ class ConvertDialog(QDialog):
         root.addWidget(self._fc_group)
 
         self._fc_combo.currentIndexChanged.connect(self._on_fc_ref_changed)
+        self._mon_combo.currentIndexChanged.connect(
+            lambda _i: self._on_fc_ref_changed(self._fc_combo.currentIndex()))
         self._on_fc_ref_changed(0)   # populate fields with first entry
 
         # ── Column mapping table ─────────────────────────────────────────────
@@ -910,6 +971,16 @@ class ConvertDialog(QDialog):
 
     def _on_fc_ref_changed(self, idx: int):
         _, age, err = _FC_REFERENCES[idx]
+        mk = _monitor_keys(self._mon_combo.monitor()) if hasattr(self, '_mon_combo') else None
+        if mk and mk['monitor'] != 'FCs' and idx < len(FC_PRESETS):
+            # the monitor's age on this calibration (through its R)
+            name = _FC_REFERENCES[idx][0].split(' — ')[0]
+            pl = _paired_lambda(name)
+            if pl is not None:
+                age = _standard_age_on(dict(stdAgeMa=next(a for n, a, e, x in FC_PRESETS
+                                                          if n.startswith(name)),
+                                            lambdaYr=pl[1]), mk['monitorR'])
+                age = float(f'{age:.9g}')
         self._fc_age_edit.setText(str(age))
         self._fc_err_edit.setText(str(err))
 
@@ -976,6 +1047,7 @@ class ConvertDialog(QDialog):
         self.col_result      = col_map
         self.fc_age_result   = self.fc_age_ma()
         self.fc_age_err_result = self.fc_age_err_ma()
+        self.monitor_result  = self._mon_combo.monitor()
         self.accept()
 
 
@@ -1030,7 +1102,7 @@ def main():
 
     if not input_path:
         input_path, _ = dfold.get_open_file_name(
-            None, "Open an ArArCALC or Mass Spec export", "", "Excel files (*.xlsx *.xls)")
+            None, "Open an ArArCALC or Mass Spec export", "", "Excel files (*.xlsx)")
         if not input_path:
             sys.exit(0)
 
@@ -1052,14 +1124,15 @@ def main():
     # ── convert ───────────────────────────────────────────────────────────────
     written, warnings = convert(input_path, output_dir, dlg.fmt_result, dlg.col_result,
                                 fc_age_ma=dlg.fc_age_result,
-                                fc_age_err_ma=dlg.fc_age_err_result)
+                                fc_age_err_ma=dlg.fc_age_err_result,
+                                monitor=dlg.monitor_result)
 
     lines = []
     for w in warnings:
         lines.append(f"WARNING: {w}")
     lines.append(f"Converted {len(written)} file(s) to:\n{output_dir}")
     if warnings:
-        lines.append(f"({len(warnings)} skipped, see warnings above)")
+        lines.append(f"({len(warnings)} warning(s) above)")
     print("\n".join(lines))
 
 

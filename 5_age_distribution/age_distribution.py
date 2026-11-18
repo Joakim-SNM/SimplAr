@@ -3,19 +3,16 @@
 Age distribution: probability density plots, pooled ages and mixture models
 for many ⁴⁰Ar/³⁹Ar ages.
 
-A focused tool for plotting and combining 40Ar/39Ar ages:
-
   * one or many samples, each pasted, loaded (.arar/.ararpt) or imported (.xlsx/.csv);
-  * input as ages (Ma) or as 40Ar*/39ArK ratios that are converted with a per-sample
-    J calibration;
-  * a summed-Gaussian probability density per sample, plus an optional pooled curve;
-  * covariance-correct pooling (Vermeesch 2015): samples that share an irradiation
-    position share their J uncertainty (no averaging-down); independent irradiations
-    average down properly; the FCs/lambda systematic is shared via a toggle;
-  * plain age+uncertainty plotting when no J information is supplied;
-  * a Mixture view (its own button, like Stack Mode in the Plateau & isochron tool) that
-    fits a discrete mixture or a minimum age model to one sample's analyses
-    (mixture_model.py: Galbraith & Laslett 1993; Galbraith et al. 1999).
+  * input as ages (Ma) or as 40Ar*/39ArK ratios, converted with a J calibration
+    per sample;
+  * a summed-Gaussian probability density per sample, and a pooled curve;
+  * pooling on the covariance of Vermeesch (2015): samples from one irradiation
+    position share their J uncertainty, which then does not average down, and
+    samples on one calibration share the FCs age and λ terms;
+  * ages without J information are plotted and combined as they are;
+  * a Mixture view that fits a discrete mixture or a minimum age model to the
+    analyses of one sample (Galbraith & Laslett 1993; Galbraith et al. 1999).
 
 Layout of this file, top to bottom:
   J configuration defaults, statistics, plot helpers
@@ -58,6 +55,7 @@ except Exception:
 
 # shared math/constants live one folder up, next to the launcher
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import arar_math as am
 from arar_math import (
     LAMBDA_DEFAULT, LAMBDA_ERR, STD_AGE_DEFAULT, STD_AGE_ERR,
     weighted_mean, j_correlation, match_flux_hole, mswd_classify,
@@ -73,14 +71,13 @@ from arar_math import (
     flux_pair_corr, serialize_xcorr,
     draw_budget_pie, file_err_div,
     METHOD_WM, METHOD_GLS, method_key,
-    mono_font,
+    mono_font, MONITOR_KEYS, to_fcs_r, from_fcs_r, cfg_monitor,
+    calibration_notes, monitor_mismatch_note,
 )
 from flux_dialog import FluxAssignDialog, FluxHost
-import figure_export as figexp
-import data_export as dexp
+from standards import MonitorCombo, monitor_text
+import export
 import data_folders as dfold
-import mixture_model as mixm
-
 
 
 _PALETTE = ['#1f77b4', '#d62728', '#2ca02c', '#9467bd', '#ff7f0e',
@@ -153,7 +150,7 @@ def _j_flux_key(cfg):
         # rfcsErrPct and pasteTier affect error tiers, not the position identity.
         # The position grouping has no numerical effect in this mode (p=0), so
         # the key only needs to identify the t_FCs/λ calibration used.
-        return ('ratio_R_FCs', round(cfg.get('stdAgeMa', STD_AGE_DEFAULT), 6),
+        return ('ratio_R_FCs', cfg_monitor(cfg)[0], round(cfg.get('stdAgeMa', STD_AGE_DEFAULT), 6),
                 round(cfg.get('stdAgeErrMa', STD_AGE_ERR), 8),
                 cfg.get('stdAgeErrType', 'internal'),
                 round(cfg.get('lambdaYr', LAMBDA_DEFAULT), 17),
@@ -269,7 +266,9 @@ def summed_gaussian_pdf(ages, sigma_1, axis):
 
 def _curve_axis(inc, inc_s, ds):
     """A padded x-axis for a summed-Gaussian curve. Shared by the density
-    pre-pass and the draw loop so both evaluate on the identical grid."""
+    pre-pass and the draw loop so both evaluate on the identical grid.
+    The curves are always drawn from the 1σ uncertainties; ds only widens
+    the padding so the display-level error bars fit."""
     inc = np.asarray(inc, float)
     inc_s = np.asarray(inc_s, float)
     rng = max(inc.max() - inc.min(), 0.01)
@@ -279,7 +278,7 @@ def _curve_axis(inc, inc_s, ds):
     # When one broad analysis blows up the axis range, a fixed 3000-point grid
     # under-samples tight analyses (a few-point Gaussian → triangle).  Scale
     # n_pts so the narrowest sigma always gets ≥20 points for smooth rendering.
-    sig_min = max(float(inc_s.min()), 1e-9) * ds
+    sig_min = max(float(inc_s.min()), 1e-9)
     n_pts = max(3000, min(int((hi - lo) / sig_min * 20) + 1, 30000))
     return np.linspace(lo, hi, n_pts)
 
@@ -298,11 +297,13 @@ def _combine(ages, sigma_ana, sigma_int=None, sigma_ext=None, **kw):
 # --------------------------------------------------------------------------
 # Parsing helpers
 # --------------------------------------------------------------------------
+
+
 def _metas_of(d, n):
     """Per-step export metadata (run time, days since irradiation, raw
     signals) of a parsed dict, padded with empty entries when absent."""
     m = d.get('metas') or []
-    ms = [dict(x) for x in m] if len(m) == n else [dexp.step_meta({}) for _ in range(n)]
+    ms = [dict(x) for x in m] if len(m) == n else [export.step_meta({}) for _ in range(n)]
     # Each point's own J / R standard and measured 40Ar*/39ArK. Several files or
     # aliquots can be merged into one sample on the first one's J (R rescaled),
     # so the export needs these to report what each point was measured with.
@@ -315,7 +316,7 @@ def _metas_of(d, n):
                       and jc.get('ageFluxMode') in ('ratio_J', 'ratio_R_std'))
     except (TypeError, ValueError):
         show_r = False
-    fx = dexp.flux_cells(jc, show_r=show_r)
+    fx = export.flux_cells(jc, show_r=show_r)
     pos = _pos_info(d)
     for i, x in enumerate(ms):
         x.setdefault('fx', fx)
@@ -339,7 +340,7 @@ def _pos_info(d):
 
 
 _J_CFG_KEYS = ('ageFluxMode', 'jVal', 'jErrPct', 'rStd', 'rStdErrPct', 'rStdErrMode',
-               'stdAgeMa', 'stdAgeErrMa', 'stdAgeErrType', 'lambdaYr', 'lambdaErrYr')
+               'stdAgeMa', 'stdAgeErrMa', 'stdAgeErrType', 'lambdaYr', 'lambdaErrYr') + MONITOR_KEYS
 
 
 def _parse_steps(steps, ef):
@@ -365,7 +366,7 @@ def _parse_steps(steps, ef):
         out['ar40_pct'].append(float(ar40) if ar40 is not None else float('nan'))
         out['labels'].append(str(s.get('label', '')))
         out['run_ids'].append(str(s.get('runID', '')))
-        out['metas'].append(dexp.step_meta(s))
+        out['metas'].append(export.step_meta(s))
         out['manual'].append('out' if s.get('status') == 'excluded' else 'auto')
     rv, ru = out['r_vals'], out['r_uncs']
     if not (len(rv) == len(out['ages']) and rv
@@ -637,8 +638,8 @@ def parse_ararstack_combined(path, aliquots=None):
         pt_jfrac=[a['jfrac'] for a in als], pt_pos=[a['pos'] for a in als],
         # one entry per aliquot: its own calibration, where it was irradiated
         # and its measured ratio (the sample itself works on the first J)
-        metas=[dict(dexp.step_meta({}), pos=_pos_info(a),
-                    fx=dexp.flux_cells(a['j_cfg'], show_r=True),
+        metas=[dict(export.step_meta({}), pos=_pos_info(a),
+                    fx=export.flux_cells(a['j_cfg'], show_r=True),
                     r_meas=a['r_vals'][0], r_meas_unc=a['r_uncs'][0])
                for a in als],
     )
@@ -667,6 +668,7 @@ def parse_table(path):
 # --------------------------------------------------------------------------
 class Sample:
     """One sample: ages (or ratios) + a J calibration + display state."""
+
     def __init__(self, name='Sample', color='#1f77b4'):
         self.name = name
         # the experiment's name as its file came in, kept through renaming
@@ -865,7 +867,7 @@ class Sample:
         # internal = analytical + J flux (∂t/∂ln J · σ_J/J);  external adds the
         # calibration systematic, one shared component at a time
         # (arar_math.systematic_components: anchored chain for Kuiper, Rivera
-        # and Phillips, so λ nearly cancels)
+        # and Phillips)
         s_int = self.sig_int(a, s_ana, idx)
         s_ext = external_sigma_array(a, s_int, self.j_cfg)
         C, _ = systematic_matrix(a, self.j_cfg)
@@ -898,13 +900,13 @@ class Sample:
         return list(zip(av.tolist(), sa.tolist(), si.tolist(), se.tolist()))
 
 
-
 # --------------------------------------------------------------------------
 # Per-sample control panel
 # --------------------------------------------------------------------------
 class _PasteEdit(QTextEdit):
     """A small text box that re-applies its callback when focus leaves,
     so manually deleting/editing lines takes effect without a button press."""
+
     def __init__(self, on_commit):
         super().__init__()
         self._on_commit = on_commit
@@ -979,23 +981,19 @@ class SamplePanel(QFrame):
         self.cb_plateau = QCheckBox('Collapse to 1 age')
         self.cb_plateau.setChecked(self.s.is_plateau)
         self.cb_plateau.setToolTip(
-            'Collapse THIS sample’s steps/analyses into a single weighted-mean age\n'
-            '(one aliquot, one pooled point). Tick it when the analyses are the\n'
-            'incremental-heating steps of one experiment; leave it off only if each\n'
-            'row is an independent fusion. Stacked plateau files arrive collapsed.\n'
-            'Its steps are correlated,\n'
-            'so they collapse to a single weighted-mean point (drawn as a square) that\n'
-            'enters the pool and the density curve, the WM carries the internal error\n'
-            '(SEM x sqrt(MSWD) if the steps are overdispersed) plus the usual external\n'
-            'error. Leave unticked for independent fusion analyses, where each point\n'
-            'counts on its own.')
+            'Combine this sample’s analyses into one weighted-mean age, drawn as a\n'
+            'square, that enters the pool and the density curve as one point. Tick it\n'
+            'when the analyses are the heating steps of one experiment, which share J;\n'
+            'leave it off for independent fusions, where each analysis counts on its\n'
+            'own. The mean carries the internal error (SEM × √MSWD when the steps are\n'
+            'overdispersed) and the external error. Stacked plateau files arrive combined.')
         self.cb_plateau.toggled.connect(self._on_plateau)
         row.addWidget(self.cb_plateau)
         row.addWidget(QLabel('σ in:'))
         self.insig = QComboBox()
         self.insig.addItems(['2σ', '1σ'])
         self.insig.setCurrentIndex(0 if self.s.in_sigma == 2 else 1)
-        self.insig.setToolTip("How THIS sample's entered uncertainty is read.\n"
+        self.insig.setToolTip("How this sample's entered uncertainty is read.\n"
                               'Changing it rescales the stored values immediately.')
         self.insig.currentIndexChanged.connect(self._on_in_sigma)
         row.addWidget(self.insig)
@@ -1158,13 +1156,16 @@ class SamplePanel(QFrame):
             self.jpct.setText(f"{cfg.get('jErrPct', 0.10):.4g}")
             jr_on = True
         elif mode == 'ratio_R_std':
+            mon = cfg_monitor(cfg)[0]
             self.lbl_jval.setText('R_std:')
+            self.jval.setToolTip(f'Measured ⁴⁰Ar*/³⁹Ar of the monitor ({mon}), as set in the '
+                                 'calibration bar.')
             self.lbl_jpct.setText('±R%:')
-            self.jval.setText(f"{cfg.get('rStd', 70.0):.8g}")
+            self.jval.setText(f"{from_fcs_r(cfg.get('rStd', 70.0), cfg):.8g}")
             self.jpct.setText(f"{cfg.get('rStdErrPct', 0.10):.4g}")
             jr_on = True
         elif mode == 'ratio_R_FCs':
-            self.lbl_jval.setText('R/R_FCs:')
+            self.lbl_jval.setText('R/R_std:')
             self.lbl_jpct.setText('(n/a)')
             self.jval.setText('(input as ratios)')
             self.jpct.setText('')
@@ -1209,7 +1210,8 @@ class SamplePanel(QFrame):
             self.s.j_cfg['jErrPct'] = f(self.jpct, 0.10)
             _sync_j_rstd(self.s.j_cfg, 'J')      # keep R_std consistent with J
         elif mode == 'ratio_R_std':
-            self.s.j_cfg['rStd'] = f(self.jval, 70.0)
+            # typed as the measured monitor ratio, stored FCs-equivalent
+            self.s.j_cfg['rStd'] = to_fcs_r(f(self.jval, 70.0), self.s.j_cfg)
             self.s.j_cfg['rStdErrPct'] = f(self.jpct, 0.10)
             _sync_j_rstd(self.s.j_cfg, 'R')      # keep J consistent with R_std
         elif mode == 'ratio_R_FCs':
@@ -1323,7 +1325,8 @@ class SamplePanel(QFrame):
             return
         col0 = np.array([p[0] for p in rows], float)
         col1 = np.array([p[1] for p in rows], float)
-        if len(col0) != len(self.s.ages):
+        new_set = len(col0) != len(self.s.ages)
+        if new_set:
             self.s.pt_jfrac = self.s.pt_pos = None     # new data set
         if self.s.input_mode == 'ratio':
             # box holds R_unk <tab> sigma(R): stays R-driven, re-age from R + J
@@ -1355,11 +1358,14 @@ class SamplePanel(QFrame):
             self.s.metas    = []
             self.s.pt_jfrac = self.s.pt_pos = None
             self.s._from_file = False
-            self.s.in_sigma = self.app.input_sigma
+            # a new data set is read at the window's σ-in; an edit of the rows
+            # already shown at this sample's own σ-in (sync_data_box)
+            if new_set:
+                self.s.in_sigma = self.app.input_sigma
             self.insig.blockSignals(True)
             self.insig.setCurrentIndex(0 if self.s.in_sigma == 2 else 1)
             self.insig.blockSignals(False)
-            self.s.set_ages(col0, col1 / self.app.input_sigma)
+            self.s.set_ages(col0, col1 / self.s.in_sigma)
         self.sync_data_box()
         self.app.redraw()
         self.refresh_info()
@@ -1511,14 +1517,18 @@ class SamplePanel(QFrame):
 
     def sync_data_box(self):
         """Mirror the model into the data box and remember the text, so a
-        focus-out never misfires _apply_paste on text we set ourselves."""
+        focus-out never misfires _apply_paste on text we set ourselves.
+        Uncertainties are written at this sample's σ-in, the level
+        _apply_paste reads them back at, so editing one line leaves the
+        others unchanged."""
+        k = self.s.in_sigma
         if self.s.has_R() and self.s.input_mode == 'ratio':
-            # editable R_unk <tab> sigma(R) [1-sigma]; derived age annotated
-            lines = [f'{r:.8g}\t{ru:.4g}\t# {a:.4f} Ma' for r, ru, a in
+            # editable R_unk <tab> sigma(R); derived age annotated
+            lines = [f'{r:.8g}\t{ru * k:.4g}\t# {a:.4f} Ma' for r, ru, a in
                      zip(self.s.r_vals, self.s.r_uncs, self.s.ages)]
             self.data.setText('\n'.join(lines))
         else:
-            self.data.setText('\n'.join(f'{a}\t{u}' for a, u in
+            self.data.setText('\n'.join(f'{a}\t{float(u * k)}' for a, u in
                                         zip(self.s.ages, self.s.unc_2s)))
         self.data._last = self.data.toPlainText()
 
@@ -1602,7 +1612,7 @@ class ProbabilityWindow(QMainWindow):
         self.age_dec = 3              # decimal places for ages/uncertainties in the legend
         self.input_sigma = 1          # interpret incoming (paste/import/load) uncertainty as 1 or 2 sigma; converter writes 1-sigma
         self.pool_on = False
-        self.same_fcs = True   # always shared standard (Same FCs removed from UI)
+        self.same_fcs = True   # every sample is on the calibration bar's FCs age
         self.corr_j = False
         self._disk_flux = {}   # (irradiation, disk_id) -> {hole_id: idx, 'J','J_sigma','J_corr'}
         self._preferred_flux = None   # (irr, disk) the user most recently loaded/chose; wins ties
@@ -1675,13 +1685,12 @@ class ProbabilityWindow(QMainWindow):
         self.ymode_sel.setCurrentIndex(0)
         self.ymode_sel.setMaximumWidth(150)
         self.ymode_sel.setToolTip(
-            'Rank: hybrid view, probability curve (per-sample, peak = 1) with analyses '
-            'plotted at scaled rank positions (rank / n) so the top analysis sits at the '
-            'curve peak. Best for a clean combined view of distribution and data spread.\n'
-            'Relative prob.: summed-Gaussian curve normalised so the global tallest '
-            'peak = 1. Analyses shown as a baseline rug. Best for comparing shapes.\n'
-            'Probability: each curve peaks at its MSWD p-value × 100, so height '
-            'encodes fit quality directly (p=0.88 → peak at 88, p=0.05 → barely rises).')
+            'Rank: the probability curve of each sample (peak = 1) with the analyses '
+            'at their rank (rank / n), so the top analysis sits at the curve peak.\n'
+            'Relative prob.: the summed-Gaussian curves scaled so the tallest peak = 1, '
+            'with the analyses as a rug along the base, for comparing shapes.\n'
+            'Probability: each curve peaks at the p-value of its MSWD × 100 '
+            '(p = 0.88 peaks at 88, p = 0.05 hardly rises).')
         self.ymode_sel.currentIndexChanged.connect(self._on_ymode)
         axrow.addWidget(self.ymode_sel)
         axrow.addStretch()
@@ -1756,11 +1765,11 @@ class ProbabilityWindow(QMainWindow):
         self.in_sig_sel = QComboBox()
         self.in_sig_sel.addItems(['1σ', '2σ'])
         self.in_sig_sel.setCurrentIndex(0)   # converter writes raw 1-sigma
-        self.in_sig_sel.setToolTip('σ-level of incoming data (paste, import, AND loaded '
-                                   '.arar/.ararpt).\nRaw numbers are read verbatim and '
-                                   'interpreted at this level.\nThe converter writes raw 1σ, so '
-                                   'the default is 1σ.\nEach sample has its own σ-in selector '
-                                   'to override retroactively.')
+        self.in_sig_sel.setToolTip('σ level of incoming data (pasted, imported and loaded '
+                                   '.arar/.ararpt).\nThe numbers are read as they are, at this '
+                                   'level.\nThe converter writes 1σ, so the default is 1σ.\n'
+                                   'Each sample has its own σ in selector, which can be changed '
+                                   'after loading.')
         self.in_sig_sel.currentIndexChanged.connect(self._on_input_sigma)
         opt.addWidget(self.in_sig_sel)
         opt.addSpacing(10)
@@ -1787,12 +1796,18 @@ class ProbabilityWindow(QMainWindow):
 
         # calibration bar: one calibration for the whole session (two rows)
         cal1 = QHBoxLayout()
+        cal1.addWidget(QLabel('Monitor:'))
+        self.mon_sel = MonitorCombo()
+        self.mon_sel.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.mon_sel.setMinimumContentsLength(6)
+        self.mon_sel.activated.connect(self._on_calib_field)
+        cal1.addWidget(self.mon_sel)
         cal1.addWidget(QLabel('Calib:'))
         cal = cal1
         self.calib_sel = QComboBox()
         self.calib_sel.addItems([r[0] for r in FC_PRESETS] + ['Custom…'])
         self.calib_sel.setToolTip(
-            'FC monitor calibration, applied to ALL samples. Picking a preset\n'
+            'FC monitor calibration, applied to all samples. Picking a preset\n'
             'sets t_FCs, its error, the FC err type and the decay constant the\n'
             'calibration is anchored to (e.g. Phillips 2022 → Min et al. 2000 λ).\n'
             'R_std is treated as the measured quantity: J is re-derived and all\n'
@@ -1816,15 +1831,13 @@ class ProbabilityWindow(QMainWindow):
         self.cal_external.addItems(['Intercalibrated external', 'Full external'])
         self.cal_external.setToolTip(
             'Which external uncertainty to report:\n'
-            ' Intercalibrated external (default, correct): for Kuiper, Rivera\n'
-            '          and Phillips the age is anchored on the astronomical tephra\n'
-            '          through R(FCs/A); external = R(FCs/A) + anchor age + λ, and\n'
-            '          λ nearly cancels. This is the right number for essentially\n'
-            '          all work, INCLUDING comparison with U-Pb.\n'
-            ' Full external, Min et al. (2000) stance: carry the full physical\n'
-            '          ⁴⁰K decay scheme (~1–2.5%), no cancellation. For an\n'
-            '          independent test or a deliberately conservative report;\n'
-            '          NOT required just because you compare to U-Pb.')
+            ' Intercalibrated external (default): the monitor age with the decay\n'
+            '          constant it was calibrated with. For Kuiper, Rivera and\n'
+            '          Phillips it comes from R(FCs/A), the anchor age and λ.\n'
+            '          This is also the error to use against U-Pb ages.\n'
+            ' Full external (Min et al., 2000): the uncertainty of the two partial\n'
+            '          ⁴⁰K decay constants (about 1.2% of the age, 1σ) in place of the λ term,\n'
+            '          for an independent test of the ⁴⁰K clock.')
         self.cal_external.activated.connect(self._on_calib_field)
         cal1.addWidget(self.cal_external)
         # stdAgeErrType is not a user control; it comes from the preset
@@ -1843,6 +1856,10 @@ class ProbabilityWindow(QMainWindow):
             w.editingFinished.connect(self._on_calib_field)
         right.addLayout(cal1)
         right.addLayout(cal2)
+        self.mon_info = QLabel('')
+        self.mon_info.setStyleSheet('color:#555; font-size:10px;')
+        self.mon_info.setVisible(False)
+        right.addWidget(self.mon_info)
 
         # scrollable sample list
         self.scroll = QScrollArea()
@@ -1903,6 +1920,7 @@ class ProbabilityWindow(QMainWindow):
             return None
         if vals['stdAgeMa'] <= 0 or vals['lambdaYr'] <= 0:
             return None
+        vals.update(self.mon_sel.keys())
         return vals
 
     def _calib_bar_match(self):
@@ -1944,8 +1962,7 @@ class ProbabilityWindow(QMainWindow):
         R_std is the measured monitor ratio and is calibration-independent,
         so J is re-derived from it under the new constants (the equivalent
         of J2 = J1*(e^(l2*t2)-1)/(e^(l1*t1)-1)) and ratio samples re-age.
-        Getting this direction right matters: holding J fixed while changing
-        λ silently corrupts R_std and shifts ages by the λ ratio.
+        Holding J fixed instead would change R_std and shift the ages.
         """
         vals = self._calib_bar_values()
         if vals is None:
@@ -1953,12 +1970,25 @@ class ProbabilityWindow(QMainWindow):
         idx = self._calib_bar_match()
         vals['calibClass'] = (calibration_class(FC_PRESETS[idx][0])
                               if idx < len(FC_PRESETS) else 'other')
+        # samples whose data came with another monitor than the bar's
+        mism = [s.name for s in self.samples
+                if len(s.ages) and cfg_monitor(s.j_cfg)[0] != vals['monitor']]
+        notes = calibration_notes(vals)
+        if mism:
+            notes.append(monitor_mismatch_note(vals, cfg_monitor(
+                next(s for s in self.samples if s.name == mism[0]).j_cfg)[0],
+                'the data of ' + ', '.join(mism[:3]) + (' …' if len(mism) > 3 else '')))
+        self._calib_notes = notes
         for s in self.samples:
             s.j_cfg.update(vals)
             if s.j_cfg.get('ageFluxMode') in ('ratio_J', 'ratio_R_std'):
                 _sync_j_rstd(s.j_cfg, 'R')
             if s.has_R() and s.input_mode == 'ratio':
                 s.recompute()
+        txt = '\n'.join([t for t in [monitor_text(vals)] + notes if t])
+        self.mon_info.setText(txt)
+        self.mon_info.setWordWrap(True)
+        self.mon_info.setVisible(bool(txt))
         for p in self.panels:
             p._update_jvis()
             p.sync_data_box()
@@ -1975,8 +2005,13 @@ class ProbabilityWindow(QMainWindow):
             return
         cfgs = [s.j_cfg for s in self.samples]
         c0 = cfgs[0]
-        keys = ('stdAgeMa', 'stdAgeErrMa', 'stdAgeErrType', 'lambdaYr', 'lambdaErrYr')
+        keys = ('stdAgeMa', 'stdAgeErrMa', 'stdAgeErrType', 'lambdaYr', 'lambdaErrYr', 'monitor')
         uniform = all(all(c.get(k) == c0.get(k) for k in keys) for c in cfgs[1:])
+        self.mon_sel.set_monitor(cfg_monitor(c0)[0])
+        txt = '\n'.join([t for t in [monitor_text(c0)] + calibration_notes(c0) if t])
+        self.mon_info.setWordWrap(True)
+        self.mon_info.setText(txt)
+        self.mon_info.setVisible(bool(txt))
         self.cal_tfc.setText(f"{c0.get('stdAgeMa', STD_AGE_DEFAULT):.5g}")
         self.cal_tfce.setText(f"{c0.get('stdAgeErrMa', STD_AGE_ERR):.4g}")
         self._cal_std_err_type = c0.get('stdAgeErrType', 'external')
@@ -2290,6 +2325,20 @@ class ProbabilityWindow(QMainWindow):
             'Ar-Ar (*.arar *.ararpt);;All (*)')
         if not paths:
             return
+        if len(sample.ages) == 0:
+            # nothing to append to: load the files, so their R values are kept
+            docs = []
+            for p in paths:
+                try:
+                    d = parse_arar(p)
+                except Exception as e:
+                    QMessageBox.warning(self, 'Append', f'{os.path.basename(p)}: {e}')
+                    continue
+                if d is not None:
+                    docs.append(d)
+            if docs:
+                self._load_docs(sample, docs, reject='none')
+            return
         new_a, new_u, new_rv, new_ru, new_man = [], [], [], [], []
         new_kca, new_kca_e, new_ar40, new_labels, new_run_ids = [], [], [], [], []
         new_metas = []
@@ -2298,7 +2347,8 @@ class ProbabilityWindow(QMainWindow):
         for p in paths:
             try:
                 d = parse_arar(p)
-            except Exception:
+            except Exception as e:
+                QMessageBox.warning(self, 'Append', f'{os.path.basename(p)}: {e}')
                 continue
             if d is None:
                 continue
@@ -2406,7 +2456,7 @@ class ProbabilityWindow(QMainWindow):
 
     def import_into(self, sample):
         path, _ = dfold.get_open_file_name(
-            self, 'Import table', '', 'Spreadsheet (*.xlsx *.xls *.csv);;All (*)')
+            self, 'Import table', '', 'Spreadsheet (*.xlsx *.csv);;All (*)')
         if not path:
             return
         try:
@@ -2595,6 +2645,13 @@ class ProbabilityWindow(QMainWindow):
                 continue
             self._disk_flux.update(new)
             loaded += len(new)
+            _mons = {fx.get('monitor', 'FCs') for fx in new.values()}
+            _vals = self._calib_bar_values()
+            if _vals:
+                _mn = monitor_mismatch_note(_vals, _mons.pop() if len(_mons) == 1 else 'FCs',
+                                            f'the flux in {os.path.basename(p)}')
+                if _mn:
+                    QMessageBox.information(parent, 'Load disk flux', _mn)
             if new:
                 self._preferred_flux = list(new)[-1]   # newest load wins ties on re-match
         return loaded
@@ -2766,7 +2823,6 @@ class ProbabilityWindow(QMainWindow):
         R = self._flux_hole_R(key, i)
         return f'{R:.6g}' if R else '—'
 
-
     def _active(self):
         return [s for s in self.samples if s.enabled and len(s.ages) > 0
                 and s.mask().sum() > 0]
@@ -2808,10 +2864,6 @@ class ProbabilityWindow(QMainWindow):
                      fontsize=9)
         fig.tight_layout()
         canvas.draw()
-        note = QLabel()
-        note.setWordWrap(True)
-        note.setStyleSheet('color:#666; font-size:10px;')
-        lay.addWidget(note)
         dlg.exec_()
 
     def pool(self):
@@ -2922,7 +2974,7 @@ class ProbabilityWindow(QMainWindow):
                 if n_in >= 1:
                     inc = s.ages[m]; inc_s = s.sig1()[m]
                     axd = _curve_axis(inc, inc_s, ds)
-                    p = summed_gaussian_pdf(inc, inc_s * ds, axd).max() / n_in
+                    p = summed_gaussian_pdf(inc, inc_s, axd).max() / n_in
                     if p > 0:
                         pk.append(p)
             if pooling:
@@ -2937,7 +2989,7 @@ class ProbabilityWindow(QMainWindow):
                     for s in act:
                         m = s.mask(); n_in = int(m.sum())
                         if n_in >= 1:
-                            env += summed_gaussian_pdf(s.ages[m], s.sig1()[m] * ds, axd) / n_in
+                            env += summed_gaussian_pdf(s.ages[m], s.sig1()[m], axd) / n_in
                     if env.max() > 0:
                         pk.append(env.max())
             Gmax = max(pk) if pk else 1.0
@@ -2963,14 +3015,14 @@ class ProbabilityWindow(QMainWindow):
         # export dialog's 'Ages in legend' (the window always shows all three)
         _lg_tier = getattr(self, '_export_show', {}).get('legend_ages', 'all')
         # Pad the names to one measured width so the age block starts in the
-        # same column in the normal legend font (figexp.pad_names): every
+        # same column in the normal legend font (export.pad_names): every
         # legend, with or without ages, then uses the same font.
         def _tn(name, limit=77):
             return name if len(name) <= limit else name[:limit] + '…'
         _names = [_tn(s.name) for s in act]
         if pooling:
             _names.append('Pooled')
-        _padded = dict(zip(_names, figexp.pad_names(_names, 8 * _ps, gap=0)))
+        _padded = dict(zip(_names, export.pad_names(_names, 8 * _ps, gap=0)))
         for k, (s, rk) in enumerate(zip(act, ranks)):
             m = s.mask()
             n_in = int(m.sum())
@@ -2985,7 +3037,7 @@ class ProbabilityWindow(QMainWindow):
                 inc = s.ages[m]
                 inc_s = sig[m]
                 axis = _curve_axis(inc, inc_s, ds)
-                pdf = summed_gaussian_pdf(inc, inc_s * ds, axis)
+                pdf = summed_gaussian_pdf(inc, inc_s, axis)
                 if pdf.max() > 0:
                     if density_mode:
                         scaled = pdf / n_in / Gmax              # relative: global-max = 1
@@ -3001,7 +3053,7 @@ class ProbabilityWindow(QMainWindow):
                                      lw=1.8 * _ps_line, zorder=6)   # over the points
                 # dashed "would-be" outline including the excluded points
                 if n_in < len(s.ages):
-                    full = summed_gaussian_pdf(s.ages, sig * ds, axis)
+                    full = summed_gaussian_pdf(s.ages, sig, axis)
                     if full.max() > 0:
                         if density_mode:
                             fsc = full / len(s.ages) / Gmax
@@ -3112,16 +3164,16 @@ class ProbabilityWindow(QMainWindow):
                         m = s.mask(); n_in = int(m.sum())
                         if n_in >= 1:
                             env += summed_gaussian_pdf(
-                                s.ages[m], s.sig1()[m] * ds, axis) / n_in
+                                s.ages[m], s.sig1()[m], axis) / n_in
                     scaled = env / Gmax if env.max() > 0 else None
                 elif prob_mode:
-                    pdf = summed_gaussian_pdf(inc_ages, inc_sig * ds, axis)
+                    pdf = summed_gaussian_pdf(inc_ages, inc_sig, axis)
                     pool_p = pr['prob'] if pr else 0.0
                     scaled = pdf / pdf.max() * pool_p * 100 if pdf.max() > 0 else None
                 else:
                     # rank: curve peaks at total included n
                     total_n = sum(int(s.mask().sum()) for s in act)
-                    pdf = summed_gaussian_pdf(inc_ages, inc_sig * ds, axis)
+                    pdf = summed_gaussian_pdf(inc_ages, inc_sig, axis)
                     scaled = pdf / pdf.max() * total_n if pdf.max() > 0 else None
                 if scaled is not None and np.max(scaled) > 0:
                     if self._ex('fill'):
@@ -3191,11 +3243,9 @@ class ProbabilityWindow(QMainWindow):
         self.ax.tick_params(which='both', direction='in', top=True, right=True,
                             labelsize=10 * _ps)
         if legend:
-            # Monospace keeps the space-padded columns aligned; Courier New first,
-            # with graceful fallback if it isn't installed on this machine.
-            # the normal font throughout; the ages line up through the
-            # measured padding above, not a typewriter font
-            _mono = {'size': 8 * _ps}
+            # the normal font: the ages line up through the measured padding
+            # above (export.pad_names), not a typewriter font
+            _prop = {'size': 8 * _ps}
             # one tier chosen in the export: say which in the legend heading
             _tn_ = {'ana': 'analytical', 'int': 'internal',
                     'ext': 'external'}.get(_lg_tier)
@@ -3205,10 +3255,10 @@ class ProbabilityWindow(QMainWindow):
                 # publication export: legend above the axes so it never overlaps the data
                 self.ax.legend(handles=legend, loc='lower left',
                                bbox_to_anchor=(0, 1.01), borderaxespad=0,
-                               framealpha=0.95, prop=_mono, **_lt).set_zorder(20)
+                               framealpha=0.95, prop=_prop, **_lt).set_zorder(20)
             else:
                 self.ax.legend(handles=legend, loc='upper right',
-                               framealpha=0.92, prop=_mono, **_lt).set_zorder(20)
+                               framealpha=0.92, prop=_prop, **_lt).set_zorder(20)
         self.fig.tight_layout()
         if not getattr(self, '_offscreen', False):
             self.canvas.draw_idle()
@@ -3326,18 +3376,18 @@ class ProbabilityWindow(QMainWindow):
         if kchoice == self._MIX_MAM:
             key = data + ('mam',)
             if key not in self._mix_cache:
-                self._mix_cache[key] = mixm.fit_mam(t, s, 3, space)
+                self._mix_cache[key] = am.fit_mam(t, s, 3, space)
             return self._mix_cache[key], None, None
         key = data + ('bic',)
         if key not in self._mix_cache:
-            self._mix_cache[key] = mixm.select_k(t, s, 10, space)
+            self._mix_cache[key] = am.select_k(t, s, 10, space)
         kb, fits = self._mix_cache[key]
         k = kb if kchoice.startswith('Auto') else int(kchoice)
         f = next((x for x in fits if x['k'] == k), None)
         if f is None:
             fkey = data + ('k', k)
             if fkey not in self._mix_cache:
-                self._mix_cache[fkey] = mixm.fit_fmm(t, s, k, space)
+                self._mix_cache[fkey] = am.fit_fmm(t, s, k, space)
             f = self._mix_cache[fkey]
         return f, fits, kb
 
@@ -3370,11 +3420,11 @@ class ProbabilityWindow(QMainWindow):
         if fit is None:
             self._mix_message('Too few analyses for this many components.')
             return
-        tiers = mixm.component_tiers(fit, s.j_cfg)
+        tiers = am.component_tiers(fit, s.j_cfg)
         if self.xlim_mode == 'manual' and self.x_lo is not None:
             xl = (self.x_lo, self.x_hi)
         else:
-            xl = mixm.default_xlim(t, sig, fit, self.display_sigma)
+            xl = am.mixture_xlim(t, sig, fit, self.display_sigma)
         self._mix_state = dict(sample=s, idx=np.where(use)[0], t=t, sig=sig, fit=fit,
                                fits=fits, kb=kb, tiers=tiers, xlim=xl, space=space,
                                all_data=all_data, kchoice=kchoice)
@@ -3385,11 +3435,11 @@ class ProbabilityWindow(QMainWindow):
         axr = self.mix_fig.add_subplot(gs[0, 1] if fits else gs[:, 1])
         axb = self.mix_fig.add_subplot(gs[1, 1]) if fits else None
         self.mix_fig.subplots_adjust(left=0.07, right=0.97, top=0.80, bottom=0.1)
-        mixm.draw_components(ax, t, sig, fit, xl, tiers, ds=self.display_sigma,
+        am.draw_components(ax, t, sig, fit, xl, tiers, ds=self.display_sigma,
                              dec=int(self.age_dec), title=self._mix_title())
-        mixm.draw_radial(axr, t, sig, fit, xl, space)
+        am.draw_radial(axr, t, sig, fit, xl, space)
         if axb is not None:
-            mixm.draw_bic(axb, fits, fit['k'], kb)
+            am.draw_bic(axb, fits, fit['k'], kb)
         self.mix_canvas.draw_idle()
         self.report.setPlainText('\n'.join(self._mixture_report()))
 
@@ -3466,7 +3516,7 @@ class ProbabilityWindow(QMainWindow):
         if self._mix_state is None:
             QMessageBox.information(self, 'Export figure', 'The Mixture view shows no model yet.')
             return
-        dlg = figexp.FigureExportDialog(
+        dlg = export.FigureExportDialog(
             self, 'ageprob_mixture', self._mix_export_panels(), self._mix_export_options(),
             self._mix_export_render,
             default_name=(self._mix_state['sample'].name or 'mixture').replace(' ', '_') + '_mixture',
@@ -3476,24 +3526,24 @@ class ProbabilityWindow(QMainWindow):
         self.redraw()
 
     def _mix_export_panels(self):
-        return [figexp.Panel('components', 'Components (ranked ages and curve)', fixed=True,
+        return [export.Panel('components', 'Components (ranked ages and curve)', fixed=True,
                              weight=1.0),
-                figexp.Panel('radial', 'Radial plot', on=True, weight=0.8),
-                figexp.Panel('bic', 'ΔBIC per number of components', on=True, weight=0.3)]
+                export.Panel('radial', 'Radial plot', on=True, weight=0.8),
+                export.Panel('bic', 'ΔBIC per number of components', on=True, weight=0.3)]
 
     def _mix_export_options(self):
         return [
-            figexp.Option('layout', 'Layout', 'choice', wide=True,
+            export.Option('layout', 'Layout', 'choice', wide=True,
                           values=[('window', 'As in the window: diagram left, the others right'),
                                   ('stacked', 'Stacked, top to bottom')],
                           tip='As in the window: the components diagram fills the left side and '
                               'the other panels are stacked on the right, in the order and '
                               'heights set above.'),
-            figexp.Option('curve', 'Probability curve', 'bool', True),
-            figexp.Option('fill', 'Shading by component', 'bool', True),
-            figexp.Option('points', 'Individual analyses', 'bool', True),
-            figexp.Option('bands', 'Component ages (line and band)', 'bool', True),
-            figexp.Option('legend_ages', 'Ages in legend', 'choice',
+            export.Option('curve', 'Probability curve', 'bool', True),
+            export.Option('fill', 'Shading by component', 'bool', True),
+            export.Option('points', 'Individual analyses', 'bool', True),
+            export.Option('bands', 'Component ages (line and band)', 'bool', True),
+            export.Option('legend_ages', 'Ages in legend', 'choice',
                           values=[('all', 'Age ± analytical / internal / external'),
                                   ('int', 'Age ± internal'),
                                   ('ana', 'Age ± analytical'),
@@ -3501,20 +3551,20 @@ class ProbabilityWindow(QMainWindow):
                                   ('off', 'Component names only')],
                           tip='What follows each component in the legend, at the 1σ/2σ '
                               'level and decimals set in the window.'),
-            figexp.Option('legend_n', 'Proportion and n in legend', 'bool', True),
-            figexp.Option('legend_title', 'Legend heading', 'choice', group='Names',
+            export.Option('legend_n', 'Proportion and n in legend', 'bool', True),
+            export.Option('legend_title', 'Legend heading', 'choice', group='Names',
                           values=[('model', 'Sample, model and number of analyses'),
                                   ('name', 'Sample name'),
                                   ('off', 'None')]),
-            figexp.Option('x_min', 'Age from', 'text', group='Axis ranges', placeholder='auto'),
-            figexp.Option('x_max', 'to', 'text', group='Axis ranges', placeholder='auto'),
+            export.Option('x_min', 'Age from', 'text', group='Axis ranges', placeholder='auto'),
+            export.Option('x_max', 'to', 'text', group='Axis ranges', placeholder='auto'),
         ]
 
     def _mix_export_render(self, fig, spec):
         st = self._mix_state
         opts = spec.get('options', {})
         fig.clear()
-        pans = [(p, w) for p, w in figexp.active_panels(spec)
+        pans = [(p, w) for p, w in export.active_panels(spec)
                 if not (p == 'bic' and not st['fits'])] or [('components', 1.0)]
         x0, x1 = self._opt_float(spec, 'x_min'), self._opt_float(spec, 'x_max')
         xl = (st['xlim'][0] if x0 is None else x0, st['xlim'][1] if x1 is None else x1)
@@ -3534,7 +3584,7 @@ class ProbabilityWindow(QMainWindow):
         fig.subplots_adjust(hspace=0.5, wspace=0.3)
         for pid, ax in axes:
             if pid == 'components':
-                leg = mixm.draw_components(
+                leg = am.draw_components(
                     ax, st['t'], st['sig'], st['fit'], xl, st['tiers'],
                     ds=self.display_sigma, dec=int(self.age_dec),
                     title=self._mix_title(opts.get('legend_title', 'model')),
@@ -3547,12 +3597,12 @@ class ProbabilityWindow(QMainWindow):
                               title=self._mix_title(opts.get('legend_title', 'model')),
                               title_fontproperties={'size': 9, 'weight': 'bold'},
                               alignment='left').set_zorder(20)
-                figexp.place_legend(ax, spec)
+                export.place_legend(ax, spec)
             elif pid == 'radial':
-                mixm.draw_radial(ax, st['t'], st['sig'], st['fit'], xl, st['space'])
+                am.draw_radial(ax, st['t'], st['sig'], st['fit'], xl, st['space'])
             elif pid == 'bic':
-                mixm.draw_bic(ax, st['fits'], st['fit']['k'], st['kb'])
-        figexp.scale_text(fig, spec.get('font_scale', 1.0),
+                am.draw_bic(ax, st['fits'], st['fit']['k'], st['kb'])
+        export.scale_text(fig, spec.get('font_scale', 1.0),
                           spec.get('line_scale', 1.0), spec.get('marker_scale', 1.0))
 
     def _mix_export_snapshot(self, spec):
@@ -3610,28 +3660,28 @@ class ProbabilityWindow(QMainWindow):
         s, fit = st['sample'], st['fit']
         name = (s.name or 'sample').replace(' ', '_') + '_mixture.xlsx'
         path, _flt = dfold.get_save_file_name(self, 'Export mixture model', name,
-                                                 dexp.save_filter())
+                                                 export.save_filter())
         if not path:
             return
-        path = dexp.ensure_ext(path, _flt)
+        path = export.ensure_ext(path, _flt)
         ds = self.display_sigma
         idx = list(st['idx'])
         n = len(s.ages)
-        ms = list(s.metas) if len(s.metas) == n else [dexp.step_meta({}) for _ in range(n)]
+        ms = list(s.metas) if len(s.metas) == n else [export.step_meta({}) for _ in range(n)]
         lbls = s.labels if len(s.labels) == n else [''] * n
         rids = s.run_ids if len(s.run_ids) == n else [''] * n
-        _sink = dexp.TableSink(path, results_note='The mixture model of the sample shown: its '
+        _sink = export.TableSink(path, results_note='The mixture model of the sample shown: its '
                                'components, then each analysis with its membership.')
         with _sink as fh:
             w = csv.writer(fh)
             w.writerow([f'# Mixture model of {s.name} only, as shown in the Mixture view'])
             w.writerow([])
-            dexp.write_constants(w, groups=dexp.constants_groups(
+            export.write_constants(w, groups=export.constants_groups(
                 [(s.j_cfg, s.constants, [ms[i] for i in idx])]))
             _sink.set_raw_items([(s.name, [{'label': lbls[i], 'runID': rids[i]} for i in idx],
                                   [ms[i] for i in idx], s.constants)])
             self._write_mixture_rows(w, ds)
-            comp, _prob, P = mixm.membership(fit)
+            comp, _prob, P = am.mixture_membership(fit)
             cols = ([f'P(C{i + 1})' for i in range(P.shape[1])] if fit['model'] == 'fmm'
                     else ['P(minimum)', 'P(older)'])
             w.writerow(['POINT DATA'])
@@ -3668,7 +3718,7 @@ class ProbabilityWindow(QMainWindow):
                 L.append(f"  ML random-effects ω = "
                          f"±{r['overdispersion']*ds:.5f} Ma ({ds}σ)")
             else:                            # √MSWD scaling
-                L.append(f"  overdispersed -> analytical tier x sqrt(MSWD) = {r['mswd_scale']:.3f}")
+                L.append(f"  overdispersed → analytical × √MSWD = {r['mswd_scale']:.3f}")
         c = s.j_cfg
         mode = c.get('ageFluxMode', 'imported')
         L.append(f"  J mode: {mode}   {self._flux_desc(c)}")
@@ -3718,7 +3768,7 @@ class ProbabilityWindow(QMainWindow):
         for idx in out.values():
             members = [act[i] for i in idx]
             if all_r_fcs:
-                desc = 'local flux cancels in ratio (J component = 0)'
+                desc = 'R_unk/R_FCs input: no J term shared between samples'
             elif len(idx) == 1:
                 desc = 'independent'
             else:
@@ -3751,7 +3801,7 @@ class ProbabilityWindow(QMainWindow):
              f"      MSWD = {pr['mswd']:.2f}   p = {pr.get('prob', float('nan')):.2f}"
              f"   ({mswd_classify(pr['mswd'], pr['n']) or '-'})",
              '',
-             f"  Uncertainty budget ({ds}σ)          [ⓘ Error breakdown for the pie]",
+             f"  Uncertainty budget ({ds}σ)          (Error breakdown for the pie chart)",
              f"    analytical    ± {pr['sigma_ana']*ds:.4f} Ma     mass-spec scatter",
              f"    internal      ± {pr['sigma_int']*ds:.4f} Ma     + J / neutron flux",
              f"    external      ± {pr['sigma_ext']*ds:.4f} Ma     + FCs age & decay const"
@@ -3784,7 +3834,7 @@ class ProbabilityWindow(QMainWindow):
             matched = [s for s in act if self._flux_match(s) is not None]
             if matched:
                 L += ['', f'  Disk flux, {len(matched)}/{len(act)} samples matched '
-                          '(true cross-hole J correlation)']
+                          '(J correlation between holes from the .jflux)']
                 for s in matched:
                     key, i = self._flux_match(s)
                     hole_id = next((h for h, ix in self._disk_flux[key]['idx'].items()
@@ -4002,17 +4052,17 @@ class ProbabilityWindow(QMainWindow):
 
     # ── Figure export (shared dialog: layout, sizes, text, legend, preview) ──
     def _export_panels(self):
-        return [figexp.Panel('plot', 'Age–probability plot', fixed=True, weight=1.0)]
+        return [export.Panel('plot', 'Age–probability plot', fixed=True, weight=1.0)]
 
     def _export_options(self):
         act = self._active_all()
         opts = [
-            figexp.Option('curve', 'Probability curves', 'bool', True),
-            figexp.Option('fill', 'Shading under the curves', 'bool', True),
-            figexp.Option('dashed', 'Dashed curve (excluded)', 'bool', True),
-            figexp.Option('points', 'Individual analyses', 'bool', True),
-            figexp.Option('wm', 'Weighted-mean line', 'bool', True),
-            figexp.Option('legend_ages', 'Ages in legend', 'choice',
+            export.Option('curve', 'Probability curves', 'bool', True),
+            export.Option('fill', 'Shading under the curves', 'bool', True),
+            export.Option('dashed', 'Dashed curve (excluded)', 'bool', True),
+            export.Option('points', 'Individual analyses', 'bool', True),
+            export.Option('wm', 'Weighted-mean line', 'bool', True),
+            export.Option('legend_ages', 'Ages in legend', 'choice',
                           values=[('all', 'WM ± analytical / internal / external'),
                                   ('int', 'WM ± internal'),
                                   ('ana', 'WM ± analytical'),
@@ -4021,11 +4071,11 @@ class ProbabilityWindow(QMainWindow):
                           tip='What follows each name in the legend, at the 1σ/2σ '
                               'level and decimals set in the window. Internal = '
                               'analytical + J. MSWD and p stay with the ages.'),
-            figexp.Option('legend_n', 'n in legend', 'bool', True,
+            export.Option('legend_n', 'n in legend', 'bool', True,
                           tip='Number of included analyses: after each sample '
                               'when Pool is off, on the pooled entry only when '
                               'Pool is on.'),
-            figexp.Option('pool_legend', 'Pooled age in legend', 'choice',
+            export.Option('pool_legend', 'Pooled age in legend', 'choice',
                           values=[('same', 'As the samples'),
                                   ('int', 'Pooled age ± internal'),
                                   ('ana', 'Pooled age ± analytical'),
@@ -4038,7 +4088,7 @@ class ProbabilityWindow(QMainWindow):
             # Names: the main window's, the experiment names as loaded (before
             # any renaming), or typed.  The fields are always editable and show
             # the chosen names; pick 'Typed below' to put edits in the figure.
-            figexp.Option(
+            export.Option(
                 'names_from', 'Names in the figure', 'choice', group='Names',
                 wide=True,
                 values=[('window', 'Main window'),
@@ -4048,13 +4098,13 @@ class ProbabilityWindow(QMainWindow):
                     'names: the names the files came with, even if renamed since. '
                     'The fields below show the chosen names; edit them, then '
                     'pick "Typed below" to use your edits.'),
-            figexp.Option('title', 'Title', 'text', group='Names', wide=True,
+            export.Option('title', 'Title', 'text', group='Names', wide=True,
                           placeholder='no title'),
         ]
         # only the samples that are drawn (ticked, with data) get a field
         for k, sm in enumerate(act):
             exp = sm.experiment_name()
-            opts.append(figexp.Option(
+            opts.append(export.Option(
                 f'name_{k}', f'Sample {k + 1}' + ('' if exp else ' (no exp. name)'),
                 'text', group='Names', wide=True, default=sm.name,
                 tip=('' if exp else
@@ -4064,13 +4114,13 @@ class ProbabilityWindow(QMainWindow):
                 follows=('names_from', {'window': sm.name, 'raw': exp or sm.name}),
                 ident=exp or sm.name))
         opts += [
-            figexp.Option('x_min', 'Age from', 'text', group='Axis ranges',
+            export.Option('x_min', 'Age from', 'text', group='Axis ranges',
                           placeholder='auto'),
-            figexp.Option('x_max', 'to', 'text', group='Axis ranges',
+            export.Option('x_max', 'to', 'text', group='Axis ranges',
                           placeholder='auto'),
-            figexp.Option('y_min', 'Y from', 'text', group='Axis ranges',
+            export.Option('y_min', 'Y from', 'text', group='Axis ranges',
                           placeholder='auto'),
-            figexp.Option('y_max', 'to', 'text', group='Axis ranges',
+            export.Option('y_max', 'to', 'text', group='Axis ranges',
                           placeholder='auto'),
         ]
         return opts
@@ -4123,8 +4173,8 @@ class ProbabilityWindow(QMainWindow):
             cur = ax.get_ylim()
             ax.set_ylim(cur[0] if y0 is None else y0,
                         cur[1] if y1 is None else y1)
-        figexp.place_legend(ax, spec)
-        figexp.scale_text(fig, spec.get('font_scale', 1.0),
+        export.place_legend(ax, spec)
+        export.scale_text(fig, spec.get('font_scale', 1.0),
                           spec.get('line_scale', 1.0), spec.get('marker_scale', 1.0))
         self._fixed_frame(fig, spec, has_title=bool(opts.get('title')))
 
@@ -4158,7 +4208,7 @@ class ProbabilityWindow(QMainWindow):
         name = 'ageprob'
         if len(act) == 1:
             name = (act[0].name or 'ageprob').replace(' ', '_')
-        dlg = figexp.FigureExportDialog(
+        dlg = export.FigureExportDialog(
             self, 'ageprob', self._export_panels(), self._export_options(),
             self._export_render, default_name=name,
             snapshot=self._export_snapshot)
@@ -4169,7 +4219,7 @@ class ProbabilityWindow(QMainWindow):
         """Axis ranges the figure is drawn with now, for a preset to keep:
         a blank 'auto' range would otherwise follow whatever the window
         shows when the preset is loaded later."""
-        fig = Figure(figsize=figexp.figsize(spec))
+        fig = Figure(figsize=export.figsize(spec))
         self._export_render(fig, spec)
         ax = fig.axes[0]
         (x0, x1), (y0, y1) = ax.get_xlim(), ax.get_ylim()
@@ -4177,7 +4227,7 @@ class ProbabilityWindow(QMainWindow):
                 'y_min': f'{y0:.4g}', 'y_max': f'{y1:.4g}'}
 
     _POINT_HEADER = ['Sample', 'RunID', 'Run', 'Run date/time',
-                     'Days since irradiation', *dexp.FLUX_HEADERS,
+                     'Days since irradiation', *export.FLUX_HEADERS,
                      'Age (Ma)',
                      '±1σ Ana (Ma)', '±1σ Int (Ma)', '±1σ Ext (Ma)',
                      '40Ar*/39ArK', '±1σ',
@@ -4203,7 +4253,8 @@ class ProbabilityWindow(QMainWindow):
         lam = s.j_cfg.get('lambdaYr', LAMBDA_DEFAULT)
         em1 = cfg_ingrowth(s.j_cfg, lam)
         _ages_all = np.asarray(s.ages, float)
-        _sint_all = s.sig_int(_ages_all, s.unc_2s, np.arange(len(s.ages)))
+        _sana_all = s.sig1()
+        _sint_all = s.sig_int(_ages_all, _sana_all, np.arange(len(s.ages)))
         _sext_all = external_sigma_array(_ages_all, _sint_all, s.j_cfg)
         for i in range(len(s.ages)):
             man = s.manual[i] if i < len(s.manual) else 'auto'
@@ -4214,7 +4265,7 @@ class ProbabilityWindow(QMainWindow):
             else:
                 status = 'auto-in' if auto[i] else f'auto-out ({s.reject})'
             age_i = s.ages[i]
-            sig1_ana = s.unc_2s[i]
+            sig1_ana = _sana_all[i]
             sig1_int = _sint_all[i]
             sig1_ext = _sext_all[i]
             # ratio_R_FCs stores R_unk/R_FCs in r_vals, not 40Ar*/39ArK
@@ -4258,7 +4309,7 @@ class ProbabilityWindow(QMainWindow):
                 rrat = rrat_ana = rrat_int = rrat_ext = ''
             rid = s.run_ids[i]  if has_rid else ''
             _mt = (s.metas[i] if len(s.metas) == len(s.ages)
-                   else dexp.step_meta({}))
+                   else export.step_meta({}))
             # A sample merged from several irradiation positions keeps each
             # point's own J, R standard and measured 40Ar*/39ArK (the sample
             # works on the first position's J, with R rescaled to it). A
@@ -4270,9 +4321,9 @@ class ProbabilityWindow(QMainWindow):
                     rv = ff(_mt['r_meas'], 8)
                     ru = ff(_mt['r_meas_unc'], 8) if _mt.get('r_meas_unc') is not None else ''
             else:
-                _flx = dexp.flux_cells(s.j_cfg, show_r=bool(has_r and r_std and r_std > 0))
+                _flx = export.flux_cells(s.j_cfg, show_r=bool(has_r and r_std and r_std > 0))
             rows.append([s.name, rid, i + 1, _mt.get('run_dt', ''),
-                         dexp.fmt_days(_mt), *_flx,
+                         export.fmt_days(_mt), *_flx,
                          f'{age_i:.8f}',
                          f'{sig1_ana:.8f}', f'{sig1_int:.8f}', f'{sig1_ext:.8f}',
                          rv, ru,
@@ -4288,16 +4339,16 @@ class ProbabilityWindow(QMainWindow):
             return self._export_mixture_data()
         import csv
         path, _flt = dfold.get_save_file_name(self, 'Export data', 'ageprob_data.xlsx',
-                                                 dexp.save_filter())
+                                                 export.save_filter())
         if not path:
             return
-        path = dexp.ensure_ext(path, _flt)
+        path = export.ensure_ext(path, _flt)
         ds = self.display_sigma
         sig_lbl = f'{ds}σ'
         method_label = ('GLS + ML random-effects (after Vermeesch 2015 §13)'
                         if _STAT_METHOD == METHOD_GLS
                         else 'WM + √MSWD')
-        _sink = dexp.TableSink(path, results_note='The analyses of each sample, the sample results and the pooled result.')
+        _sink = export.TableSink(path, results_note='The analyses of each sample, the sample results and the pooled result.')
         with _sink as fh:
             w = csv.writer(fh)
             w.writerow([f'# Statistics: {method_label}  |  Covariance: shared J + FCs/λ (Vermeesch 2015 §13, both methods)'])
@@ -4309,7 +4360,7 @@ class ProbabilityWindow(QMainWindow):
                 if len(s.ages) == 0:
                     continue
                 _ms = (list(s.metas) if len(s.metas) == len(s.ages)
-                       else [dexp.step_meta({}) for _ in s.ages])
+                       else [export.step_meta({}) for _ in s.ages])
                 _lbls = s.labels if len(s.labels) == len(s.ages) else [''] * len(s.ages)
                 _rids = s.run_ids if len(s.run_ids) == len(s.ages) else [''] * len(s.ages)
                 _raw_items.append((s.name,
@@ -4317,7 +4368,7 @@ class ProbabilityWindow(QMainWindow):
                                    _ms, s.constants))
                 _entries.append((s.j_cfg, s.constants, _ms))
             if _entries:
-                dexp.write_constants(w, groups=dexp.constants_groups(_entries))
+                export.write_constants(w, groups=export.constants_groups(_entries))
             _sink.set_raw_items(_raw_items)
 
             # ---- per-point data ------------------------------------------------
@@ -4434,8 +4485,10 @@ class ProbabilityWindow(QMainWindow):
                                     _JMODE_DISPLAY.get(gmembers[0].j_cfg.get('ageFluxMode', 'imported'), ''),
                                     self._flux_desc(gmembers[0].j_cfg), gshared,
                                     ', '.join(_m.name for _m in gmembers)])
+                    _ncal = len({calibration_group_key(_s.j_cfg) for _s in act})
                     w.writerow(['Standard',
-                                'Shared FCs/λ systematic (external tier)'])
+                                'Shared FCs/λ systematic (external tier)' if _ncal == 1 else
+                                f'{_ncal} calibrations, each shared within its own samples'])
                     if self._disk_flux:
                         dm = [_s for _s in act if self._flux_match(_s) is not None]
                         for _s in dm:
@@ -4449,16 +4502,11 @@ class ProbabilityWindow(QMainWindow):
                                         f'R={self._flux_desc_R(_km, _im)}'])
 
 
-# Light-mode theming lives in arar_math.force_light so all three tools share
-# one palette. Aliased here for the in-window call site below.
-_force_light = force_light
-
-
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName("Age distribution")
     dfold.use_tool('age_distribution')
-    _force_light(app)
+    force_light(app)
     win = ProbabilityWindow()
     win.show()
     sys.exit(app.exec_())

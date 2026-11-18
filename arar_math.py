@@ -2,7 +2,8 @@
 
 Everything the SimplAr tools have in common lives here: weighted means and
 their covariance-aware variants, J-factor error propagation, York
-regression, and the physical constants / calibration presets.
+regression, the physical constants and calibration presets, and, at the end,
+the mixture models of the Age distribution tool.
 
 Main references:
   Koppers (2002), Computers & Geosciences 28, ArArCALC error conventions.
@@ -18,7 +19,10 @@ import math
 
 import numpy as np
 
+from matplotlib.ticker import MaxNLocator, AutoMinorLocator
+from scipy import optimize, stats
 from scipy.optimize import minimize_scalar
+from scipy.special import logsumexp
 from scipy.stats import chi2 as _chi2, t as _t
 
 
@@ -34,74 +38,70 @@ def t_crit(dof):
 # --------------------------------------------------------------------------
 # Physical constants and calibration presets.
 #
-# Defaults follow Phillips et al. (2022), paired with the Min et al. (2000)
-# decay constant it is anchored to (see DEFAULT_FC_NAME below). Preset errors
-# are 1-sigma; values published at 2-sigma (Kuiper 2008, Rivera 2011,
-# Phillips 2022) have been halved here.
+# The values live in the standards library (standards.py, with the published
+# values in standards_default.json and the user's edits in the configuration
+# folder).  The tables below are built from it once, at import, in the shapes
+# the tools have always used.  All errors are 1σ.
 #
 # external_flag on the FC presets: True means the calibration itself fixes how
 # lambda enters (an orbital anchor, or a joint fit with lambda), so sigma_lambda
-# is not added at full leverage.  How it does enter is decided in
-# systematic_components: on the anchored chain for Kuiper, Rivera and Phillips,
-# with the joint covariance for Carter.
+# is not added in full.  How it does enter is decided in
+# systematic_components: on the anchored chain for the astronomical
+# calibrations, with the joint covariance for a joint calibration.
 # --------------------------------------------------------------------------
 
+import standards as _stdlib
+
+
+def _load_library():
+    """The standards library in use; the published values if the user's edits
+    leave it unusable."""
+    try:
+        lib = _stdlib.load()
+        if not _stdlib.check(lib) and lib.get('calibrations') and lib.get('decay_constants'):
+            return lib
+    except Exception:
+        pass
+    return _stdlib.load_default()
+
+
+STANDARDS = _load_library()
+
 # (name, lambda yr^-1, 1s error)
-LAMBDA_PRESETS = [
-    ('Steiger & Jäger (1977)', 5.543e-10,  0.0),
-    ('Min et al. (2000)',      5.463e-10,  0.054e-10),
-    ('Renne et al. (2010)',    5.5492e-10, 0.0093e-10),
-    ('Renne et al. (2011)',    5.5305e-10, 0.0132e-10),
-    ('Carter et al. (2025)',   5.5042e-10, 0.0054e-10),
-]
+LAMBDA_PRESETS = [(d['name'], float(d['lambda']), float(d.get('lambda_1s') or 0.0))
+                  for d in STANDARDS['decay_constants']]
 
 # (name, FCs age Ma, 1s error Ma, external_flag)
 #
-# The astronomically anchored ages (Kuiper 2008, Rivera 2011, Phillips 2022)
-# carry external_flag=True.  Their ages and errors are the published values
-# (2-sigma halved) and identify the preset; the external uncertainty of an
-# age dated against them is not propagated from the FCs age and its error but
-# from the anchor (FC_ANCHORS: R_FCs/A, t_A) and lambda on the two-step chain.
-# Phillips et al. (2022): 28.176 +- 0.023 Ma (2s), A1 route.
-FC_PRESETS = [
-    ('Renne et al. (1998)  [S&J λ]', 28.02,  0.14,   False),
-    ('Kuiper et al. (2008)',         28.201, 0.023,  True),
-    ('Renne et al. (2010)',          28.305, 0.036,  False),
-    ('Renne et al. (2011)',          28.294, 0.036,  False),
-    ('Rivera et al. (2011)',         28.172, 0.014,  True),
-    ('Phillips et al. (2022)',       28.176, 0.0115, True),
-    ('Carter et al. (2025)',         28.183, 0.017,  True),
-    ('Historical S&J — 27.84 Ma',    27.84,  0.0,    False),
-]
+# For the astronomically anchored ages (basis 'astronomical' with an anchor)
+# the age and error identify the preset; the external uncertainty of an age
+# dated against them is not propagated from the FCs age and its error but from
+# the anchor (FC_ANCHORS: R_FCs/A, t_A) and lambda on the two-step chain.
+FC_PRESETS = [(c['name'], float(c['age']), float(c.get('age_1s') or 0.0),
+               bool(c.get('sigma_includes_lambda')))
+              for c in STANDARDS['calibrations']]
 
 # The λ each FC calibration is anchored to.  The astronomically tuned ages
-# were all derived with the Min et al. (2000) decay constant and should be
-# used together with it; the joint statistical calibrations (Renne 2010/11,
-# Carter 2025) come with their own λ.  Renne (1998) and the historical value
-# predate Min and pair with Steiger & Jäger.
-FC_PAIRED_LAMBDA = {
-    'Renne et al. (1998)  [S&J λ]': 'Steiger & Jäger (1977)',
-    'Kuiper et al. (2008)':         'Min et al. (2000)',
-    'Renne et al. (2010)':          'Renne et al. (2010)',
-    'Renne et al. (2011)':          'Renne et al. (2011)',
-    'Rivera et al. (2011)':         'Min et al. (2000)',
-    'Phillips et al. (2022)':       'Min et al. (2000)',
-    'Carter et al. (2025)':         'Carter et al. (2025)',
-    'Historical S&J — 27.84 Ma':    'Steiger & Jäger (1977)',
-}
+# were derived with the Min et al. (2000) decay constant and should be used
+# together with it; the joint calibrations come with their own λ.
+FC_PAIRED_LAMBDA = {c['name']: c['decay_constant'] for c in STANDARDS['calibrations']}
+
+# Monitors other than FCs, with their R relative to FCs (standards.py).
+STANDARD_IDS = [s['id'] for s in STANDARDS['standards']]
 
 
 # --------------------------------------------------------------------------
 # Program-wide default calibration.
 #
-# Every tool opens on this one, and the four scalar defaults below are read
-# out of the preset tables rather than typed again, so the monitor age, its
-# error and the decay constant can never drift apart from the named
-# calibration.  To move the whole suite onto a different calibration, change
-# DEFAULT_FC_NAME alone; the anchored lambda follows from FC_PAIRED_LAMBDA.
+# Every tool opens on the calibration marked as the default in the standards
+# library (the first one when none is marked).  The four scalar defaults below
+# are read out of the preset tables rather than typed again, so the monitor
+# age, its error and the decay constant can never drift apart from the named
+# calibration; the paired lambda follows from FC_PAIRED_LAMBDA.
 # --------------------------------------------------------------------------
 
-DEFAULT_FC_NAME     = 'Phillips et al. (2022)'
+DEFAULT_FC_NAME     = next((c['name'] for c in STANDARDS['calibrations'] if c.get('default')),
+                           STANDARDS['calibrations'][0]['name'])
 DEFAULT_LAMBDA_NAME = FC_PAIRED_LAMBDA[DEFAULT_FC_NAME]
 
 DEFAULT_FC_INDEX     = next(i for i, r in enumerate(FC_PRESETS)
@@ -203,12 +203,9 @@ def file_age_calibration(cfg, steps):
 
 # FC ages set by orbital tuning.  With the preset's own age and error they are
 # propagated on the anchored chain (FC_ANCHORS); with an edited error, on the
-# single-step R-value form.  Either way λ nearly cancels.
-ASTRONOMICAL_FC_NAMES = {
-    'Kuiper et al. (2008)',
-    'Rivera et al. (2011)',
-    'Phillips et al. (2022)',
-}
+# single-step R-value form.
+ASTRONOMICAL_FC_NAMES = {c['name'] for c in STANDARDS['calibrations']
+                         if c.get('basis') == 'astronomical' and c.get('anchor')}
 
 
 # The orbital anchor each astronomically calibrated FC age was back-solved from,
@@ -232,7 +229,7 @@ ASTRONOMICAL_FC_NAMES = {
 # Everything below is stored at 1s, per this module's convention.
 #
 # Each entry reproduces its own paper's published FCs age and both uncertainty
-# tiers -- see tests/test_min_external.py.
+# tiers -- see tests/test_calibration.py.
 # R_FCs/astro is stored as the value consistent with each paper's published FCs
 # age, not the value they print. The two differ in the 5th significant figure
 # (Phillips print 4.0819, which implies 28.176473 Ma against their published
@@ -245,25 +242,30 @@ ASTRONOMICAL_FC_NAMES = {
 # (2000) lambda the three calibrations were derived with, so each anchor returns
 # its preset FCs age to machine precision. The value each paper prints is kept
 # alongside for reference.
-#                          t_anchor  1s     R printed  1s R      anchor tephra
+# The anchors are read from the library (standards_default.json); the values
+# there are the printed ones at 1s:
+#   Kuiper et al. (2008):   Melilla composite 6.500 +- 0.005, R 4.3664 +- 0.0009
+#   Rivera et al. (2011):   A1 6.943 +- 0.0025, R 4.0813 +- 0.0013
+#   Phillips et al. (2022): A1 6.943 +- 0.0025, R 4.0819 +- 0.0007
+# (t_anchor Ma, 1s Ma, R printed, 1s R)
 _FC_ANCHOR_INPUTS = {
-    # Melilla composite, Kuiper et al. (2008) SOM (SOM inputs are already 1s)
-    'Kuiper et al. (2008)':   (6.500, 0.005,  4.3664, 0.00090),
-    # A1 tephra, Faneromeni, Crete; t_anchor revised by Rivera et al. (2011).
-    # Rivera print R = 4.0813 +- 0.0026 (2s).
-    'Rivera et al. (2011)':   (6.943, 0.0025, 4.0813, 0.00130),
-    # Phillips et al. (2022) recommended inter-laboratory value, A1 route:
-    # R = 4.0819 +- 0.0014 (2s), t(A1) = 6.943 +- 0.005 Ma (2s).
-    'Phillips et al. (2022)': (6.943, 0.0025, 4.0819, 0.00070),
-}
-_ANCHOR_NATIVE_LAMBDA = 5.463e-10     # Min et al. (2000), used by all three
+    c['name']: (float(c['anchor']['age']), float(c['anchor'].get('age_1s') or 0.0),
+                float(c['anchor']['R_fcs_anchor']), float(c['anchor'].get('R_1s') or 0.0))
+    for c in STANDARDS['calibrations'] if c['name'] in ASTRONOMICAL_FC_NAMES}
+
+
+def _native_lambda(name):
+    """The λ a calibration was derived with (Min et al. 2000 for the three
+    published astronomical ages)."""
+    lam_name = FC_PAIRED_LAMBDA.get(name)
+    return next((l for n, l, _ in LAMBDA_PRESETS if n == lam_name), 5.463e-10)
 
 
 def _consistent_anchor_R(name):
     t_a = _FC_ANCHOR_INPUTS[name][0]
     t_fc = next(a for n, a, e, x in FC_PRESETS if n == name)
-    return (math.expm1(_ANCHOR_NATIVE_LAMBDA * t_fc * 1e6)
-            / math.expm1(_ANCHOR_NATIVE_LAMBDA * t_a * 1e6))
+    lam = _native_lambda(name)
+    return (math.expm1(lam * t_fc * 1e6) / math.expm1(lam * t_a * 1e6))
 
 
 # (t_anchor Ma, 1s Ma, R_FCs/anchor consistent with the preset, 1s R)
@@ -273,14 +275,15 @@ FC_ANCHORS = {name: (v[0], v[1], _consistent_anchor_R(name), v[3])
 
 def calibration_class(fc_name):
     """'astronomical' (orbital-tuned age, R-value external applies),
-    'joint' (age and λ co-calibrated, e.g. Carter 2025, use its own coupled
-    error), or 'other'. Tolerates an age suffix on the name."""
+    'joint' (age and λ co-calibrated with a usable covariance, e.g. Carter
+    2025), or 'other'. Tolerates an age suffix on the name."""
     name = str(fc_name).strip()
     for a in ASTRONOMICAL_FC_NAMES:
         if name.startswith(a):
             return 'astronomical'
-    if name.startswith('Carter'):
-        return 'joint'
+    for j in JOINT_COVARIANCE:
+        if name.startswith(j):
+            return 'joint'
     return 'other'
 
 
@@ -415,7 +418,7 @@ def weighted_mean(ages, err1s):
         return None
     m = (w * a).sum() / W
     sem = 1.0 / np.sqrt(W)
-    n = len(a)
+    n = int((w > 0).sum())              # points without an error carry no weight
     if n > 1:
         chi2 = float((w * (a - m)**2).sum())
         mswd = chi2 / (n - 1)
@@ -546,6 +549,7 @@ def jflux_entries(cfg):
             d['holes'], d['J'], d['J_sigma'], d['J_corr'], d.get('hole_xy', []),
             d.get('disk_design', ''), d.get('R'), d.get('R_sigma'),
             cfg.get('lambdaYr'), cfg.get('stdAgeMa'), cfg.get('stdAgeErrMa'), fit)
+        out[(irr, str(d['disk_id']))]['monitor'] = cfg.get('monitor') or 'FCs'
     # Global fit through several disks: correlation between holes on
     # different disks, stored once per pair and kept both ways here.
     if fit:
@@ -583,6 +587,7 @@ def serialize_disk_flux(disk_flux):
             'fcFluxErr': fx.get('fcFluxErr'),
             'fit': fx.get('fit'),
             'xcorr': serialize_xcorr(fx),
+            'monitor': fx.get('monitor', 'FCs'),
         }
     return out
 
@@ -613,6 +618,7 @@ def deserialize_disk_flux(data):
             fx.get('J_corr', []), fx.get('hole_xy', []), fx.get('design', ''),
             fx.get('R'), fx.get('R_sigma'), fx.get('lamFlux'), fx.get('fcFlux'),
             fx.get('fcFluxErr'), fx.get('fit'), _xcorr_from(fx.get('xcorr')))
+        out[(irr, disk)]['monitor'] = fx.get('monitor') or 'FCs'
     return out
 
 
@@ -779,11 +785,11 @@ def combine_ages(ages, sigma_ana, sigma_int=None, sigma_ext=None,
 
     od_mode selects the overdispersion trigger: 'threshold' (Wendt & Carl
     1991 95% limit) or 'mswd_gt1'. When triggered and scale_overdispersion
-    is set, the analytical tier is inflated by MSWD.
+    is set, the analytical variance is multiplied by MSWD (σ by √MSWD).
 
     p_corr, if given, is an NxN correlation matrix for the J-flux block and
     overrides position_group there, used when a loaded .jflux file provides
-    the true cross-hole correlation.
+    the correlation between its holes.
 
     sys_components, if given, is the n × k matrix of signed calibration
     components from systematic_matrix.  The standard block is then propagated
@@ -1016,7 +1022,9 @@ def cfg_j_err_frac(cfg):
     mode = cfg.get('ageFluxMode', 'imported')
     if mode == 'ratio_R_std':
         r_err = cfg.get('rStdErrPct', 0.10)
-        r_std = cfg.get('rStd', 70.0)
+        # rStd is stored FCs-equivalent; an absolute error is in the measured
+        # monitor ratio's units
+        r_std = cfg.get('rStd', 70.0) * cfg_monitor(cfg)[1]
         if cfg.get('rStdErrMode', 'pct') == 'pct':
             return r_err / 100.0
         return r_err / r_std if r_std > 0 else 0.0
@@ -1122,8 +1130,7 @@ def rvalue_age_external(R, sigma_R, t_std_ma, sigma_t_std_ma,
         T = (1/λ) · ln[ (e^{λ·t_std} − 1)·R + 1 ]
         σ²_T = (∂T/∂λ)²·σ²_λ + (∂T/∂t_std)²·σ²_t_std + (∂T/∂R)²·σ²_R
 
-    The ∂T/∂λ term nearly cancels, so the external is dominated by σ_R and
-    σ_t_std.  Not valid for a jointly calibrated standard (Carter et al. 2025),
+    Not valid for a jointly calibrated standard (Carter et al. 2025),
     where the standard age and λ are covariant.
 
     Parameters
@@ -1170,8 +1177,8 @@ def rvalue_external_sigma(age_ma, t_std_ma, sigma_t_std_ma,
     with the internal error to get the external tier.
 
     Uses the R-value partials with R back-computed from the age, so λ enters the
-    way it does in rvalue_age_external (nearly cancelling) rather than the naive
-    full-leverage route.  cov_lam_tstd is cov(λ, t_std): 0 for an independent
+    way it does in rvalue_age_external rather than with its full relative
+    uncertainty.  cov_lam_tstd is cov(λ, t_std): 0 for an independent
     astronomical anchor, Carter's joint value for the Carter calibration.
     Returns 0 for a degenerate standard age.
     """
@@ -1185,43 +1192,58 @@ def rvalue_external_sigma(age_ma, t_std_ma, sigma_t_std_ma,
 
 
 def cfg_is_astronomical(cfg):
-    """True if the cfg's FC age + λ match an astronomically tuned preset."""
+    """True if the cfg's FC age is that of an astronomically tuned preset.
+
+    Matched by the age alone: with another λ, or an edited error, the age is
+    still the astronomical one, and its λ dependence is that of the R-value
+    form, not the full λ term of a K–Ar age."""
     age = cfg.get('stdAgeMa')
-    lam = cfg.get('lambdaYr')
-    if age is None or lam is None:
+    if age is None:
         return False
-    for name, a, e, ext in FC_PRESETS:
-        if name in ASTRONOMICAL_FC_NAMES and abs(a - age) < 5e-4:
-            pl = paired_lambda(name)
-            if pl is not None and abs(pl[1] - lam) < 1e-14:
-                return True
-    return False
+    return any(name in ASTRONOMICAL_FC_NAMES and abs(a - age) < 5e-4
+               for name, a, e, ext in FC_PRESETS)
 
 
-# Carter et al. (2025) posterior covariance cov(λ_tot, t_FCs), from their
-# Ar_ages_and_uncertainties.ipynb (figshare doi:10.6084/m9.figshare.27284775).
-# Units: (yr⁻¹·yr).  With Carter's posterior σ's it corresponds to ρ ≈ 0, so it
-# is numerically negligible, but it is the covariance term of their joint
-# calibration and is carried here for completeness.
-CARTER_COV_LAM_FCS = 1.866205e-20
+# cov(λ_tot, t_FCs) of the joint calibrations that publish a usable one, by
+# calibration name (library field "covariance", units yr⁻¹·yr).  Carter et al.
+# (2025): from their Ar_ages_and_uncertainties.ipynb (figshare
+# doi:10.6084/m9.figshare.27284775); with their σ's it corresponds to ρ ≈ 0, so
+# it is numerically negligible, but it is the covariance term of the joint
+# calibration and is carried for completeness.
+JOINT_COVARIANCE = {c['name']: float(c['covariance']) for c in STANDARDS['calibrations']
+                    if c.get('basis') == 'joint' and c.get('covariance') is not None}
+CARTER_COV_LAM_FCS = JOINT_COVARIANCE.get('Carter et al. (2025)', 0.0)
+
+
+def cfg_joint_name(cfg):
+    """Name of the joint calibration (with covariance) whose FC age the cfg
+    has, or None.  Matched by the age alone, like cfg_is_astronomical."""
+    age = cfg.get('stdAgeMa')
+    if age is None:
+        return None
+    for name, a, _e, _x in FC_PRESETS:
+        if name in JOINT_COVARIANCE and abs(a - age) < 5e-4:
+            return name
+    return None
 
 
 def cfg_is_carter(cfg):
-    """True if the cfg's FC age + λ match the Carter et al. (2025) joint preset."""
-    age = cfg.get('stdAgeMa')
-    lam = cfg.get('lambdaYr')
-    if age is None or lam is None:
-        return False
-    for name, a, _e, _x in FC_PRESETS:
-        if name.startswith('Carter') and abs(a - age) < 5e-4:
-            pl = paired_lambda(name)
-            return pl is not None and abs(pl[1] - lam) < 1e-14
-    return False
+    """True if the cfg has the FC age of a joint calibration with a covariance
+    (the Carter et al. 2025 preset, or one added in the standards library)."""
+    return cfg_joint_name(cfg) is not None
 
 
 def cfg_covariance(cfg):
-    """cov(λ, t_std) for the calibration: Carter's joint value, else 0."""
-    return CARTER_COV_LAM_FCS if cfg_is_carter(cfg) else 0.0
+    """cov(λ, t_std) for the calibration: the joint value when the cfg also
+    uses the λ it was calibrated with, else 0."""
+    name = cfg_joint_name(cfg)
+    if not name:
+        return 0.0
+    pl = paired_lambda(name)
+    lam = cfg.get('lambdaYr')
+    if pl is None or lam is None or abs(pl[1] - lam) >= 1e-14:
+        return 0.0
+    return JOINT_COVARIANCE[name]
 
 
 def _rvalue_partials(age_ma, t_std_ma, lam):
@@ -1288,16 +1310,16 @@ def systematic_components(age_ma, cfg, include_cross=True):
     (1998) eq. 6 on the chain of eq. 5, partials as in Kuiper et al. (2008) SOM:
         R(FCs/A) calibration        ∂t/∂ln R · σ_R/R
         anchor astronomical age     ∂t/∂t_A  · σ_tA
-        decay constant λ            ∂t/∂λ    · σ_λ      (λ nearly cancels)
+        decay constant λ            ∂t/∂λ    · σ_λ
 
     Joint calibration (Carter 2025): single-step R-value partials on (t_FCs, λ)
     with their covariance, decomposed into two independent components.
 
     Other (legacy physical-λ presets, custom values): the J-fraction route with
-    full λ leverage, which is what those calibrations imply.
+    the full λ term, which is what those calibrations imply.
 
-    cfg['fullSystematics'] (Box 2) replaces the λ component by the full physical
-    40K decay scheme of Min et al. (2000), propagated without cancellation.
+    cfg['fullSystematics'] (full external) replaces the λ component by the full physical
+    40K decay scheme of Min et al. (2000), propagated in full.
     cfg['crossChronometer'] (legacy) adds an age·σ_λ/λ component.
     """
     lam = cfg.get('lambdaYr', LAMBDA_DEFAULT)
@@ -1344,24 +1366,28 @@ def systematic_components(age_ma, cfg, include_cross=True):
     elif include_cross and cfg.get('crossChronometer') and cross_ok:
         comps.append(('Decay constant λ (cross-chronometer)',
                       age_ma * slam / lam if lam > 0 else 0.0))
+    mon, R_m, s_m = cfg_monitor(cfg)
+    if mon != 'FCs' and R_m > 0 and s_m > 0:
+        comps.append((f'R({mon}/FCs)', dt_dlnR(age_ma, lam) * s_m / R_m))
     return comps
 
 
 def external_route(cfg):
     """Short label for how systematic_components propagates the external."""
+    mon, R_m, _ = cfg_monitor(cfg)
+    tail = f'; monitor {mon} through R({mon}/FCs) = {R_m:.6g}' if mon != 'FCs' else ''
     if cfg.get('fullSystematics'):
-        return 'full external (Min: physical ⁴⁰K decay scheme)'
+        return 'full external (Min: physical ⁴⁰K decay scheme)' + tail
     anc = cfg_anchor(cfg)
     if anc is not None:
-        return (f'astronomical anchor, t_A = {anc[0]:g} Ma via R(FCs/A) '
-                f'(λ nearly cancels)')
+        return f'astronomical anchor, t_A = {anc[0]:g} Ma via R(FCs/A)' + tail
     cls, _ = calibration_box(cfg)
-    route = {'astronomical': 'R-value on the FCs age (λ nearly cancels)',
+    route = {'astronomical': 'R-value on the FCs age',
              'joint': 'joint calibration (Carter-style)'}.get(
                  cls, 'single-step J route (full λ)')
     if calibration_warning(cfg):
         route += '; overstated for Renne et al., see About'
-    return route
+    return route + tail
 
 
 def systematic_matrix(ages, cfgs):
@@ -1420,8 +1446,8 @@ def age_error_budget(sigma_ana, sigma_int, sigma_ext, age_ma, cfg):
 #   lambda_b  = beta-minus branch        40K -> 40Ca
 # and the age equation carries the branching factor lambda/lambda_e:
 #   t = (1/lambda) * ln[ 1 + (lambda/lambda_e) * D ],   lambda = lambda_e + lambda_b
-# where D = 40Ar*/40K of the sample.  Because lambda_e is poorly known and does
-# not cancel, its full uncertainty propagates almost one-to-one into the age.
+# where D = 40Ar*/40K of the sample.  Because lambda_e is poorly known and enters
+# directly, its full uncertainty propagates almost one-to-one into the age.
 # This is the source of the large "full external" errors reported by ArArCALC.
 #
 # Constants below are the sets tabulated by Min et al. (2000).  The paper quotes
@@ -1447,21 +1473,21 @@ def min_full_external(age_ma, sigma_int_ma=0.0, sigma_std_ma=0.0,
     equation with branching,
         t = (1/lambda) * ln[1 + (lambda/lambda_e) * D],   lambda = lambda_e + lambda_b,
     where D = 40Ar*/40K of the sample, back-computed from the age with the same
-    constants.  This is the non-cancelling decay-constant term; unlike the
-    intercalibrated route (rvalue_age_external) lambda does not cancel here, so
+    constants.  This is the full decay-constant term; unlike the intercalibrated
+    route (rvalue_age_external), lambda enters directly here, so
     the sensitivity d(ln t)/d(ln lambda) ~ -1.
 
     The decay-constant term is combined in quadrature with the supplied internal
     (analytical + J) term and the standard (K/Ar of the primary standard) term,
     both 1sigma Ma, to give the full external.  include_abundance adds the
     40K/K term (small; only meaningful for an absolute primary-standard chain,
-    it cancels in an intercalibrated ratio, so it is off by default).
+    it drops out of an intercalibrated ratio, so it is off by default).
 
     Returns a dict: age_ma, decay_ma (decay-constant 1sigma term), ext_ma (full
     external 1sigma, if internal/std supplied), and the branch sub-terms
     (le_ma, lb_ma, f_ma) and total lambda used.
 
-    Validated against Min et al. (2000) F-239 (see tests/test_min_external.py):
+    Validated against Min et al. (2000) F-239 (see tests/test_calibration.py):
     age ~1090 Ma, decay-constant 2sigma ~21 Ma; combined with the paper's
     +-10 Ma (2s) standard term the full external is ~+-23 Ma (2s), reproducing
     their 1090.6 +- 23.3 Ma (Audi 1997 constants).
@@ -1507,19 +1533,18 @@ def min_full_external(age_ma, sigma_int_ma=0.0, sigma_std_ma=0.0,
 # External error: which calibration is propagated which way
 # --------------------------------------------------------------------------
 #
-# Box 1, intercalibrated (default).  The standard age is fixed independently
-#   of lambda (astronomical tuning) or jointly with it (Carter), so lambda
-#   nearly cancels in the R-value form and the external is dominated by the
-#   standard age.  The two cases differ only in cov(lambda, t_std): 0 for an
+# Intercalibrated external (default).  The standard age is fixed independently
+#   of lambda (astronomical tuning) or jointly with it (Carter), so the
+#   external is dominated by the standard age.  The two cases differ only in cov(lambda, t_std): 0 for an
 #   astronomical age, the calibration's own value for a joint fit.
 #
-# Box 2, Min et al. (2000) full external (opt-in).  Propagates the measured
-#   40K decay scheme (lambda_e, lambda_b) without cancellation.  It treats the
+# Full external, Min et al. (2000) (opt-in).  Propagates the measured
+#   40K decay scheme (lambda_e, lambda_b) in full.  It treats the
 #   decay constants as independent of the standard, so it should not be
 #   combined with a jointly calibrated lambda (see full_systematics_warning).
 
 def calibration_box(cfg):
-    """(regime, cov) for a calibration's default (Box 1) external.
+    """(regime, cov) for a calibration's default (intercalibrated) external.
 
     regime is 'astronomical' (cov=0), 'joint' (cov=Carter's value), or 'other'
     (legacy physical-lambda presets that fall back to the J-fraction route).
@@ -1557,7 +1582,8 @@ def calibration_group_key(cfg):
 # Carlo values (2010 Table 5).  Their Monte Carlo triplets (2010, EA-3) are not
 # included, so these presets go through the single-step route with the FCs age
 # and λ independent, which overstates the external error.
-RENNE_JOINT_NAMES = ('Renne et al. (2010)', 'Renne et al. (2011)')
+RENNE_JOINT_NAMES = [c['name'] for c in STANDARDS['calibrations']
+                     if c.get('basis') == 'joint' and c.get('covariance') is None]
 
 
 def calibration_warning(cfg):
@@ -1570,9 +1596,9 @@ def calibration_warning(cfg):
         if name in RENNE_JOINT_NAMES and abs(a - float(age)) < 5e-4:
             return (f'{name}: the FCs age and λ were calibrated together, but their '
                     'published covariances are too rounded to propagate, so SimplAr '
-                    'treats them as independent. The external error is overstated, '
-                    'by about a factor of four at 56 Ma. Internal errors are not '
-                    'affected.')
+                    'treats them as independent. The external error is overstated'
+                    + (', by about a factor of four at 56 Ma' if name.startswith('Renne') else '')
+                    + '. Internal errors are not affected.')
     return ''
 
 
@@ -1583,10 +1609,10 @@ def full_systematics_warning(cfg):
     them, so the two do not belong together."""
     cls, _ = calibration_box(cfg)
     if cls == 'joint':
-        return ('Full-systematics (Min) uses the independent physical decay '
-                'constant, which is inconsistent with a jointly calibrated '
-                'lambda (e.g. Carter). Use Box 1 (default) for this '
-                'calibration, or switch to a physical-lambda preset for Min.')
+        return ('Full external (Min et al., 2000) treats the decay constant as '
+                'independent of the monitor age, which does not hold for a jointly '
+                'calibrated λ (Carter et al., 2025). Use Intercalibrated external for '
+                'this calibration, or a calibration on the Min et al. λ for Full external.')
     return ''
 
 
@@ -1595,7 +1621,7 @@ def external_error(age_ma, cfg, full_systematics=None):
     systematic_components, without the internal tier and without the legacy
     cross-chronometer term.
 
-    full_systematics=True/False overrides cfg['fullSystematics'] (Box 2, the
+    full_systematics=True/False overrides cfg['fullSystematics'] (full external, the
     Min et al. 2000 physical decay scheme in place of the λ component).
     """
     if full_systematics is not None:
@@ -1611,7 +1637,7 @@ def external_sigma_array(ages, sigma_int, cfg):
     anchored calibration the R(FCs/A) calibration, the anchor's orbital age
     and λ on the two-step chain; for the Carter joint calibration the
     decomposed (t_FCs, λ) covariance; otherwise the single-step route with
-    full λ leverage.  cfg['fullSystematics'] and cfg['crossChronometer'] are
+    the full λ term.  cfg['fullSystematics'] and cfg['crossChronometer'] are
     honoured there.
     """
     ages = np.asarray(ages, float)
@@ -1627,8 +1653,10 @@ def r_to_age_cfg(R_vals, sigma_vals, cfg):
     Returns ((ages_ma, sigmas_ma), None) on success or (None, message) on a
     bad configuration. Sigmas come out at the same level they went in.
 
-    ratio_R_FCs:  t = ln(1 + R*em1) / lam,  em1 = e^{λ t_FCs} − 1 (cfg_ingrowth,
-                  on the anchored chain R_FCs/A (e^{λ t_A} − 1) where one exists)
+    ratio_R_FCs:  t = ln(1 + R*em1) / lam,  em1 = R_M/FCs (e^{λ t_FCs} − 1) with
+                  cfg_ingrowth (on the anchored chain R_FCs/A (e^{λ t_A} − 1)
+                  where one exists); R is relative to the cfg's monitor, so
+                  R_M/FCs is 1 for FCs
     ratio_R_std:  t = ln(1 + J*R) / lam,    J = em1 / R_std
     ratio_J:      t = ln(1 + J*R) / lam
     """
@@ -1637,7 +1665,7 @@ def r_to_age_cfg(R_vals, sigma_vals, cfg):
     R    = np.asarray(R_vals, float)
     sig  = np.asarray(sigma_vals, float)
     if mode == 'ratio_R_FCs':
-        em1   = cfg_ingrowth(cfg, lam)
+        em1   = cfg_ingrowth(cfg, lam) * cfg_monitor(cfg)[1]
         arg   = 1.0 + R * em1
         if np.any(arg <= 0):
             return None, 'Some R_unk/R_FCs give ln(...) <= 0.'
@@ -1660,10 +1688,11 @@ def r_to_age_cfg(R_vals, sigma_vals, cfg):
 
 
 def rr_from_age(age_ma, cfg):
-    """(R_unk/R_std, dR/d_age in per-Ma) from an age and a flux config.
-    Returns (None, None) if the FC standard age is unusable."""
+    """(R_unk/R_std, dR/d_age in per-Ma) from an age and a flux config, R_std
+    being the cfg's monitor.  Returns (None, None) if the FC standard age is
+    unusable."""
     lam    = cfg.get('lambdaYr', LAMBDA_DEFAULT)
-    em1_fc = cfg_ingrowth(cfg, lam)
+    em1_fc = cfg_ingrowth(cfg, lam) * cfg_monitor(cfg)[1]
     if em1_fc <= 0:
         return None, None
     em1_unk = math.exp(lam * age_ma * 1e6) - 1.0
@@ -1817,7 +1846,7 @@ def ff(v, d):
 
 
 # --------------------------------------------------------------------------
-# Irradiation-disk drawing, shared by the flux dialogs of both plotting GUIs
+# Irradiation-disk drawing, shared by the flux dialogs of the tools
 # --------------------------------------------------------------------------
 
 def render_disk(fig, hole_tbl, fx, key, ringed):
@@ -1863,7 +1892,7 @@ def render_disk(fig, hole_tbl, fx, key, ringed):
                        edgecolors='red', linewidths=2.0, zorder=5)
     else:
         ax.text(0.5, 0.5, 'No hole coordinates in this file.\n'
-                '(re-export from the flux calculator to draw the disk)',
+                '(export it again from Flux regression to draw the disk)',
                 transform=ax.transAxes, ha='center', va='center',
                 color='#888', style='italic', fontsize=9)
     fig.tight_layout()
@@ -1908,9 +1937,8 @@ def draw_budget_pie(ax, budget, scale, sig_lbl, centre_fmt='.4f', legend_values=
 
 
 # --------------------------------------------------------------------------
-# Shared UI: force a light Fusion theme so the tools never follow macOS
-# dark mode. Called from each tool's main(). Kept here so all three windows
-# get the exact same palette and never drift apart.
+# Shared UI: a light Fusion theme so the tools never follow macOS dark mode.
+# Called from each tool's main(), so every window gets the same palette.
 # --------------------------------------------------------------------------
 
 def force_light(app):
@@ -1975,3 +2003,846 @@ def mono_font(size=9):
             f = QFont(family)
     f.setPointSize(size)
     return f
+
+
+# --------------------------------------------------------------------------
+# Recalculation between calibrations (Recalculator)
+#
+# An age published on any monitor S, with the age t_S the authors gave S and the
+# decay constant λ₀ they used, fixes the sample's ratio to that monitor,
+#
+#     R_u/S = (e^{λ₀ t} − 1) / (e^{λ₀ t_S} − 1),
+#
+# which no longer depends on either constant (Renne et al. 1998; Mercer and
+# Hodges 2016).  On the target calibration the monitor's ingrowth is its R
+# relative to FCs times that of FCs, R_S/FCs · (e^{λ t_FCs} − 1), computed on
+# the anchored chain for an astronomical calibration (cfg_ingrowth), and
+#
+#     t' = ln(1 + R_u/S · R_S/FCs · (e^{λ t_FCs} − 1)) / λ.
+#
+# The analytical and internal errors scale with dt'/dt.  The external error is
+# that of the target calibration (systematic_components), plus the uncertainty
+# of R_S/FCs when the monitor is not FCs: that term is shared by every age dated
+# against the same monitor and the same R, so it is returned as its own
+# labelled component for combining.
+# --------------------------------------------------------------------------
+
+def library_standard(std_id):
+    """The standards-library entry of a monitor, or None."""
+    return next((s for s in STANDARDS['standards'] if s.get('id') == std_id), None)
+
+
+def standard_age_on(cfg, R=1.0):
+    """Age (Ma) of a monitor with ratio R to FCs on calibration cfg."""
+    lam = cfg.get('lambdaYr', LAMBDA_DEFAULT)
+    return math.log1p(R * cfg_ingrowth(cfg, lam)) / lam / 1e6
+
+
+def recalculate(age_ma, src_std_age_ma, src_lam, tgt_cfg, R=1.0, R_1s=0.0,
+                R_label='R(standard/FCs)'):
+    """Recast one age to the target calibration.
+
+    age_ma          published age (Ma)
+    src_std_age_ma  age the authors used for their monitor (Ma)
+    src_lam         total decay constant they used (yr⁻¹)
+    tgt_cfg         target calibration (cfg keys stdAgeMa, stdAgeErrMa,
+                    stdAgeErrType, lambdaYr, lambdaErrYr, fullSystematics ...)
+    R, R_1s         the monitor's ratio to FCs and its 1σ (1, 0 for FCs)
+    R_label         label of the R component, so that ages on the same monitor
+                    and the same R share it when combined
+
+    Returns dict(age, factor, R_u, components): factor is dt'/dt, which scales
+    the analytical and internal errors; components are the signed 1σ systematic
+    components (label, Ma) of the new age.
+    """
+    t = float(age_ma) * 1e6
+    t_s = float(src_std_age_ma) * 1e6
+    if not (t_s > 0 and src_lam > 0 and R > 0):
+        raise ValueError('the standard age, decay constant and R must be positive')
+    d_s = math.expm1(src_lam * t_s)
+    R_u = math.expm1(src_lam * t) / d_s
+    lam = tgt_cfg.get('lambdaYr', LAMBDA_DEFAULT)
+    ing = R * cfg_ingrowth(tgt_cfg, lam)
+    x = R_u * ing
+    if x <= -1.0:
+        raise ValueError('the age is outside the range the target calibration can express')
+    t_new = math.log1p(x) / lam
+    factor = (ing / (lam * (1.0 + x))) * (src_lam * math.exp(src_lam * t) / d_s)
+    age_new = t_new / 1e6
+    comps = list(systematic_components(age_new, tgt_cfg))
+    if R_1s > 0:
+        comps.append((R_label, dt_dlnR(age_new, lam) * R_1s / R))
+    return dict(age=age_new, factor=factor, R_u=R_u, components=comps)
+
+
+def reload_standards():
+    """Re-read the standards library after it was edited.
+
+    The preset tables are updated in place, so the names other modules
+    imported (FC_PRESETS, LAMBDA_PRESETS, ...) see the new values.  The
+    program-wide defaults (DEFAULT_FC_NAME and the scalars read from it) keep
+    the values they had when the tool started."""
+    lib = _load_library()
+    STANDARDS.clear()
+    STANDARDS.update(lib)
+    cals = lib['calibrations']
+    LAMBDA_PRESETS[:] = [(d['name'], float(d['lambda']), float(d.get('lambda_1s') or 0.0))
+                         for d in lib['decay_constants']]
+    FC_PRESETS[:] = [(c['name'], float(c['age']), float(c.get('age_1s') or 0.0),
+                      bool(c.get('sigma_includes_lambda'))) for c in cals]
+    FC_PAIRED_LAMBDA.clear()
+    FC_PAIRED_LAMBDA.update({c['name']: c['decay_constant'] for c in cals})
+    STANDARD_IDS[:] = [x['id'] for x in lib['standards']]
+    ASTRONOMICAL_FC_NAMES.clear()
+    ASTRONOMICAL_FC_NAMES.update(c['name'] for c in cals
+                                 if c.get('basis') == 'astronomical' and c.get('anchor'))
+    _FC_ANCHOR_INPUTS.clear()
+    _FC_ANCHOR_INPUTS.update({
+        c['name']: (float(c['anchor']['age']), float(c['anchor'].get('age_1s') or 0.0),
+                    float(c['anchor']['R_fcs_anchor']), float(c['anchor'].get('R_1s') or 0.0))
+        for c in cals if c['name'] in ASTRONOMICAL_FC_NAMES})
+    FC_ANCHORS.clear()
+    FC_ANCHORS.update({name: (v[0], v[1], _consistent_anchor_R(name), v[3])
+                       for name, v in _FC_ANCHOR_INPUTS.items()})
+    JOINT_COVARIANCE.clear()
+    JOINT_COVARIANCE.update({c['name']: float(c['covariance']) for c in cals
+                             if c.get('basis') == 'joint' and c.get('covariance') is not None})
+    RENNE_JOINT_NAMES[:] = [c['name'] for c in cals
+                            if c.get('basis') == 'joint' and c.get('covariance') is None]
+
+
+# --------------------------------------------------------------------------
+# Monitors other than Fish Canyon sanidine
+#
+# A calibration is always a Fish Canyon calibration (stdAgeMa, λ ...); a
+# monitor other than FCs is tied to it by its R relative to FCs from the
+# standards library, R_M/FCs (the one marked "Use").  The cfg then carries
+#
+#     monitor      the monitor's id ('FCs' when absent)
+#     monitorR     R_M/FCs
+#     monitorRErr  its 1σ
+#
+# A measured monitor ratio R_M becomes the FCs-equivalent R_M / R_M/FCs where
+# it enters (Flux monitors, a typed R standard), so everything downstream is
+# FCs-based; J is the same either way.  The 1σ of R_M/FCs is a systematic
+# component of the external tier (systematic_components), shared by every age
+# on the same monitor.
+# --------------------------------------------------------------------------
+
+MONITOR_KEYS = ('monitor', 'monitorR', 'monitorRErr')
+
+
+def cfg_monitor(cfg):
+    """(monitor id, R_M/FCs, 1σ) of a cfg; ('FCs', 1, 0) when none is set."""
+    mon = (cfg or {}).get('monitor') or 'FCs'
+    if mon == 'FCs':
+        return 'FCs', 1.0, 0.0
+    try:
+        R = float(cfg.get('monitorR') or 0.0)
+        s = float(cfg.get('monitorRErr') or 0.0)
+    except (TypeError, ValueError):
+        R, s = 0.0, 0.0
+    if not R > 0:
+        return 'FCs', 1.0, 0.0
+    return mon, R, s
+
+
+def monitor_keys(monitor_id):
+    """The cfg keys for a monitor, with its recommended R from the library."""
+    if not monitor_id or monitor_id == 'FCs':
+        return dict(monitor='FCs', monitorR=1.0, monitorRErr=0.0)
+    s = library_standard(monitor_id)
+    rec = _stdlib.recommended_R(s) if s else None
+    if not rec:
+        return dict(monitor='FCs', monitorR=1.0, monitorRErr=0.0)
+    return dict(monitor=monitor_id, monitorR=rec[0], monitorRErr=rec[1])
+
+
+def monitor_choices():
+    """[(id, label)] of the monitors that have an R relative to FCs, FCs first."""
+    out = [('FCs', 'FCs')]
+    for s in STANDARDS['standards']:
+        if s['id'] != 'FCs' and _stdlib.recommended_R(s):
+            out.append((s['id'], s['id']))
+    return out
+
+
+def monitor_age(cfg):
+    """Age (Ma) of the cfg's monitor on its calibration."""
+    _, R, _ = cfg_monitor(cfg)
+    return standard_age_on(cfg, R)
+
+
+def fcs_equivalent_age(monitor_age_ma, lam, R):
+    """FCs age (Ma) equivalent to a monitor age used with λ: the FCs age that
+    gives the monitor that age through R = R_M/FCs.  For files and papers that
+    quote the age of a monitor other than FCs."""
+    return math.log1p(math.expm1(lam * monitor_age_ma * 1e6) / R) / lam / 1e6
+
+
+def to_fcs_r(r_monitor, cfg):
+    """A measured monitor ratio as its FCs-equivalent R."""
+    _, R, _ = cfg_monitor(cfg)
+    return r_monitor / R
+
+
+def from_fcs_r(r_fcs, cfg):
+    """An FCs-equivalent R as the ratio measured on the cfg's monitor."""
+    _, R, _ = cfg_monitor(cfg)
+    return r_fcs * R
+
+
+# --------------------------------------------------------------------------
+# Notes on calibrations off the usual path
+#
+# Shown under the calibration in the tools and written to the exports, so a
+# number that changed for a reason not visible on screen is explained.
+# --------------------------------------------------------------------------
+
+def _preset_by_age(cfg):
+    age = cfg.get('stdAgeMa')
+    if age is None:
+        return None
+    return next((r for r in FC_PRESETS if abs(r[1] - float(age)) < 5e-4), None)
+
+
+def calibration_notes(cfg):
+    """Plain-text notes for a calibration off the usual path: a preset FCs age
+    with another λ than its own, or an astronomical age whose error was
+    edited (the anchor is then not used)."""
+    notes = []
+    pr = _preset_by_age(cfg)
+    lam = cfg.get('lambdaYr')
+    if pr is None or lam is None:
+        return notes
+    name, age, err, _ = pr
+    pl = paired_lambda(name)
+    if pl is not None and abs(pl[1] - float(lam)) > 1e-14 * pl[1]:
+        anc = cfg_anchor(cfg)
+        short = name.split('  ')[0]
+        if anc is not None:
+            notes.append(f'{short} was derived with the λ of {pl[0]}; with λ = '
+                         f'{float(lam):.6g} yr⁻¹ its anchor gives FCs = '
+                         f'{effective_fc_age(cfg):.4f} Ma, not {age:g} Ma.')
+        else:
+            notes.append(f'{short} was derived with the λ of {pl[0]}; with λ = '
+                         f'{float(lam):.6g} yr⁻¹ the FCs age {age:g} Ma is used as it is.')
+    if name in ASTRONOMICAL_FC_NAMES and cfg.get('stdAgeErrMa') is not None \
+            and abs(float(cfg['stdAgeErrMa']) - err) >= 5e-5:
+        notes.append(f'The FCs error differs from that of {name}, so the external error '
+                     'uses the single-step R-value form, not the astronomical anchor.')
+    return notes
+
+
+def monitor_mismatch_note(cfg, other_monitor, what='the data'):
+    """A note when `what` was made with another monitor than cfg's, else ''."""
+    mine = cfg_monitor(cfg)[0]
+    other = other_monitor or 'FCs'
+    if other == mine:
+        return ''
+    return (f'{what[0].upper() + what[1:]} used the monitor {other}, the calibration here '
+            f'says {mine}. The ages are FCs-equivalent and stay the same; the monitor term '
+            'of the external error and the meaning of a typed R standard follow the '
+            'monitor set here.')
+
+
+def edited_standards_note():
+    """'Edited standards in use: ...' when any entry of the library differs
+    from the published values, else ''."""
+    names = []
+    for sec in ('calibrations', 'decay_constants', 'standards'):
+        k = 'id' if sec == 'standards' else 'name'
+        for r in STANDARDS.get(sec, []):
+            if r.get('edited') or r.get('user'):
+                names.append(str(r.get(k)).split('  ')[0] + (' (added)' if r.get('user') else ''))
+    return ('Edited standards in use (differ from the published values): '
+            + ', '.join(names) + '.') if names else ''
+
+
+# ===========================================================================
+# MIXTURE MODELS (Mixture view of the Age distribution tool)
+#
+# Mixture models for single-crystal ⁴⁰Ar/³⁹Ar ages: the maths and the drawing
+# behind the Mixture view of the Age distribution tool.
+#
+# Discrete (finite) mixture: the analyses are taken to come from k age
+# components; each component's age and the proportion of analyses in it are
+# found by maximum likelihood (Galbraith & Green 1990; Galbraith & Laslett 1993),
+# by the EM algorithm, with uncertainties from the observed information matrix
+# (Galbraith 2005), as in IsoplotR's peakfit (Vermeesch 2018).  The number of
+# components is chosen with the Bayes Information Criterion.
+#
+# Minimum age model: one youngest discrete age plus a continuous spread of older
+# analyses, truncated at it (Galbraith et al. 1999), with the normal likelihood
+# of Galbraith (2005, section 6.11).
+#
+# Everything works on z with standard error s:
+#     'linear'  z = t,      s = σ_t      (keeps zero and negative ages)
+#     'log'     z = ln t,   s = σ_t / t  (IsoplotR's default; needs t > 0)
+# The inputs are ages (Ma) with their analytical 1σ.  J and the calibration are
+# shared by every analysis of a sample, so they move all components together and
+# are added to each component age afterwards (component_tiers), as for a
+# weighted mean.
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# transformation
+# ---------------------------------------------------------------------------
+def mixture_to_z(t, s, space):
+    t = np.asarray(t, float)
+    s = np.abs(np.asarray(s, float))
+    ok = np.isfinite(t) & np.isfinite(s) & (s > 0)
+    if space == 'log':
+        ok &= t > 0
+        with np.errstate(divide='ignore', invalid='ignore'):
+            return np.log(np.where(ok, t, 1.0)), s / np.where(ok, t, 1.0), ok
+    return t, s, ok
+
+
+def mixture_from_z(mu, se, space):
+    """Component value and 1σ back in Ma."""
+    if space == 'log':
+        t = np.exp(mu)
+        return t, t * se
+    return np.asarray(mu, float), np.asarray(se, float)
+
+
+# ---------------------------------------------------------------------------
+# discrete (finite) mixture
+# ---------------------------------------------------------------------------
+def _loglik_terms(z, s, mu, pi):
+    """log(π_i f_ui) for every grain u and component i  (n × k)."""
+    return (np.log(np.maximum(pi, 1e-300))[None, :]
+            + stats.norm.logpdf(z[:, None], mu[None, :], s[:, None]))
+
+
+def _em(z, s, mu, pi, max_iter=5000, tol=1e-12):
+    w = 1.0 / s**2
+    L_old = -np.inf
+    for it in range(max_iter):
+        lp = _loglik_terms(z, s, mu, pi)
+        L = logsumexp(lp, axis=1)
+        post = np.exp(lp - L[:, None])                      # p_ui, membership
+        pi = post.mean(axis=0)
+        mu = (post * (w * z)[:, None]).sum(0) / np.maximum((post * w[:, None]).sum(0), 1e-300)
+        Ls = L.sum()
+        if abs(Ls - L_old) <= tol * max(1.0, abs(Ls)):
+            break
+        L_old = Ls
+    lp = _loglik_terms(z, s, mu, pi)
+    L = logsumexp(lp, axis=1)
+    post = np.exp(lp - L[:, None])
+    return mu, pi, post, L.sum(), it + 1
+
+
+def _starts(z, s, k, rng, prev=None):
+    """Starting locations: evenly over the range (IsoplotR), weighted
+    quantiles, random picks among the more precise grains and, given the
+    (k−1)-component fit, that fit plus one component at the worst-fitting
+    grain or with its most scattered component split in two."""
+    out = []
+    if k == 1:
+        return [np.array([np.median(z)])]
+    if prev is not None:
+        mu, pi = prev
+        lp = _loglik_terms(z, s, mu, pi)
+        L = logsumexp(lp, axis=1)
+        out.append(np.sort(np.r_[mu, z[np.argmin(L)]]))
+        post = np.exp(lp - L[:, None])
+        r2 = (post * ((z[:, None] - mu[None, :]) / s[:, None])**2).sum(0) / np.maximum(post.sum(0), 1e-9)
+        j = int(np.argmax(r2))
+        spread = math.sqrt(max(np.sum(post[:, j] * (z - mu[j])**2) / max(post[:, j].sum(), 1e-9), 1e-12))
+        out.append(np.sort(np.r_[np.delete(mu, j), mu[j] - spread, mu[j] + spread]))
+    out.append(np.linspace(z.min(), z.max(), k))
+    order = np.argsort(z)
+    w = 1.0 / s[order]**2
+    cw = np.cumsum(w) / w.sum()
+    out.append(np.interp((np.arange(k) + 0.5) / k, cw, z[order]))
+    p = (1.0 / s**2) / (1.0 / s**2).sum()
+    for _ in range(20):
+        idx = rng.choice(len(z), size=k, replace=False, p=p) if (p > 0).sum() >= k \
+            else rng.choice(len(z), size=k, replace=False)
+        out.append(np.sort(z[idx]))
+    return out
+
+
+def information_cov(z, s, mu, pi, post):
+    """Covariance of (π_1..π_{k-1}, μ_1..μ_k): the inverse of the observed
+    information matrix (Galbraith 2005; IsoplotR get_peakfit_covmat)."""
+    k = len(mu)
+    a = (z[:, None] - mu[None, :]) / s[:, None]**2               # ∂ ln f / ∂μ
+    b = a**2 - 1.0 / s[:, None]**2                                # ∂² ln f / ∂μ² + a²
+    C = (post[:, :, None] * post[:, None, :] * a[:, :, None] * a[:, None, :]).sum(0)
+    C -= np.diag((b * post).sum(0))
+    if k == 1:
+        return np.linalg.inv(C)
+    if np.any(pi < 1e-12):
+        return np.full((2 * k - 1, 2 * k - 1), np.nan)
+    d = post[:, :k - 1] / pi[None, :k - 1] - (post[:, k - 1] / pi[k - 1])[:, None]
+    A = d.T @ d
+    B = np.zeros((k - 1, k))
+    for i in range(k - 1):
+        for j in range(k):
+            B[i, j] = np.sum(post[:, j] * a[:, j] * (d[:, i] - (i == j) / pi[j] + (j == k - 1) / pi[k - 1]))
+    I = np.block([[A, B], [B.T, C]])
+    if not np.all(np.isfinite(I)):
+        return np.full(I.shape, np.nan)
+    try:
+        return np.linalg.inv(I)
+    except np.linalg.LinAlgError:
+        return np.full(I.shape, np.nan)
+
+
+def fit_fmm(t, s, k, space='linear', seed=0, prev=None):
+    """Discrete mixture with k components.  Returns a dict in Ma, components
+    sorted young to old.  prev: the (k−1)-component fit, used for starts."""
+    z, sz, ok = mixture_to_z(t, s, space)
+    z, sz = z[ok], sz[ok]
+    n = len(z)
+    if n < 2 * k:
+        return None
+    rng = np.random.default_rng(seed)
+    # short runs from every start, then the three best run to convergence
+    short = [_em(z, sz, np.array(mu0, float), np.full(k, 1.0 / k), max_iter=100)
+             for mu0 in _starts(z, sz, k, rng,
+                                None if prev is None else (prev['mu'], prev['prop']))]
+    short.sort(key=lambda r: -r[3])
+    best = None
+    for mu0, pi0, *_ in short[:3]:
+        mu, pi, post, L, it = _em(z, sz, mu0, pi0, max_iter=3000, tol=1e-11)
+        if best is None or L > best[3] + 1e-9:
+            best = (mu, pi, post, L, it)
+    mu, pi, post, L, it = best
+    o = np.argsort(mu)
+    mu, pi, post = mu[o], pi[o], post[:, o]
+    E = information_cov(z, sz, mu, pi, post)
+    se_mu = np.sqrt(np.clip(np.diag(E)[k - 1:], 0, None))
+    if k > 1:
+        Ep = E[:k - 1, :k - 1]
+        se_pi = np.r_[np.sqrt(np.clip(np.diag(Ep), 0, None)), math.sqrt(max(Ep.sum(), 0.0))]
+    else:
+        se_pi = np.zeros(1)
+    age, se_age = mixture_from_z(mu, se_mu, space)
+    r = (z[:, None] - mu[None, :]) / sz[:, None]
+    neff = post.sum(0)
+    # membership-weighted MSWD of each component (diagnostic, not part of the
+    # model); like any MSWD it needs at least two analyses
+    mswd = np.where(neff > 2 - 1e-6, (post * r**2).sum(0) / np.maximum(neff - 1, 1e-9), np.nan)
+    full_post = np.full((len(ok), k), np.nan)
+    full_post[ok] = post
+    # an empty or duplicated component is not a component: such a k is never chosen
+    degenerate = bool(np.any(neff < 0.5) or np.any(np.diff(mu) < 1e-6 * max(1.0, np.ptp(z)))
+                      or not np.all(np.isfinite(se_mu)))
+    return dict(model='fmm', k=k, space=space, n=n, used=ok, L=L, iterations=it, degenerate=degenerate,
+                bic=-2 * L + (2 * k - 1) * math.log(n), aic=-2 * L + 2 * (2 * k - 1),
+                mu=mu, se_mu=se_mu, age=age, se_age=se_age, prop=pi, se_prop=se_pi,
+                post=full_post, n_eff=neff,
+                n_assigned=np.bincount(post.argmax(1), minlength=k), mswd=mswd)
+
+
+def select_k(t, s, kmax=10, space='linear', delta=2.0):
+    """Fits for k = 1, 2, … and the k with the lowest BIC.  Stops at kmax or
+    when two k in a row have not lowered the BIC.  (IsoplotR tries up to 5
+    and stops at the first k that does not lower it; single old xenocrysts
+    each take a component, so 5 is too few for detrital-type samples.)
+    The k returned is the smallest within `delta` of the lowest BIC."""
+    fits = []
+    best = np.inf
+    worse = 0
+    for k in range(1, kmax + 1):
+        f = fit_fmm(t, s, k, space, prev=fits[-1] if fits else None)
+        if f is None:
+            break
+        fits.append(f)
+        if not f['degenerate'] and f['bic'] < best:
+            best, worse = f['bic'], 0
+        else:
+            worse += 1
+            if worse >= 2:
+                break
+    if not fits:
+        return None, []
+    ok = [f for f in fits if not f['degenerate']] or fits[:1]
+    bmin = min(f['bic'] for f in ok)
+    # the fewest components within `delta` of the lowest BIC: a BIC difference
+    # below 2 is "not worth more than a bare mention" (Kass & Raftery 1995)
+    kbest = min(f['k'] for f in ok if f['bic'] <= bmin + delta)
+    return kbest, fits
+
+
+# ---------------------------------------------------------------------------
+# minimum age model (Galbraith et al. 1999; Galbraith 2005 §6.11)
+# ---------------------------------------------------------------------------
+def _mam_nll(gam, prop, sig, mu, z, s):
+    A = prop * stats.norm.pdf(z, gam, s)
+    s2 = sig**2 + s**2
+    mu0 = (mu / sig**2 + z / s**2) / (1 / sig**2 + 1 / s**2)
+    s0 = 1 / np.sqrt(1 / sig**2 + 1 / s**2)
+    num = stats.norm.sf((gam - mu0) / s0)
+    den = max(stats.norm.sf((gam - mu) / sig), 1e-300)
+    Bc = (1 - prop) * stats.norm.pdf(z, mu, np.sqrt(s2)) * num / den
+    f = np.clip(A + Bc, 1e-300, 1e300)
+    return -np.log(f).sum()
+
+
+def _central(z, s):
+    """Central (random-effects) model, Galbraith 2005 p.100 (IsoplotR
+    continuous_mixture): mean and overdispersion σ."""
+    sig = max(np.std(z), 1e-6)
+    for _ in range(60):
+        w = 1 / (sig**2 + s**2)
+        m = np.sum(w * z) / np.sum(w)
+        f = lambda kap: (1 - np.sum((1 / (np.exp(kap)**2 + s**2) * (z - m))**2)
+                         / np.sum(1 / (np.exp(kap)**2 + s**2)))**2
+        r = optimize.minimize_scalar(f, bounds=(math.log(sig) - 3, math.log(sig) + 3), method='bounded')
+        sig = math.exp(r.x)
+    return m, sig
+
+
+def _num_hessian(f, x, h=1e-4):
+    x = np.asarray(x, float)
+    n = len(x)
+    H = np.zeros((n, n))
+    for i in range(n):
+        for j in range(i, n):
+            ei = np.zeros(n); ej = np.zeros(n)
+            hi = h * max(1.0, abs(x[i])); hj = h * max(1.0, abs(x[j]))
+            ei[i] = hi; ej[j] = hj
+            H[i, j] = H[j, i] = (f(x + ei + ej) - f(x + ei - ej) - f(x - ei + ej) + f(x - ei - ej)) / (4 * hi * hj)
+    return H
+
+
+def fit_mam(t, s, npar=3, space='log'):
+    """Minimum age model.  Returns the minimum (youngest discrete) age, its
+    analytical 1σ, the proportion of grains in it and the spread σ of the rest."""
+    z, sz, ok = mixture_to_z(t, s, space)
+    z, sz = z[ok], sz[ok]
+    zs = np.sort(z)
+    mz, Mz = zs[0], zs[-1]
+    cm, csig = _central(z, sz)
+
+    def mp(p):
+        gam = p[0]
+        prop = 1 / (1 + math.exp(-p[1]))
+        sig = math.exp(p[2])
+        mu = gam if npar < 4 else gam + (Mz - gam) / (1 + math.exp(-p[3]))
+        return gam, prop, sig, mu
+
+    nll = lambda p: _mam_nll(*mp(p), z, sz)
+    best = None
+    # several starting minima: IsoplotR's (mean of the two youngest) plus the
+    # weighted quantiles of the younger half
+    g0s = [np.mean(zs[:2])] + list(np.quantile(z, [0.05, 0.15, 0.3]))
+    for g0 in g0s:
+        init = np.array([g0, 0.0, math.log(max(csig, 1e-6)), 0.0][:npar])
+        lo = [mz, -20, init[2] - 20, -20][:npar]
+        hi = [max(cm, mz + 1e-9), 20, init[2] + 2, 20][:npar]
+        init = np.clip(init, lo, hi)
+        r = optimize.minimize(nll, init, method='L-BFGS-B', bounds=list(zip(lo, hi)))
+        if best is None or r.fun < best.fun:
+            best = r
+    p = best.x.copy()
+    if p[2] < -10:
+        p[1] = 10            # σ → 0: all grains in the minimum
+    gam, prop, sig, mu = mp(p)
+    H = _num_hessian(nll, p)
+    try:
+        lE = np.linalg.inv(H)
+    except np.linalg.LinAlgError:
+        lE = np.full((npar, npar), np.nan)
+    J = np.eye(npar)
+    J[1, 1] = math.exp(p[1]) / (1 + math.exp(p[1]))**2
+    J[2, 2] = math.exp(p[2])
+    if npar == 4:
+        e4 = math.exp(p[3])
+        J[3, 0] = 1 - e4 / (1 + e4)
+        J[3, 3] = (Mz - gam) * e4 / (1 + e4)**2
+    E = J @ lE @ J.T
+    se = np.sqrt(np.where(np.diag(E) > 0, np.diag(E), np.nan))
+    age, se_age = mixture_from_z(np.array([gam]), np.array([se[0]]), space)
+    note = ''
+    if sig < 0.05 * np.min(sz):
+        # no spread above the minimum: the model is the weighted mean of all
+        # grains, and its γ uncertainty from the Hessian is not meaningful
+        f1 = fit_fmm(t, s, 1, space)
+        age, se_age = f1['age'], f1['se_age']
+        prop, se = 1.0, np.r_[se[0], 0.0, se[2:]]
+        note = 'no grains above the minimum: minimum age = weighted mean'
+    # membership of each grain in the minimum component
+    A = prop * stats.norm.pdf(z, gam, sz)
+    tot = np.exp(-np.array([_mam_nll(gam, prop, sig, mu, np.array([zz]), np.array([ss]))
+                            for zz, ss in zip(z, sz)]))
+    pm = np.clip(A / tot, 0, 1)
+    pmin = np.full(len(ok), np.nan)
+    pmin[ok] = pm
+    neff = float(pm.sum())
+    zg = math.log(age[0]) if space == 'log' and age[0] > 0 else (gam if space == 'log' else age[0])
+    mswd = (float(np.sum(pm * ((z - zg) / sz)**2)) / (neff - 1)) if neff > 2 - 1e-6 else float('nan')
+    return dict(model='mam', npar=npar, space=space, n=len(z), used=ok, L=-best.fun,
+                n_eff=neff, mswd=mswd,
+                gamma=gam, se_gamma=se[0], age=age[0], se_age=se_age[0],
+                prop=prop, se_prop=se[1], sigma=sig, se_sigma=se[2],
+                mu=mu, post_min=pmin, converged=best.success, note=note)
+
+
+# ---------------------------------------------------------------------------
+# component uncertainties: the three tiers
+# ---------------------------------------------------------------------------
+def mixture_components(fit):
+    """[(age, model 1σ, MSWD, n_eff), ...] of a fit, youngest first."""
+    if fit['model'] == 'fmm':
+        return list(zip(fit['age'], fit['se_age'], fit['mswd'], fit['n_eff']))
+    return [(fit['age'], fit['se_age'], fit['mswd'], fit['n_eff'])]
+
+
+def component_tiers(fit, cfg):
+    """Analytical, internal and external 1σ of every component age.
+
+    The analytical σ is the model's, multiplied by √MSWD when the analyses of
+    the component (weighted by how likely they belong to it) scatter by more
+    than the Wendt & Carl (1991) limit for their number, the rule used for
+    every weighted mean.  J and the calibration are then added as for a
+    weighted mean of the sample.  Returns a list of dicts, youngest first."""
+    out = []
+    for age, se, mswd, neff in mixture_components(fit):
+        scale = 1.0
+        if neff is not None and mswd == mswd and mswd > mswd_critical(max(neff, 2.0)):
+            scale = math.sqrt(mswd)
+        ana = se * scale
+        si = float(internal_sigma_array([age], [ana], cfg)[0])
+        sx = float(external_sigma_array([age], [si], cfg)[0])
+        out.append(dict(age=float(age), se_model=float(se), scale=scale, mswd=mswd,
+                        n_eff=neff, ana=float(ana), int=si, ext=sx))
+    return out
+
+
+def mixture_xlim(t, s, fit, ds=2):
+    """An age range around the components that hold most of the analyses
+    (≥ 5 %), so single old xenocrysts do not set the scale."""
+    t = np.asarray(t, float)
+    s = np.abs(np.asarray(s, float))
+    used = fit['used']
+    if fit['model'] == 'fmm':
+        comp = np.nanargmax(np.nan_to_num(fit['post'], nan=-1), axis=1)
+        sel = used & np.isin(comp, np.where(fit['prop'] >= 0.05)[0])
+    else:
+        sel = used & ((np.nan_to_num(fit['post_min']) >= 0.5) | (t <= np.quantile(t[used], 0.9)))
+    if not sel.any():
+        sel = used
+    tt, ss = t[sel], s[sel] * ds
+    span = np.ptp(tt) + 1e-3
+    lo = np.quantile(tt - np.minimum(ss, span), 0.02)
+    hi = np.quantile(tt + np.minimum(ss, span), 0.98)
+    pad = 0.08 * (hi - lo + 1e-3)
+    return lo - pad, hi + pad
+
+
+# ---------------------------------------------------------------------------
+# drawing
+# ---------------------------------------------------------------------------
+MIXTURE_COLORS = ['#1f77b4', '#d62728', '#2ca02c', '#9467bd', '#ff7f0e',
+                  '#17becf', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22']
+MIXTURE_GREY = '#9a9a9a'
+
+
+def _colour(fit, i):
+    if fit['model'] == 'mam' and i > 0:
+        return MIXTURE_GREY
+    return MIXTURE_COLORS[i % len(MIXTURE_COLORS)]
+
+
+def _pdf(t, s, axis, w=None):
+    w = np.ones(len(t)) if w is None else w
+    out = np.zeros_like(axis)
+    for a, sg, ww in zip(t, s, w):
+        if ww > 0 and sg > 0:
+            out += ww * np.exp(-0.5 * ((axis - a) / sg)**2) / (sg * math.sqrt(2 * math.pi))
+    return out
+
+
+def mixture_membership(fit):
+    """(most likely component, its probability, n × k membership matrix) of
+    every analysis; component −1 for analyses the model did not use.  For the
+    minimum age model the columns are (minimum, older spread)."""
+    if fit['model'] == 'fmm':
+        P = fit['post']
+    else:
+        p = fit['post_min']
+        P = np.c_[p, 1 - p]
+    unused = np.isnan(P[:, 0])
+    comp = np.where(unused, -1, np.argmax(np.nan_to_num(P, nan=-1), axis=1))
+    prob = np.where(unused, np.nan, np.max(np.nan_to_num(P, nan=0), axis=1))
+    return comp, prob, P
+
+
+def mixture_legend_label(fit, i, tier, ds=2, dec=3, tiers_mode='all', with_n=True):
+    """'C1  56.794  ±2σ 0.107/0.109/0.118  (47 %, n = 41)' and its variants."""
+    af = f'.{dec}f'
+    name = 'Minimum' if fit['model'] == 'mam' else f'C{i + 1}'
+    a = tier['age']
+    if tiers_mode == 'off':
+        lab = name
+    elif tiers_mode in ('ana', 'int', 'ext'):
+        lab = f'{name}  {a:{af}} ± {tier[tiers_mode] * ds:{af}}'
+    else:
+        lab = (f'{name}  {a:{af}}  ±{ds}σ {tier["ana"] * ds:{af}}/'
+               f'{tier["int"] * ds:{af}}/{tier["ext"] * ds:{af}}')
+    if with_n and tiers_mode != 'off':
+        if fit['model'] == 'fmm':
+            lab += f'  ({100 * fit["prop"][i]:.0f} %, n = {fit["n_assigned"][i]})'
+        else:
+            lab += f'  ({100 * fit["prop"]:.0f} %)'
+    return lab
+
+
+def draw_components(ax, t, s, fit, xlim, tiers, ds=2, dec=3, title=None, show=None,
+                    tiers_mode='all', with_n=True, lw=1.0):
+    """The ranked analyses and their summed-Gaussian curve (from the 1σ errors), as
+    in the main plot, with the curve split into the membership-weighted curves of
+    the components, which add up to it.  Each analysis is coloured by its
+    most likely component, faded when its membership is uncertain."""
+    show = {} if show is None else show
+    on = lambda k: show.get(k, True)
+    t = np.asarray(t, float)
+    s = np.abs(np.asarray(s, float))
+    n = len(t)
+    comp, prob, P = mixture_membership(fit)
+    lo, hi = xlim
+    axis = np.linspace(lo, hi, 4000)
+    total = _pdf(t, s, axis)
+    scale = n / total.max() if total.max() > 0 else 1.0
+    if on('fill'):
+        base = np.zeros_like(axis)
+        for i in range(P.shape[1]):
+            c = _pdf(t, s, axis, np.nan_to_num(P[:, i])) * scale
+            ax.fill_between(axis, base, base + c, color=_colour(fit, i), alpha=0.35,
+                            lw=0, zorder=1)
+            base = base + c
+    if on('curve'):
+        ax.plot(axis, total * scale, color='k', lw=1.4 * lw, zorder=6)
+    if on('points'):
+        rank = np.empty(n)
+        rank[np.argsort(t)] = np.arange(1, n + 1)
+        for j in range(n):
+            if not (lo - 3 * s[j] * ds <= t[j] <= hi + 3 * s[j] * ds):
+                continue
+            ci = comp[j]
+            col = MIXTURE_GREY if ci < 0 else _colour(fit, ci)
+            alpha = 0.3 if ci < 0 else 0.35 + 0.65 * prob[j]
+            ax.errorbar(t[j], rank[j], xerr=ds * s[j], fmt='o', ms=3.5 * lw, color=col,
+                        mfc=col if ci >= 0 else 'none', alpha=alpha, lw=0.9 * lw,
+                        capsize=0, zorder=4)
+    for i, tr in enumerate(tiers):
+        a = tr['age']
+        if not (lo <= a <= hi):
+            continue
+        col = _colour(fit, i) if fit['model'] == 'fmm' else MIXTURE_COLORS[0]
+        if on('bands'):
+            ax.axvspan(a - ds * tr['ana'], a + ds * tr['ana'], color=col, alpha=0.25,
+                       lw=0, zorder=2)
+            ax.axvline(a, color=col, lw=1.3 * lw, ls='--', zorder=5)
+        ax.plot([], [], color=col, lw=6, alpha=0.6,
+                label=mixture_legend_label(fit, i, tr, ds, dec, tiers_mode, with_n))
+    off = [tr['age'] for tr in tiers if not (lo <= tr['age'] <= hi)]
+    if off:
+        lab = (f'+1 component outside the age range ({off[0]:.{dec}f} Ma)' if len(off) == 1 else
+               f'+{len(off)} components outside the age range ({min(off):.0f}–{max(off):.0f} Ma)')
+        ax.plot([], [], color='none', label=lab)
+    ax.set_xlim(lo, hi)
+    ax.set_ylim(0, n * 1.08)
+    ax.set_xlabel('Age (Ma)')
+    ax.set_ylabel('Rank')
+    ax.xaxis.set_minor_locator(AutoMinorLocator())
+    ax.tick_params(which='both', direction='in', top=True, right=True)
+    leg = ax.legend(loc='lower left', bbox_to_anchor=(0, 1.01), borderaxespad=0,
+                    frameon=False, prop={'size': 8}, title=title, alignment='left',
+                    title_fontproperties={'size': 9, 'weight': 'bold'})
+    leg.set_zorder(20)
+    return leg
+
+
+def draw_radial(ax, t, s, fit, xlim, space='linear'):
+    """Radial plot (Galbraith 1988): x = 1/σ, y = (z − z0)/σ, with z0 the
+    weighted mean.  An analysis of value z lies on the line from the origin
+    with slope z − z0, so its value is read where that line meets the arc;
+    each component is drawn as such a line.  Only analyses within xlim are
+    drawn, and the arc spans the analyses that carry weight."""
+    t = np.asarray(t, float)
+    s = np.abs(np.asarray(s, float))
+    comp, prob, P = mixture_membership(fit)
+    z, sz, ok = mixture_to_z(t, s, space)
+    lo, hi = xlim
+    inr = ok & (t >= lo) & (t <= hi)
+    if inr.sum() < 1:
+        ax.text(0.5, 0.5, 'No analyses in the age range', transform=ax.transAxes, ha='center')
+        return
+    zf = np.log if space == 'log' else (lambda v: np.asarray(v, float))
+    ages = np.atleast_1d(fit['age'])
+    # arc range: the analyses with at least 10 % of the best precision, and
+    # the component ages in view; imprecise analyses sit near the origin and
+    # would only stretch the scale
+    prec = 1 / sz[inr]
+    zz = np.r_[z[inr][prec >= 0.1 * prec.max()], zf(ages[(ages >= lo) & (ages <= hi) & (ages > 0 if space == 'log' else True)])]
+    pad = 0.08 * max(zz.max() - zz.min(), 1e-6)
+    zm, zM = zz.min() - pad, zz.max() + pad
+    w = 1 / sz[inr]**2
+    z0 = np.sum(w * z[inr]) / np.sum(w)
+    rx, ry = 1 / sz[inr], (z[inr] - z0) / sz[inr]
+    # the arc is an ellipse in data units that looks round on the axes
+    # (IsoplotR radial_scale)
+    bb = ax.get_window_extent()
+    e = (bb.height / max(bb.width, 1)) / (zM - zm)
+    th = np.arctan(e * (z[inr] - z0))
+    xM = 1.08 * math.sqrt(np.max((rx**2 + ry**2) / (np.cos(th)**2 + (np.sin(th) / e)**2)))
+
+    def arc(zv, r):
+        a = np.arctan(e * (np.asarray(zv) - z0))
+        return r * np.cos(a), (r / e) * np.sin(a)
+
+    ax.plot(*arc(np.linspace(zm, zM, 200), xM), color='k', lw=0.9)
+    tlo, thi = (math.exp(zm), math.exp(zM)) if space == 'log' else (zm, zM)
+    for v in [v for v in MaxNLocator(6).tick_values(tlo, thi) if tlo <= v <= thi]:
+        x0, y0 = arc(zf(v), xM)
+        x1, y1 = arc(zf(v), xM * 1.025)
+        ax.plot([x0, x1], [y0, y1], color='k', lw=0.9)
+        ax.text(x1 * 1.01, y1, f'{v:g}', va='center', ha='left', fontsize=8)
+    for i, a in enumerate(ages):
+        if lo <= a <= hi and (a > 0 or space != 'log'):
+            x1, y1 = arc(zf(a), xM)
+            ax.plot([0, x1], [0, y1], color=_colour(fit, i) if fit['model'] == 'fmm' else MIXTURE_COLORS[0],
+                    lw=1.4, ls='--', zorder=3)
+    for jj, j in enumerate(np.where(inr)[0]):
+        ci = comp[j]
+        col = MIXTURE_GREY if ci < 0 else _colour(fit, ci)
+        ax.plot(rx[jj], ry[jj], 'o', ms=4.5, mfc=col, mec='k', mew=0.4,
+                alpha=0.35 + 0.65 * (prob[j] if ci >= 0 else 0), zorder=4)
+    ax.set_xlim(0, xM * 1.25)
+    ys = np.r_[arc(np.array([zm, zM]), xM)[1], ry]
+    ax.set_ylim(min(ys.min(), -3) * 1.05, max(ys.max(), 3) * 1.05)
+    ax.spines[['top', 'right']].set_visible(False)
+    yl = ax.get_ylim()
+    ax.set_yticks([-2, 0, 2] if yl[1] - yl[0] < 30 else [0])
+    ax.tick_params(labelsize=8)
+    ax.set_ylabel('Standardised estimate')
+    ax.set_xlabel('Precision (1/σ)' if space == 'linear' else 'Precision (t/σ)')
+    nout = int((ok & ~inr).sum())
+    if nout:
+        ax.text(0.02, 0.02, f'{nout} analyses outside {lo:.4g}–{hi:.4g} Ma not shown',
+                transform=ax.transAxes, fontsize=7, color='#666')
+
+
+def draw_bic(ax, fits, k_shown, k_bic):
+    """ΔBIC (BIC minus the lowest) for every number of components tried.
+    The bar of the fit shown is coloured; the BIC choice is marked ▼."""
+    ks = [f['k'] for f in fits]
+    d = np.array([f['bic'] for f in fits]) - min(f['bic'] for f in fits)
+    # a floor on the bar height, so a bar at ΔBIC ≈ 0 still shows its colour
+    ax.bar(ks, np.clip(d, 0.6, 30), color=[MIXTURE_COLORS[0] if k == k_shown else '#bbbbbb' for k in ks])
+    for k, v in zip(ks, d):
+        ax.text(k, min(v, 30) + 0.8, ('>30' if v > 30 else f'{v:.1f}') + (' ▼' if k == k_bic else ''),
+                ha='center', fontsize=6.5)
+    ax.set_xticks(ks)
+    ax.set_ylim(0, 36)
+    ax.set_xlabel('Number of components', fontsize=7.5)
+    ax.set_ylabel('ΔBIC', fontsize=7.5)
+    ax.tick_params(labelsize=7)

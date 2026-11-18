@@ -85,8 +85,10 @@ from arar_math import (
     METHOD_WM, METHOD_GLS, method_key,
 )
 from flux_dialog import FluxAssignDialog, FluxHost
-import figure_export as figexp
-import data_export as dexp
+from standards import MonitorCombo, monitor_text
+from arar_math import (MONITOR_KEYS, to_fcs_r, from_fcs_r, cfg_monitor, calibration_notes,
+                       monitor_mismatch_note)
+import export
 import data_folders as dfold
 
 
@@ -136,7 +138,7 @@ def find_plateau(steps, cfg):
     minPct   float   minimum %39Ar in plateau (default 50)
     minN     int     minimum number of steps (default 3)
     pCut     float   probability cutoff in % (default 5)
-    errMode  str     'sem_mswd' | 'sem'
+    errMode  str     'sem_mswd_2s' (default) | 'sem_mswd' | 'sem' (arar_math.scale_sem)
     """
     p_cut      = cfg.get('pCut',  5.0)
     mode       = cfg.get('ageFluxMode', 'imported')
@@ -184,7 +186,7 @@ def find_plateau(steps, cfg):
                 'lambdaYr', LAMBDA_DEFAULT)) * _J_rel)
         # External: internal ⊕ the calibration systematic
         # (arar_math.systematic_components; anchored chain for Kuiper, Rivera
-        # and Phillips, so λ nearly cancels).
+        # and Phillips).
         s1_ext = float(external_sigma_array(np.array([r['mean']]),
                                             np.array([s1_int]), cfg)[0])
         return float(s1_ana), float(s1_int), float(s1_ext)
@@ -281,6 +283,47 @@ def find_plateau(steps, cfg):
 # --------------------------------------------------------------------------
 # Ca/K axis helper
 # --------------------------------------------------------------------------
+
+def _kca_steps(steps):
+    """The steps with the ratio panel switched to K/Ca = 1/(Ca/K).
+
+    A step with Ca/K <= 0 has no K/Ca and is not drawn.  The error box is the
+    1/x image of the Ca/K interval, so it is asymmetric and runs off the top of
+    the panel when the Ca/K interval reaches zero; the original Ca/K and its
+    error are kept in '_kca' for that.  'err_cak' holds the linear error
+    sigma/(Ca/K)^2, used only to scale the axis."""
+    out = []
+    for s0 in steps:
+        s1 = dict(s0)
+        c = s0.get('caK', 0.0)
+        e = s0.get('err_cak', 0.0) or 0.0
+        if c is not None and math.isfinite(c) and c > 0:
+            s1['caK'] = 1.0 / c
+            s1['err_cak'] = e / (c * c)
+            s1['_kca'] = (c, e)
+        else:
+            s1['caK'] = float('nan')
+            s1['err_cak'] = 0.0
+        out.append(s1)
+    return out
+
+
+def _box_bounds(s, val_key, err_key, scale, fixed_half, top):
+    """Lower and upper edge of a step's box in a spectrum panel; None when the
+    step has no value there (K/Ca of a step with Ca/K <= 0)."""
+    val = s[val_key]
+    if val is None or not math.isfinite(val):
+        return None
+    if val_key == 'caK' and '_kca' in s:
+        c, e = s['_kca']
+        ek = e * scale
+        if ek <= 0:
+            return val - fixed_half, val + fixed_half
+        return 1.0 / (c + ek), (1.0 / (c - ek) if c > ek else top)
+    ev = (s.get(err_key, 0.0) if err_key else 0.0) * scale
+    eh = ev if ev > 0 else fixed_half
+    return val - eh, val + eh
+
 
 def _cak_ylim(cak_vals, err_cak_vals=None, padding=0.15, gas_pct=None):
     """Ca/K y-axis range that keeps the steps in view.
@@ -542,15 +585,12 @@ def _recalc_ages_in_steps(steps, lam1, fc1_ma, j1_default, lam2, fc2_ma,
     Uses the per-step r4039 ratio when available; otherwise back-calculates R
     from the stored age + J.  All uncertainties (err1s, err_r4039) are 1σ.
 
-    err1s stays analytical only.  Only the age and its analytical
-    (measurement) uncertainty are converted here.  The FC-age and λ systematics
-    are shared, fully-correlated terms: they must not be folded into per-step
-    err1s, because err1s is the inverse-variance weight in the plateau /
-    integrated weighted mean, baking a systematic that scales with R (≈ age)
-    into it distorts the weights and shifts the mean age every time the
-    calibration changes.  The external tier is added once, consistently, by the
-    Box-1/Box-2 model in find_plateau._compute_tiers → external_sigma_array,
-    driven by cfg['stdAgeErrMa'] / cfg['stdAgeErrType'].
+    Only the age and its analytical uncertainty are converted; err1s stays
+    analytical.  The FC-age and λ errors are shared by every step, and err1s
+    is the weight in the plateau and integrated means: a systematic that
+    grows with R put into it would change the weights, and so the mean age,
+    with every change of calibration.  The external tier is added once, to
+    the plateau age (find_plateau._compute_tiers → external_sigma_array).
 
     fc2_err_ma only selects the anchored chain for the new FC age (fc_ingrowth);
     it does not enter err1s.
@@ -578,9 +618,8 @@ def _recalc_ages_in_steps(steps, lam1, fc1_ma, j1_default, lam2, fc2_ma,
             sR = err1_yr * lam1 * math.exp(lam1 * age_yr) / j1 if err1_yr > 0 else 0.0
         new_age_yr = math.log(1.0 + j2 * R) / lam2
         C = 1.0 + j2 * R
-        # Analytical (measurement) uncertainty only, converted to the new J.
-        # No FC-age / λ systematic is added here (see docstring): those are the
-        # external tier and are handled once, at plateau level, by the Box model.
+        # Analytical uncertainty only, converted to the new J; the FC-age and
+        # λ errors are the external tier, added at plateau level (docstring).
         new_err_total = j2 * sR / (lam2 * C) if sR > 0 else 0.0
         s['age']   = new_age_yr / _MAY
         s['err1s'] = new_err_total / _MAY     # 1σ, analytical only
@@ -721,14 +760,12 @@ class ColumnMappingDialog(QDialog):
             layout.addWidget(sep_r)
 
             self._cb_compute_from_r = QCheckBox(
-                "Compute ages from R and J  (ratio_J mode; sets λ, FC age, and R_std)")
+                "Compute ages from R and J  (R mode with J; sets λ, FC age and R_std)")
             self._cb_compute_from_r.setChecked(True)
             self._cb_compute_from_r.setToolTip(
-                "After pasting:\n"
-                "  • Switch to 'Compute from ratio, J value' mode\n"
-                "  • Set λ, FC age, and σ_FC in Settings\n"
-                "  • Auto-compute R_std = (exp(λ·t_FC) − 1) / J\n"
-                "Ages update live when λ changes in Settings.")
+                "After pasting, the age source is R mode (insert J), with\n"
+                "R_std = (exp(λ·t_FC) − 1) / J from the λ and FC age set below.\n"
+                "The ages follow when the calibration is changed later.")
             layout.addWidget(self._cb_compute_from_r)
 
             _cfr_form = QFormLayout()
@@ -999,11 +1036,11 @@ class AgeRecalcDialog(QDialog):
                 fc_ext_cb.setEnabled(fc_default_idx == _custom_fc_idx)
                 fc_ext_cb.setToolTip(
                     "On for calibrations that fix how λ enters: the astronomically\n"
-                    "anchored ages (Kuiper 2008, Rivera 2011, Phillips 2022), where\n"
-                    "λ largely cancels against the anchor, and the joint fit of\n"
-                    "Carter et al. (2025), which comes with its own λ covariance.\n"
+                    "anchored ages (Kuiper 2008, Rivera 2011, Phillips 2022) and the\n"
+                    "joint fit of Carter et al. (2025), which comes with its own λ\n"
+                    "covariance.\n"
                     "Off when the FC age does not carry λ (e.g. Renne 2010/2011 used\n"
-                    "as a single value), so σ_λ enters at full leverage.\n\n"
+                    "as a single value), so the full σ_λ is added.\n\n"
                     "It only sets how the calibration enters the external tier of\n"
                     "the plateau age; the step errors stay analytical."
                 )
@@ -1041,7 +1078,7 @@ class AgeRecalcDialog(QDialog):
                               _lam_idx('Min'), _fc_idx('Kuiper'))
         tgt_box, self._t_lam_cb, self._t_lam_le, self._t_fc_cb, self._t_fc_sp, \
             self._t_fc_err_sp, self._t_fc_ext_cb = \
-            _make_param_group("Target parameters  (convert TO)",
+            _make_param_group("Target parameters  (convert to)",
                               _lam_idx(DEFAULT_LAMBDA_NAME), _fc_idx(DEFAULT_FC_NAME),
                               show_err_ext=True)
 
@@ -1159,7 +1196,7 @@ class _CalibrationDialog(QDialog):
     REVERT = 42
 
     def __init__(self, old_lam, old_lam_err, old_fc_ma, old_fc_err_ma, parent=None,
-                 can_revert=False, old_mode='ratio_R_std', n_aliquots=1):
+                 can_revert=False, old_mode='ratio_R_std', n_aliquots=1, old_monitor='FCs'):
         super().__init__(parent)
         self.setWindowTitle("Calibration and age source")
         self.setMinimumWidth(470)
@@ -1206,7 +1243,7 @@ class _CalibrationDialog(QDialog):
 
         # Target: one selector brings its own anchored λ
         # (Phillips/Rivera/Kuiper → Min 2000; Renne → own λ; Carter → Carter).
-        tgt_box = QGroupBox("Target calibration  (convert TO)")
+        tgt_box = QGroupBox("Target calibration  (convert to)")
         tgt_lay = QFormLayout(tgt_box)
         tgt_lay.setLabelAlignment(Qt.AlignRight)
 
@@ -1241,10 +1278,9 @@ class _CalibrationDialog(QDialog):
         self._fc_err_sp.setValue(_fc4[2])
         self._fc_err_sp.setEnabled(False)
 
-        # The external/internal FC distinction is now carried automatically by
-        # each preset (and handled at the external tier by the intercalibrated /
-        # full-external Box model), so the old "External calibration" checkbox is
-        # gone.  We still track the flag internally to set stdAgeErrType.
+        # Whether the FC error is external comes with each preset (the
+        # intercalibrated / full external choice handles it); the flag is kept
+        # to set stdAgeErrType.
         self._fc_ext = bool(_fc4[3])
 
         _pl0 = paired_lambda(_fc4[0])
@@ -1269,12 +1305,24 @@ class _CalibrationDialog(QDialog):
                     self._lam_err_le.setText(f"{pl[2]:.4e}")
         self._fc_cb.currentIndexChanged.connect(_fc_ch)
 
+        self._mon_cb = MonitorCombo()
+        self._mon_cb.set_monitor(old_monitor)
+        self._mon_info = QLabel('')
+        self._mon_info.setWordWrap(True)
+        self._mon_info.setStyleSheet('color:#555; font-size:10px;')
+        tgt_lay.addRow("Monitor:", self._mon_cb)
         tgt_lay.addRow("Calibration:", self._fc_cb)
+        tgt_lay.addRow("", self._mon_info)
         tgt_lay.addRow("FC age (Ma):", self._fc_sp)
         tgt_lay.addRow("FC age ±1σ:", self._fc_err_sp)
         tgt_lay.addRow("λ (yr⁻¹):", self._lam_le)
         tgt_lay.addRow("λ ±1σ:", self._lam_err_le)
         layout.addWidget(tgt_box)
+        for _w in (self._mon_cb, self._fc_cb):
+            _w.currentIndexChanged.connect(self._update_mon_info)
+        self._fc_sp.valueChanged.connect(self._update_mon_info)
+        self._lam_le.textChanged.connect(self._update_mon_info)
+        self._update_mon_info()
 
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.accepted.connect(self.accept)
@@ -1287,6 +1335,16 @@ class _CalibrationDialog(QDialog):
             btn_revert.clicked.connect(lambda: self.done(self.REVERT))
             bb.addButton(btn_revert, QDialogButtonBox.ResetRole)
         layout.addWidget(bb)
+
+    def _update_mon_info(self, *_):
+        try:
+            cfg = dict(stdAgeMa=self._fc_sp.value(), stdAgeErrMa=self._fc_err_sp.value(),
+                       lambdaYr=float(self._lam_le.text()), **self._mon_cb.keys())
+            txt = '\n'.join([t for t in [monitor_text(cfg)] + calibration_notes(cfg) if t])
+        except (ValueError, TypeError):
+            txt = ''
+        self._mon_info.setText(txt)
+        self._mon_info.setVisible(bool(txt))
 
     def get_params(self):
         try:
@@ -1302,6 +1360,7 @@ class _CalibrationDialog(QDialog):
             fc2_ma=self._fc_sp.value(),
             fc2_err_ma=self._fc_err_sp.value(),
             fc2_external=bool(getattr(self, '_fc_ext', True)),
+            monitor_keys=self._mon_cb.keys(),
             age_mode=self._mode_cb.currentData(),
             apply_all=bool(self._apply_all_cb.isChecked()),
         )
@@ -1332,9 +1391,10 @@ _SESSION_CFG_DEFAULTS = dict(
     stdAgeErrType=DEFAULT_STD_AGE_ERR_TYPE,
     lambdaYr=LAMBDA_DEFAULT,     # ⁴⁰K decay constant (yr⁻¹)
     lambdaErrYr=LAMBDA_ERR,      # 1σ uncertainty on λ (yr⁻¹)
-    fullSystematics=False,       # False → intercalibrated external (λ cancels, default);
+    fullSystematics=False,       # False → intercalibrated external (default);
                                  # True  → Min et al. (2000) full external (physical λ)
 )
+
 
 def _session_err_div(cfg, input_1s_checked):
     """Divisor that brings on-disk measured errors to 1σ.
@@ -1372,7 +1432,7 @@ def _load_session_data(data, err_div=2.0):
             cfg['ageFluxMode'] = 'ratio_R_std'
         else:
             cfg['ageFluxMode'] = 'imported'
-    # ratio_R_direct was merged into ratio_R_std (now always uses ratio-space WM)
+    # files written with the former mode name 'ratio_R_direct'
     if cfg.get('ageFluxMode') == 'ratio_R_direct':
         cfg['ageFluxMode'] = 'ratio_R_std'
     # Old converter exports wrote rStd=0 as a placeholder; zero causes J→∞
@@ -1649,7 +1709,7 @@ def _plateau_summary(p, eff):
 def _show_r_standard(cfg):
     """False when the R standard of a cfg is the placeholder of an Imported-ages
     session (see _fo_rr), so the export leaves the column blank; else None, the
-    default of data_export.flux_cells."""
+    default of export.flux_cells."""
     if (cfg.get('ageFluxMode', 'imported') == 'imported'
             and (cfg.get('rStd') or 0.0) == _SESSION_CFG_DEFAULTS['rStd']):
         return False
@@ -1989,10 +2049,12 @@ class PlateauCanvas(FigureCanvas):
         yr_span = yr[1] - yr[0]
         fixed_half = yr_span * 0.017   # half-height for non-age panels
 
+        top = yr[1] + yr_span        # an open K/Ca box runs off the panel
         for i, s in enumerate(steps_c):
-            val    = s[val_key]
-            _ev    = s.get(err_key, 0.0) if err_key else 0.0
-            eh     = _ev * sig_scale if _ev > 0 else fixed_half
+            b = _box_bounds(s, val_key, err_key, sig_scale, fixed_half, top)
+            if b is None:
+                continue
+            lo_i, hi_i = b
             status = s.get('status', 'normal')
             exc    = status == 'excluded'
             forced = status == 'forced'
@@ -2004,19 +2066,18 @@ class PlateauCanvas(FigureCanvas):
             in_plat = err_key and (i in pset)
             lw = 1.6 if in_plat else 1.0
             ax.add_patch(Rectangle(
-                (x, val - eh), bw, eh * 2.0,
+                (x, lo_i), bw, hi_i - lo_i,
                 facecolor=face, edgecolor=color, linewidth=lw, zorder=2,
             ))
 
             nx = steps_c[i + 1] if i + 1 < len(steps_c) else None
-            if nx:
-                nval  = nx[val_key]
-                _nev  = nx.get(err_key, 0.0) if err_key else 0.0
-                neh   = _nev * sig_scale if _nev > 0 else fixed_half
+            nb = (_box_bounds(nx, val_key, err_key, sig_scale, fixed_half, top)
+                  if nx else None)
+            if nb:
                 cx   = s['ce']          # shared x boundary
 
-                gap_lo = min(val + eh,  nval + neh)
-                gap_hi = max(val - eh,  nval - neh)
+                gap_lo = min(hi_i, nb[1])
+                gap_hi = max(lo_i, nb[0])
                 if gap_lo < gap_hi:
                     nx_st = nx.get('status', 'normal')
                     if exc or nx_st == 'excluded':
@@ -2113,7 +2174,7 @@ class PlateauCanvas(FigureCanvas):
         e1s_ext = plateau.get('e1s_ext', e1s_int) * scale
         ax.text(0.02, 0.02,
                 f"Analytical: \u00b1{e1s_ana:{_af}} Ma ({sig_lbl})\n"
-                f"Full external: \u00b1{e1s_ext:{_af}} Ma ({sig_lbl})",
+                f"External: \u00b1{e1s_ext:{_af}} Ma ({sig_lbl})",
                 ha='left', va='bottom', fontsize=8, color='#555',
                 transform=ax.transAxes, clip_on=True, zorder=5)
 
@@ -2170,7 +2231,7 @@ def _draw_overlay_figure(fig, sessions, age_range, global_cfg=None, combined_e1s
                       falls back to the simple per-step weighted mean.
     combined_e1s: internal tier (+J_Rstd), shown in the combined bracket label
     combined_e1s_ana: analytical tier (no J), shown as 'Analytical' in bottom-left
-    combined_e1s_ext: full external tier
+    combined_e1s_ext: external tier
     combined_r_dict: full result dict from _combined_plateau(); used to show the
                       correct n/MSWD/p/ω for whichever method is active.
     bracket_at: age (Ma) for the combined-age line, None = automatic.
@@ -2199,10 +2260,12 @@ def _draw_overlay_figure(fig, sessions, age_range, global_cfg=None, combined_e1s
     def _draw_boxes(ax, steps_c, val_key, err_key, yr, color, scale=1.0):
         yr_span    = yr[1] - yr[0]
         fixed_half = yr_span * 0.017
+        top        = yr[1] + yr_span
         for i, s in enumerate(steps_c):
-            val    = s[val_key]
-            _ev    = (s.get(err_key, 0.0) if err_key else 0.0) * scale
-            eh     = _ev if _ev > 0 else fixed_half
+            b = _box_bounds(s, val_key, err_key, scale, fixed_half, top)
+            if b is None:
+                continue
+            lo_i, hi_i = b
             status = s.get('status', 'normal')
             exc    = (status == 'excluded')
             ec = '#aaaaaa' if exc else color
@@ -2210,17 +2273,16 @@ def _draw_overlay_figure(fig, sessions, age_range, global_cfg=None, combined_e1s
             ls = '--'      if exc else '-'
             bw = max(s['ce'] - s['cs'], 0.0)
             ax.add_patch(Rectangle(
-                (s['cs'], val - eh), bw, eh * 2.0,
+                (s['cs'], lo_i), bw, hi_i - lo_i,
                 facecolor='none', edgecolor=ec,
                 linewidth=lw, linestyle=ls, zorder=2,
             ))
             nx = steps_c[i + 1] if i + 1 < len(steps_c) else None
-            if nx:
-                nval  = nx[val_key]
-                _nev  = (nx.get(err_key, 0.0) if err_key else 0.0) * scale
-                neh   = _nev if _nev > 0 else fixed_half
-                gap_lo = min(val + eh,  nval + neh)
-                gap_hi = max(val - eh,  nval - neh)
+            nb = (_box_bounds(nx, val_key, err_key, scale, fixed_half, top)
+                  if nx else None)
+            if nb:
+                gap_lo = min(hi_i, nb[1])
+                gap_hi = max(lo_i, nb[0])
                 if gap_lo < gap_hi:
                     nx_exc = nx.get('status', 'normal') == 'excluded'
                     lc = '#aaaaaa' if (exc or nx_exc) else color
@@ -2290,8 +2352,8 @@ def _draw_overlay_figure(fig, sessions, age_range, global_cfg=None, combined_e1s
                 lbl = (f"Combined: {_age_show:{_af}} ± {_e_show:{_af}} Ma ({_sig_lbl})\n"
                        f"n={r['n']}, MSWD={r['mswd']:.2f}, p={r['prob']:.2f}")
             # The bracket is placed only now that the label exists: its height
-            # (2 lines, or 3 with Vermeesch's ω) sets how far down the bracket
-            # has to sit for the whole summary to stay inside the panel.
+            # (two lines) sets how far down the bracket has to sit for the
+            # whole summary to stay inside the panel.
             _at = bracket_at
             if label_top and _at is None:
                 # Big text: just above the tallest step, with a text line of
@@ -2313,8 +2375,8 @@ def _draw_overlay_figure(fig, sessions, age_range, global_cfg=None, combined_e1s
                             color='#111', linewidth=1.8, zorder=5,
                             solid_capstyle='butt')
             # Center the summary on the axes (not the bracket midpoint) so the
-            # longer Vermeesch label, which adds ω, never runs past the left/
-            # right plot borders. x in axes fraction, y in data coords.
+            # longer label with ω never runs past the left or right border.
+            # x in axes fraction, y in data coords.
             from matplotlib.transforms import blended_transform_factory
             _lbl_tr = blended_transform_factory(ax_age.transAxes, ax_age.transData)
             if show_bracket:
@@ -2339,7 +2401,7 @@ def _draw_overlay_figure(fig, sessions, age_range, global_cfg=None, combined_e1s
             if show_err_box:
                 ax_age.text(0.02, 0.02,
                             f"Analytical: ±{_e1si:{_af}} Ma ({_sig_lbl})\n"
-                            f"Full external: ±{_e1se:{_af}} Ma ({_sig_lbl})",
+                            f"External: ±{_e1se:{_af}} Ma ({_sig_lbl})",
                             ha='left', va='bottom', fontsize=8, color='#555',
                             transform=ax_age.transAxes, clip_on=True, zorder=5)
 
@@ -2512,9 +2574,9 @@ class IsochronCanvas(FigureCanvas):
     def spread_stats(xs, ys, fit, inverse=True):
         """How far the regressed points spread along the mixing line.
 
-        This is a lever, not a scatter: it says how much of the atmospheric →
-        radiogenic range the steps actually cover, which is what controls how
-        well the intercept (the trapped ratio) is constrained.  Steps that are
+        A measure of coverage, not of scatter: how much of the atmospheric →
+        radiogenic range the steps cover, which sets how well the intercept
+        (the trapped ratio) is constrained.  Steps that are
         all ~100% radiogenic sit in one corner and the intercept is an
         extrapolation; steps spanning a wide range of ⁴⁰Ar* pin both ends.
 
@@ -3178,7 +3240,8 @@ class OverlayCanvas(FigureCanvas):
     def redraw(self, sessions, age_range, global_cfg=None, combined_e1s=None,
                combined_e1s_ana=None, combined_e1s_ext=None,
                combined_mean=None, combined_r_dict=None,
-               display_1sigma=False, age_dec=2):
+               display_1sigma=False, age_dec=2, cak_label='Ca/K',
+               legend_title=''):
         self._sessions = sessions
         self._err_k = 1.0 if display_1sigma else 2.0
         self.ax_p40, self.ax_cak, self.ax_age = _draw_overlay_figure(
@@ -3186,7 +3249,8 @@ class OverlayCanvas(FigureCanvas):
             global_cfg=global_cfg, combined_e1s=combined_e1s,
             combined_e1s_ana=combined_e1s_ana, combined_e1s_ext=combined_e1s_ext,
             combined_mean=combined_mean, combined_r_dict=combined_r_dict,
-            display_1sigma=display_1sigma, age_dec=age_dec,
+            display_1sigma=display_1sigma, age_dec=age_dec, cak_label=cak_label,
+            legend_title=legend_title,
         )
         if not getattr(self, '_offscreen', False):
             self.draw_idle()
@@ -3323,6 +3387,7 @@ class _StatsDialog(QDialog):
     offer a tab-separated block of the results (Name / Age / 2σ ana / 2σ int /
     2σ ext / J / ±J%).
     """
+
     def __init__(self, win, mode='stack'):
         super().__init__(win)
         self.win = win
@@ -3481,7 +3546,7 @@ class _StatsDialog(QDialog):
         hdrs  = ['#', 'Label', 'Age (Ma)', '±2σ ana',
                  '±2σ int', '±2σ ext']
         if has_j:
-            hdrs += ['J (yr⁻¹)', '±J (%)']
+            hdrs += ['J', '±J (%)']
         hdrs += ['grp']
         at = QTableWidget(len(rowsd), len(hdrs))
         at.setHorizontalHeaderLabels(hdrs)
@@ -3561,7 +3626,7 @@ class _StatsDialog(QDialog):
         has_j = any(d.get('J', 0) > 0 for d in rowsd)
         hdrs = ['Label', 'Age (Ma)', '±2σ ana', '±2σ int', '±2σ ext']
         if has_j:
-            hdrs += ['J (yr-1)', '±J (%)']
+            hdrs += ['J', '±J (%)']
         hdrs += ['lambda (yr-1)', 'FC age (Ma)',
                  f'sigma_FC (2s, {fc_type})', 'R_std']
         lines = ['\t'.join(hdrs)]
@@ -4241,12 +4306,10 @@ class PlateauWindow(QMainWindow):
         self.sample_tree.setToolTip(
             '✕ column: check the box to exclude an aliquot from the combined plateau age.\n'
             'The aliquot is still displayed on the plot but grayed out.\n\n'
-            'J grp: sessions with the same label share an irradiation disk\n'
-            'and have fully correlated J uncertainties (ρ ≈ 1).\n'
-            'J does NOT average down when combining these sessions.\n\n'
-            'Auto-populated from the disk letter in the irradiation label\n'
-            '(e.g. "9E19-25" → disk group "9E").\n'
-            'Edit freely, type the same label on sessions from the same disk.')
+            'J grp: without a loaded disk flux, sessions with the same label are\n'
+            'taken to share J (ρ = 1), so their J error does not average down.\n'
+            'Filled in from the disk letter of the irradiation label\n'
+            '(e.g. "9E19-25" → "9E"); type the same label on sessions from one disk.')
         _sth = self.sample_tree.header()
         _sth.setSectionResizeMode(0, QHeaderView.ResizeToContents)
         _sth.setSectionResizeMode(1, QHeaderView.Stretch)
@@ -4392,6 +4455,18 @@ class PlateauWindow(QMainWindow):
         self._sp_ageDec.setToolTip("Decimal places for age and error values in table, plot, and summary")
         self._sp_ageDec.valueChanged.connect(self._on_cfg)
         _disp_l.addWidget(self._sp_ageDec)
+        _disp_sep2 = QFrame()
+        _disp_sep2.setFrameShape(QFrame.VLine)
+        _disp_sep2.setStyleSheet("color: #ccc;")
+        _disp_sep2.setFixedWidth(12)
+        _disp_l.addWidget(_disp_sep2)
+        self._cb_ratio = QComboBox()
+        self._cb_ratio.addItem("Ca/K", 'cak')
+        self._cb_ratio.addItem("K/Ca", 'kca')
+        self._cb_ratio.setToolTip("Ratio panel and table column: Ca/K, or K/Ca = 1/(Ca/K). "
+                                  "Steps with Ca/K ≤ 0 have no K/Ca and are left out.")
+        self._cb_ratio.currentIndexChanged.connect(self._queue_redraw)
+        _disp_l.addWidget(self._cb_ratio)
         _disp_l.addStretch()
         form.addRow("Display errors as:", _disp_w)
 
@@ -4408,8 +4483,8 @@ class PlateauWindow(QMainWindow):
         self._cb_ageFluxMode.currentIndexChanged.connect(self._on_cfg)
         self._lbl_age_src = QLabel("Age source:")
         form.addRow(self._lbl_age_src, self._cb_ageFluxMode)
-        # The age source is chosen in the Calibration… dialog now; the combo
-        # stays as the (hidden) holder of the setting.
+        # The age source is chosen in the Calibration… dialog; the hidden combo
+        # holds the setting.
         self._lbl_age_src.setVisible(False)
         self._cb_ageFluxMode.setVisible(False)
 
@@ -4467,7 +4542,7 @@ class PlateauWindow(QMainWindow):
         self._lbl_jErrPct = QLabel("J error (% 1σ):")
         _fb.addRow(self._lbl_jErrPct, self._le_jErrPct)
 
-        self._le_rStd = QLineEdit(repr(self.cfg['rStd']))
+        self._le_rStd = QLineEdit(f"{from_fcs_r(self.cfg['rStd'], self.cfg):.8g}")
         self._le_rStd.setPlaceholderText("e.g. 70.12345")
         self._le_rStd.textChanged.connect(self._on_cfg)
         self._lbl_rStd = QLabel("\u2074\u2070Ar/\u00b3\u2079Ar R standard:")
@@ -4516,19 +4591,18 @@ class PlateauWindow(QMainWindow):
         self._le_lambdaErr.textChanged.connect(self._on_cfg)
         _fb.addRow("\u03c3\u03bb (yr\u207b\u00b9):", self._le_lambdaErr)
 
-        # External-error box: intercalibrated (default, \u03bb cancels) vs Min full external
+        # External-error box: intercalibrated (default) vs Min full external
         self._cb_externalMode = QComboBox()
         self._cb_externalMode.addItems(['Intercalibrated external', 'Full external'])
         self._cb_externalMode.setToolTip(
             "Which external uncertainty to report:\n"
-            " Intercalibrated external (default, correct): for Kuiper, Rivera and\n"
-            "          Phillips the age is anchored on the astronomical tephra through\n"
-            "          R(FCs/A); external = R(FCs/A) + anchor age + \u03bb, and \u03bb nearly\n"
-            "          cancels. The right number for essentially all work, INCLUDING\n"
-            "          comparison with U-Pb.\n"
-            " Full external, Min et al. (2000): carry the full physical \u2074\u2070K decay\n"
-            "          scheme (~1\u20132.5%), no cancellation. For an independent test or a\n"
-            "          conservative report; not required just to compare against U-Pb.")
+            " Intercalibrated external (default): the monitor age with the decay\n"
+            "          constant it was calibrated with. For Kuiper, Rivera and\n"
+            "          Phillips it comes from R(FCs/A), the anchor age and λ.\n"
+            "          This is also the error to use against U-Pb ages.\n"
+            " Full external (Min et al., 2000): the uncertainty of the two partial\n"
+            "          ⁴⁰K decay constants (about 1.2% of the age, 1σ) in place of the λ term,\n"
+            "          for an independent test of the ⁴⁰K clock.")
         self._cb_externalMode.setCurrentIndex(1 if self.cfg.get('fullSystematics') else 0)
         self._cb_externalMode.activated.connect(self._on_cfg)
 
@@ -4580,8 +4654,8 @@ class PlateauWindow(QMainWindow):
         self._rb_gls.setToolTip(
             "Generalised least squares + ML overdispersion (Vermeesch 2015 \u00a713):\n"
             "combine per-session plateau ages using the shared-J / FCs-\u03bb covariance,\n"
-            "with the real cross-hole J correlation from a loaded .jflux (\u03c1 between\n"
-            "0 and 1). Correct when stacking across different holes/disks.\n"
+            "with the J correlation between holes from a loaded .jflux (\u03c1 between\n"
+            "0 and 1).\n"
             "Both options use the same covariance; this one changes the estimator.\n"
             "Preferable when the aliquots scatter beyond their errors and those\n"
             "errors differ widely: ω evens out the weights.")
@@ -4651,8 +4725,8 @@ class PlateauWindow(QMainWindow):
         rv.addWidget(self._lbl_status)
         root.addWidget(right)
 
-
     # ── helpers ───────────────────────────────────────────────────────────────
+
     @staticmethod
     def _act(label, slot, shortcut=None):
         a = QAction(label)
@@ -4690,8 +4764,7 @@ class PlateauWindow(QMainWindow):
             'external error). After combining many steps/aliquots the analytical '
             'slice shrinks, so the shared calibration systematic tends to dominate; '
             'with an astronomically anchored calibration the decay-constant slice '
-            'is small because λ nearly cancels between the sample and the anchor '
-            'tephra.')
+            'is small.')
         note.setWordWrap(True)
         note.setStyleSheet('color:#666; font-size:10px;')
         lay.addWidget(note)
@@ -4759,16 +4832,16 @@ class PlateauWindow(QMainWindow):
                              f"SEM × √MSWD × t₉₅(n−1)/2 "
                              f"= × {math.sqrt(mswd):.2f} × {tfac:.2f}/2")
             else:
-                scale_txt = (f"in-tolerance (p = {prob*100:.1f}% ≥ {p_cut:.0f}%): "
-                             f"no expansion, SEM used as-is")
+                scale_txt = (f"within the cutoff (p = {prob*100:.1f}% ≥ {p_cut:.0f}%): "
+                             f"no expansion, SEM used as it is")
         elif errMode == 'sem_mswd_2s':
             crit = mswd_critical(n) if n else float('inf')
             if n and n > 1 and mswd > crit:
                 scale_txt = (f"overdispersed (MSWD {mswd:.2f} &gt; 95% limit {crit:.2f} "
                              f"at n={n}): SEM × √MSWD = × {math.sqrt(mswd):.2f}")
             else:
-                scale_txt = (f"in-tolerance (MSWD {mswd:.2f} ≤ 95% limit "
-                             f"{crit:.2f} at n={n}): SEM used as-is")
+                scale_txt = (f"within the limit (MSWD {mswd:.2f} ≤ 95% limit "
+                             f"{crit:.2f} at n={n}): SEM used as it is")
         else:
             scale_txt = "plain SEM (MSWD scaling off)"
 
@@ -4813,7 +4886,7 @@ class PlateauWindow(QMainWindow):
           <table cellspacing='0' cellpadding='3'>
             <tr><td colspan='2' style='font-weight:bold; color:#444;
                 border-bottom:1px solid #ccc;'>Scatter &amp; scaling</td></tr>
-            <tr><td>Steps combined (n)</td><td align='right'>{n}</td></tr>
+            <tr><td>Analyses combined (n)</td><td align='right'>{n}</td></tr>
             <tr><td>MSWD</td><td align='right'>{mswd:.2f} &nbsp;({cls_txt})</td></tr>
             <tr><td>Fit probability</td><td align='right'>{prob*100:.1f}%</td></tr>
             <tr><td>Raw SEM (1σ)</td><td align='right'>{_pm(sem)} Ma</td></tr>
@@ -4958,7 +5031,8 @@ class PlateauWindow(QMainWindow):
             old_lam=old_lam, old_lam_err=old_lam_err,
             old_fc_ma=old_fc, old_fc_err_ma=old_fc_err,
             parent=self, can_revert=can_revert,
-            old_mode=old_mode, n_aliquots=n_al)
+            old_mode=old_mode, n_aliquots=n_al,
+            old_monitor=cfg_monitor(eff0 if self._stack_mode else self.cfg)[0])
         result = dlg.exec_()
         if result == QDialog.Rejected:
             return
@@ -4973,10 +5047,13 @@ class PlateauWindow(QMainWindow):
         fc2_err  = p['fc2_err_ma']
         fc2_ext  = p['fc2_external']
         new_mode = p.get('age_mode', old_mode)
+        mon_upd  = p.get('monitor_keys') or {}
 
         status_txt = (f"✓  λ {old_lam*1e10:.4f}→{lam2*1e10:.4f}"
                       f"×10⁻¹⁰,  FC {old_fc:.3f}→{fc2_ma:.3f} Ma"
-                      f",  {_AGEMODE_LABEL.get(new_mode, new_mode)}")
+                      f",  {_AGEMODE_LABEL.get(new_mode, new_mode)}"
+                      + (f",  monitor {mon_upd['monitor']}"
+                         if mon_upd.get('monitor', 'FCs') != 'FCs' else ''))
 
         if self._stack_mode:
             # The stored step ages and per-step J are recast from each
@@ -5000,7 +5077,7 @@ class PlateauWindow(QMainWindow):
                     lambdaYr=lam2, lambdaErrYr=lam2_err,
                     stdAgeMa=fc2_ma, stdAgeErrMa=fc2_err,
                     stdAgeErrType='external' if fc2_ext else 'internal',
-                    **mode_upd)
+                    **mode_upd, **mon_upd)
 
             # Update each flux group's flux_cfg and its panel widgets.
             # Updating the panel text fires textChanged → _on_flux_group_cfg,
@@ -5011,7 +5088,7 @@ class PlateauWindow(QMainWindow):
                 group['flux_cfg'].update(
                     lambdaYr=lam2, lambdaErrYr=lam2_err,
                     stdAgeMa=fc2_ma, stdAgeErrMa=fc2_err,
-                    stdAgeErrType=_ext_str, **mode_upd)
+                    stdAgeErrType=_ext_str, **mode_upd, **mon_upd)
                 panel = group.get('panel')
                 if panel is not None:
                     _cbm = getattr(panel, 'cb_mode', None)
@@ -5035,7 +5112,15 @@ class PlateauWindow(QMainWindow):
             self._global_cfg.update(
                 lambdaYr=lam2, lambdaErrYr=lam2_err,
                 stdAgeMa=fc2_ma, stdAgeErrMa=fc2_err,
-                stdAgeErrType=_ext_str, **mode_upd)
+                stdAgeErrType=_ext_str, **mode_upd, **mon_upd)
+            for group in self._flux_groups:
+                panel = group.get('panel')
+                if panel is not None and getattr(panel, 'le_rStd', None) is not None:
+                    v = group['flux_cfg'].get('rStd')
+                    if v:
+                        panel.le_rStd.blockSignals(True)
+                        panel.le_rStd.setText(f"{from_fcs_r(v, group['flux_cfg']):.8g}")
+                        panel.le_rStd.blockSignals(False)
             self._recompute_all_sessions()
         else:
             j1 = self.cfg.get('jVal', 0.0) or 0.0
@@ -5048,6 +5133,10 @@ class PlateauWindow(QMainWindow):
                       fc2_external=fc2_ext,
                       j1=j1, j1_err=0.0)
             self._sync_settings_after_recalc(rp, self.raw_steps)
+            self.cfg.update(mon_upd)
+            self._le_rStd.blockSignals(True)
+            self._le_rStd.setText(f"{from_fcs_r(self.cfg.get('rStd', 70.0), self.cfg):.8g}")
+            self._le_rStd.blockSignals(False)
             if new_mode != self.cfg.get('ageFluxMode'):
                 for _i in range(self._cb_ageFluxMode.count()):
                     if self._cb_ageFluxMode.itemData(_i) == new_mode:
@@ -5185,11 +5274,11 @@ class PlateauWindow(QMainWindow):
 
         ``flux_hole`` is an (irr, disk, hole) tuple or None. The hole's R (the
         calibration-independent monitor ratio, preferring the value stored in the
-        .jflux) becomes rStd with its relative σ_R, exactly like the probability
-        tool: so the visible R-standard field reflects the flux and the age is
-        driven from r4039 / R. If the flux carries no R (legacy), a re-derived J is
-        used as a fallback. None → unchanged. Single source of truth for both live
-        compute and baking the assignment into a cfg so it round-trips."""
+        .jflux) becomes rStd with its relative σ_R, as in the Age distribution
+        tool, so the R-standard field shows the flux and the age is computed
+        from r4039 / R. A flux without R (older files) gives a re-derived J
+        instead. None → unchanged. Used both for the live computation and to
+        write the assignment into a cfg (_bake_flux_into_cfg)."""
         cfg = dict(base_cfg)
         if flux_hole is not None:
             irr, disk, hole = flux_hole
@@ -5270,14 +5359,10 @@ class PlateauWindow(QMainWindow):
         return (irr, disk, hole) if hole is not None else None
 
     def _bake_flux_into_session(self, si):
-        """Write session ``si``'s matched hole R into its cfg as the R standard.
-
-        Without this the stack's flux dialog was display-only: the assignment
-        lived in _flux_override and lit up the "Matched R" column, but nothing
-        ever reached sess['cfg'], so the ages stayed on whatever rStd the flux
-        group happened to carry.  Baking (as the carousel already does) puts the
-        hole's R in the cfg, which also re-keys the flux groups so sessions on
-        different holes stop sharing one R standard."""
+        """Write session ``si``'s matched hole R into its cfg as the R standard
+        (as the carousel does), so the assignment reaches the ages and the flux
+        groups, which are keyed on the calibration, put sessions on different
+        holes in different groups."""
         if not (0 <= si < len(self._sessions)):
             return
         sess = self._sessions[si]
@@ -5306,6 +5391,32 @@ class PlateauWindow(QMainWindow):
         self._queue_redraw()
 
     # ── Display-scale helper ────────────────────────────────────────────────────
+    def _window_sessions(self, kca, sig_scale, age_dec):
+        """The stack's sessions as drawn in the window: each legend entry
+        carries the aliquot's plateau age ± internal error at the display
+        level, and the ratio panel shows K/Ca when asked."""
+        _af = f".{age_dec}f"
+        names = [sess.get('title', '') for sess in self._sessions
+                 if not sess.get('excluded', False)]
+        pad = dict(zip(names, export.pad_names(names, 7.5)))
+        out = []
+        for sess in self._sessions:
+            s2 = dict(sess)
+            name = sess.get('title', '')
+            p = sess.get('plateau')
+            if p and not sess.get('excluded', False):
+                e = (p.get('e1s_int') or 0.0) * sig_scale
+                s2['legend_label'] = (f"{pad.get(name, name)}"
+                                      f"{p['r']['mean']:{_af}} ± {e:{_af}} Ma")
+            if kca:
+                s2['steps_c'] = _kca_steps(sess.get('steps_c', []))
+            out.append(s2)
+        return out
+
+    def _kca_view(self):
+        """True when the window shows K/Ca instead of Ca/K."""
+        return hasattr(self, '_cb_ratio') and self._cb_ratio.currentData() == 'kca'
+
     def _disp(self):
         """Current display setting as (display_1sigma, sig_scale, sig_lbl).
 
@@ -5327,7 +5438,8 @@ class PlateauWindow(QMainWindow):
         _af = f'.{_age_dec}f'
         self.table.setHorizontalHeaderLabels(
             ['#', 'Pwr', 'Age', f'±{sig_lbl}', '%³⁹Ar',
-             'Ca/K', '%⁴⁰Ar*', '●', '⁴⁰/³⁹ R', f'±R ({sig_lbl})'])
+             'K/Ca' if self._kca_view() else 'Ca/K',
+             '%⁴⁰Ar*', '●', '⁴⁰/³⁹ R', f'±R ({sig_lbl})'])
 
         for i, s in enumerate(self.steps_c):
             status = s.get('status', 'normal')
@@ -5352,7 +5464,8 @@ class PlateauWindow(QMainWindow):
                 f"{s['age']:{_af}}",
                 f"{s['err1s'] * sig_scale:{_af}}",
                 f"{s['pct39Ar']:.1f}",
-                f"{s['caK']:.1f}",
+                ((f"{1.0 / s['caK']:.3g}" if s['caK'] > 0 else '—')
+                 if self._kca_view() else f"{s['caK']:.1f}"),
                 f"{s['pct40']:.1f}",
                 sym,
                 f"{r4039:.4f}"     if r4039     > 0 else '—',
@@ -5408,12 +5521,12 @@ class PlateauWindow(QMainWindow):
             e1s_ana = p.get('e1s_ana', p['e1s_int'])
             e1s_ext = p.get('e1s_ext', p['e1s_int'])
             parts.append(f"Analytical: \u00b1{e1s_ana * sig_scale:{_af}} Ma ({sig_lbl})")
-            parts.append(f"Full external: \u00b1{e1s_ext * sig_scale:{_af}} Ma ({sig_lbl})")
+            parts.append(f"External: \u00b1{e1s_ext * sig_scale:{_af}} Ma ({sig_lbl})")
 
         self._lbl_status.setText("\n".join(parts))
 
-
     # ── Plot ──────────────────────────────────────────────────────────────────
+
     def _do_redraw(self):
         display_1sigma, sig_scale, sig_lbl = self._disp()
         if self._isochron_mode:
@@ -5425,17 +5538,20 @@ class PlateauWindow(QMainWindow):
             c_r_dict, c_e1s_ana, c_e1s_int, c_e1s_ext = self._combined_plateau()
             c_mean = c_r_dict['mean'] if c_r_dict else None
             _age_dec = self._global_cfg.get('ageDec', 2)
+            kca = self._kca_view()
             self.overlay_canvas.redraw(
-                self._sessions, yr,
+                self._window_sessions(kca, sig_scale, _age_dec), yr,
                 global_cfg=self._global_cfg, combined_e1s=c_e1s_int,
                 combined_e1s_ana=c_e1s_ana, combined_e1s_ext=c_e1s_ext,
                 combined_mean=c_mean, combined_r_dict=c_r_dict,
-                display_1sigma=display_1sigma, age_dec=_age_dec)
+                display_1sigma=display_1sigma, age_dec=_age_dec,
+                cak_label='K/Ca' if kca else 'Ca/K',
+                legend_title=f"Plateau age ± {sig_lbl} (internal)")
             if c_e1s_int is not None:
                 _af = f'.{_age_dec}f'
                 self._lbl_stack_errors.setText(
                     f"Analytical: ±{c_e1s_ana * sig_scale:{_af}} Ma ({sig_lbl})\n"
-                    f"Full external: ±{c_e1s_ext * sig_scale:{_af}} Ma ({sig_lbl})")
+                    f"External: ±{c_e1s_ext * sig_scale:{_af}} Ma ({sig_lbl})")
             else:
                 self._lbl_stack_errors.setText("")
             self._lbl_status.setText("")
@@ -5444,8 +5560,11 @@ class PlateauWindow(QMainWindow):
         else:
             age_range = self._compute_age_range()
             self.canvas._lam = self.cfg.get('lambdaYr', LAMBDA_DEFAULT)
+            kca = self._kca_view()
+            self.canvas._cak_label = 'K/Ca' if kca else 'Ca/K'
             self.canvas.redraw(
-                self.steps_c, self.plateau, self.pset,
+                _kca_steps(self.steps_c) if kca else self.steps_c,
+                self.plateau, self.pset,
                 age_range, self.title_edit.text(),
                 display_1sigma=display_1sigma, age_dec=self.cfg.get('ageDec', 2))
             self._refresh_table()
@@ -5701,8 +5820,9 @@ class PlateauWindow(QMainWindow):
             w.setVisible(is_j)
         for w in (self._lbl_rStd, self._le_rStd, self._lbl_rStdErr, self._rStdErr_w):
             w.setVisible(is_ratio and not is_j)
-        # FC age and error-type rows: visible in imported + ratio_R_std;
-        # hidden in ratio_J where J already subsumes the FC/λ systematics.
+        # FC age rows: visible in imported + ratio_R_std; hidden in ratio_J,
+        # where the typed J sets the ages.  The FC age and its error still set
+        # the external tier there (Calibration… changes them).
         for w in (self._lbl_stdAge, self._le_stdAge,
                   self._lbl_stdAgeErr, self._le_stdAgeErr):
             w.setVisible(not is_j)
@@ -5765,7 +5885,7 @@ class PlateauWindow(QMainWindow):
             ageFluxMode   = self._cb_ageFluxMode.currentData(),
             jVal          = _f(self._le_jVal,      1e-3),
             jErrPct       = _f(self._le_jErrPct,   0.0),
-            rStd          = _f(self._le_rStd,      70.0),
+            rStd          = to_fcs_r(_f(self._le_rStd, 70.0), self.cfg),
             rStdErrPct    = _f(self._le_rStdErr,   0.10),
             rStdErrMode   = self._cb_rStdErrMode.currentData(),
             stdAgeMa      = _f(self._le_stdAge,     STD_AGE_DEFAULT),
@@ -5787,12 +5907,16 @@ class PlateauWindow(QMainWindow):
         if sndr is getattr(self, '_cb_externalMode', None) and self.cfg.get('fullSystematics'):
             _w = full_systematics_warning(self.cfg)
             if _w:
-                QMessageBox.information(self, "Full external: heads up", _w)
+                QMessageBox.information(self, "Full external", _w)
         # Warn once each time the calibration becomes one of Renne et al.
         _cw = calibration_warning(self.cfg)
         if _cw and _cw != getattr(self, '_calib_warned', ''):
             QMessageBox.information(self, "Calibration", _cw)
         self._calib_warned = _cw
+        _cn = ' '.join(calibration_notes(self.cfg))
+        if _cn and _cn != getattr(self, '_calib_noted', ''):
+            QMessageBox.information(self, "Calibration", _cn)
+        self._calib_noted = _cn
         self._update_flux_ui()
         # Sync plateau detection keys + display to _global_cfg so stack mode uses same values
         for _k in ('minPct', 'minN', 'pCut', 'errMode', 'ageDec', 'fullSystematics'):
@@ -5829,7 +5953,7 @@ class PlateauWindow(QMainWindow):
     def import_file(self):
         path, _ = dfold.get_open_file_name(
             self, "Import Data", "",
-            "Excel / CSV (*.xlsx *.xls *.csv);;All files (*)")
+            "Excel / CSV (*.xlsx *.csv);;All files (*)")
         if not path:
             return
         try:
@@ -5994,7 +6118,7 @@ class PlateauWindow(QMainWindow):
             (self._le_lambdaErr, f"{_cfr_lam_err:.6e}"),
             (self._le_stdAge,    f"{_cfr_fc_ma:.4f}"),
             (self._le_stdAgeErr, f"{_cfr_fc_err:.4f}"),
-            (self._le_rStd,      f"{_cfr_r_std:.6g}"),
+            (self._le_rStd,      f"{from_fcs_r(_cfr_r_std, self.cfg):.6g}"),
         ]:
             _le.blockSignals(True)
             _le.setText(_txt)
@@ -6289,8 +6413,9 @@ class PlateauWindow(QMainWindow):
                     f"The ages recomputed from the 40Ar/39Ar ratios do not match\n"
                     f"the imported ages stored in this file.\n\n"
                     f"{info}\n\n"
-                    f"The imported ages will be used for now.  Use Calibration… to\n"
-                    f"recalculate to consistent constants if needed."
+                    f"The ages shown are computed from the ratios with these\n"
+                    f"constants. Correct them with Calibration…, or choose\n"
+                    f"Imported ages there to use the ages stored in the file."
                 )
         else:
             # Multiple files, activate carousel; each aliquot keeps its own cfg/J
@@ -6314,7 +6439,6 @@ class PlateauWindow(QMainWindow):
         for le, key, default in [
             (self._le_jVal,      'jVal',        1e-3),
             (self._le_jErrPct,   'jErrPct',     0.0),
-            (self._le_rStd,      'rStd',        70.0),
             (self._le_rStdErr,   'rStdErrPct',  0.10),
             (self._le_stdAge,    'stdAgeMa',    STD_AGE_DEFAULT),
             (self._le_stdAgeErr, 'stdAgeErrMa', STD_AGE_ERR),
@@ -6325,6 +6449,9 @@ class PlateauWindow(QMainWindow):
             v = cfg.get(key, default)
             le.setText(f'{v:.8g}' if isinstance(v, float) else str(v))
             le.blockSignals(False)
+        self._le_rStd.blockSignals(True)
+        self._le_rStd.setText(f"{from_fcs_r(float(cfg.get('rStd', 70.0) or 70.0), cfg):.8g}")
+        self._le_rStd.blockSignals(False)
         for cb, key in [(self._cb_errMode,     'errMode'),
                         (self._cb_ageFluxMode, 'ageFluxMode'),
                         (self._cb_rStdErrMode, 'rStdErrMode')]:
@@ -6499,10 +6626,12 @@ class PlateauWindow(QMainWindow):
         n = len(self._carousel)
         if n < 2:
             return
-        calib = {k: self.cfg[k] for k in self._CALIB_KEYS if k in self.cfg}
+        calib = {k: self.cfg[k] for k in self._CALIB_KEYS + tuple(MONITOR_KEYS)
+                 if k in self.cfg}
         for i, slot in enumerate(self._carousel):
             if i != self._carousel_idx:
                 slot['cfg'].update(calib)
+                self._slot_refresh_plateau(slot)
         if quiet:
             return
         QMessageBox.information(
@@ -6525,12 +6654,56 @@ class PlateauWindow(QMainWindow):
         hole = next((h for h, ix in fx['idx'].items() if ix == idx), None)
         return (irr, disk, hole) if hole is not None else None
 
+    # the typed flux of an aliquot: how J is given, its value and error
+    _TYPED_FLUX_KEYS = ('ageFluxMode', 'jVal', 'jErrPct', 'jForce',
+                        'rStd', 'rStdErrPct', 'rStdErrMode') + tuple(MONITOR_KEYS)
+
+    def _slot_refresh_plateau(self, slot):
+        """Recompute a slot's plateau after its cfg changed, so a slot that is
+        not opened again is still saved and stacked with its new ages."""
+        steps = slot.get('raw_steps')
+        if steps:
+            eff = self._cfg_with_flux(slot['cfg'], slot.get('flux_hole'))
+            slot['plateau'] = find_plateau(add_cumulative(
+                _compute_steps_with_age_mode(steps, eff)), eff)
+
     def _carousel_apply_flux_to_all(self):
-        """Assign the loaded disk flux to every carousel aliquot, matched by each
-        aliquot's identity (disk_id / hole_id), and recompute all ages.  Mirrors
-        the Age distribution tool's 'Auto-match all' but for the plateau carousel."""
+        """Give every carousel aliquot the open aliquot's flux.
+
+        If the open aliquot takes its J from a hole of the loaded disk flux,
+        every aliquot is matched to its own hole by identity (disk_id /
+        hole_id), as the Age distribution tool's 'Auto-match all' does.  If it
+        uses a typed J or R standard, that value and its error are copied to
+        every aliquot, and any disk-flux assignment of theirs is removed."""
         n = len(self._carousel)
         if n < 2:
+            return
+        if getattr(self, '_sp_flux_hole', None) is None:
+            self._carousel_save_current()
+            flux = {k: self.cfg[k] for k in self._TYPED_FLUX_KEYS if k in self.cfg}
+            for i, slot in enumerate(self._carousel):
+                if i == self._carousel_idx:
+                    continue
+                self._bake_flux_into_cfg(slot['cfg'], None, slot)  # undo a disk-flux bake
+                slot['flux_hole'] = None
+                for k in self._TYPED_FLUX_KEYS:
+                    if k in flux:
+                        slot['cfg'][k] = flux[k]
+                    else:
+                        slot['cfg'].pop(k, None)
+                self._slot_refresh_plateau(slot)
+            self._carousel_load_slot(self._carousel_idx)
+            self._carousel_refresh_ui()
+            if self.cfg.get('ageFluxMode') == 'imported':
+                what = 'the imported J of each aliquot'
+            elif self.cfg.get('ageFluxMode') == 'ratio_J':
+                what = f"J = {self.cfg.get('jVal', 0):.8g} ± {self.cfg.get('jErrPct', 0):.4g} %"
+            else:
+                unit = ' %' if self.cfg.get('rStdErrMode', 'pct') == 'pct' else ''
+                what = (f"R standard = {self.cfg.get('rStd', 0):.8g} "
+                        f"± {self.cfg.get('rStdErrPct', 0):.4g}{unit} (1σ)")
+            QMessageBox.information(self, 'Applied',
+                                    f'Typed flux applied to all {n} aliquots: {what}.')
             return
         if not self._disk_flux:
             QMessageBox.warning(
@@ -6616,6 +6789,9 @@ class PlateauWindow(QMainWindow):
                 ) if k in sess['cfg']}
                 title = (sess['title']
                          or os.path.splitext(os.path.basename(path))[0])
+                # the file's disk-flux registry and hole, as Load does
+                self._restore_disk_flux(data.get('disk_flux', {}))
+                _fh = data.get('flux_hole')
                 self._carousel.append({
                     'title':          title,
                     'orig_title':     sess.get('orig_title') or title,
@@ -6624,6 +6800,7 @@ class PlateauWindow(QMainWindow):
                     'orig_raw_steps': copy.deepcopy(raw_steps),
                     'orig_calib_cfg': orig_cfg,
                     'plateau':        None,
+                    'flux_hole':      tuple(_fh) if _fh else None,
                 })
             except Exception as e:
                 QMessageBox.critical(self, "Load Error",
@@ -6746,12 +6923,10 @@ class PlateauWindow(QMainWindow):
         auto detection.
 
         Steps live in three places depending on the mode: the live window
-        (self.raw_steps), the carousel slots and the stack sessions.  Resetting
-        only the visible one left every other aliquot silently carrying its
-        exclusions and forced brackets, which is exactly what you cannot see
-        while looking at one spectrum.  'forced' is cleared too: a manual
-        plateau is a selection, and leaving it would stop auto-detection from
-        running at all (find_plateau short-circuits on forced steps).
+        (self.raw_steps), the carousel slots and the stack sessions; all are
+        reset, not only the aliquot shown.  'forced' is cleared too: a manual
+        plateau is a selection, and find_plateau uses the forced steps instead
+        of searching while any are set.
         """
         holders = []
         if self.raw_steps:
@@ -6937,13 +7112,13 @@ class PlateauWindow(QMainWindow):
 
     # ── Export ────────────────────────────────────────────────────────────────
     # Panels and switches offered by the export dialog.  Declared here, drawn
-    # by _export_render below; figure_export.py knows nothing about them.
+    # by _export_render below; export.py knows nothing about them.
     def _export_panels(self):
         return [
-            figexp.Panel('p40', '% \u2074\u2070Ar*',      on=True,  weight=1.0),
-            figexp.Panel('cak', 'Ca/K  (or K/Ca)',          on=True,  weight=1.0),
-            figexp.Panel('age', 'Age spectrum',             on=True,  weight=2.8),
-        ] + ([figexp.Panel('iso', 'Isochrons (under the spectrum)', on=True,
+            export.Panel('p40', '% \u2074\u2070Ar*',      on=True,  weight=1.0),
+            export.Panel('cak', 'Ca/K  (or K/Ca)',          on=True,  weight=1.0),
+            export.Panel('age', 'Age spectrum',             on=True,  weight=2.8),
+        ] + ([export.Panel('iso', 'Isochrons (under the spectrum)', on=True,
                            weight=2.6)] if self._stack_mode else [])
 
     @staticmethod
@@ -6963,30 +7138,30 @@ class PlateauWindow(QMainWindow):
     def _layout_options():
         L = 'Layout (spacing)'
         return [
-            figexp.Option('iso_place', 'Isochrons are', 'choice', group=L,
+            export.Option('iso_place', 'Isochrons are', 'choice', group=L,
                           values=[('below', 'Below the spectrum'),
                                   ('above', 'Above the spectrum'),
                                   ('right', 'To the right (stacked, tall)')],
                           tip='To the right puts the inverse isochron over the '
                               'normal one in a column beside the spectrum; use '
                               'a wide page for it.'),
-            figexp.Option('iso_width', 'Right column width', 'float', default=0.85,
+            export.Option('iso_width', 'Right column width', 'float', default=0.85,
                           lo=0.3, hi=2.0, step=0.05, group=L,
                           depends=('iso_place', 'right'),
                           tip='Width of the isochron column relative to the '
                               'spectrum.'),
-            figexp.Option('gap_side', 'Space beside the spectrum', 'float',
+            export.Option('gap_side', 'Space beside the spectrum', 'float',
                           default=0.40, lo=0.1, hi=1.0, step=0.05, group=L,
                           depends=('iso_place', 'right')),
-            figexp.Option('gap_spec', 'Between spectrum panels', 'float', default=0.06,
+            export.Option('gap_spec', 'Between spectrum panels', 'float', default=0.06,
                           lo=0.0, hi=0.5, step=0.02, group=L,
                           tip='Space between the % 40Ar*, Ca/K and age panels, '
                               'as a fraction of a panel height.'),
-            figexp.Option('gap_iso', 'Above the isochrons', 'float', default=0.40,
+            export.Option('gap_iso', 'Above the isochrons', 'float', default=0.40,
                           lo=0.1, hi=1.5, step=0.05, group=L,
                           tip='Space between the spectrum (with its axis title) '
                               'and the isochrons.'),
-            figexp.Option('iso_pair_gap', 'Between the two isochrons', 'float',
+            export.Option('iso_pair_gap', 'Between the two isochrons', 'float',
                           default=0.18, lo=0.05, hi=0.5, step=0.01, group=L,
                           tip='Space between the inverse and the normal '
                               'isochron, as a fraction of their combined width.'),
@@ -7007,22 +7182,25 @@ class PlateauWindow(QMainWindow):
         """Switches offered by the export dialog, grouped into boxes."""
         yr = self._compute_age_range()
         opts = [
-            figexp.Option('cak_mode', 'Ratio panel', 'choice',
+            export.Option('cak_mode', 'Ratio panel', 'choice',
+                          default='kca' if self._kca_view() else 'cak',
                           values=[('cak', 'Ca/K'), ('kca', 'K/Ca')],
-                          tip='K/Ca plots 1/(Ca/K); the error is converted with it.'),
-            figexp.Option('show_title', 'Title', 'bool', True),
-            figexp.Option('show_err_box', 'Error box', 'bool', True,
-                          tip='The analytical / full-external note in the corner.'),
+                          tip='K/Ca plots 1/(Ca/K); the error box is the image of '
+                              'the Ca/K error, and steps with Ca/K ≤ 0 are left out.'),
+            export.Option('show_title', 'Title', 'bool', True),
+            export.Option('show_err_box', 'Error box', 'bool', True,
+                          tip='The analytical / external note in the corner.'),
         ]
         if self._stack_mode:
             opts += [
-                figexp.Option('show_bracket', 'Combined age label', 'bool', True),
-                figexp.Option('bracket_at', 'Line at (Ma)', 'text', placeholder='auto',
+                export.Option('show_bracket', 'Combined age label', 'bool', True),
+                export.Option('bracket_at', 'Line at (Ma)', 'text', placeholder='auto',
                               depends=('show_bracket', True),
                               tip='Age (Ma) the plateau line sits at; type a lower value to bring the line and its label down. Blank = automatic, just above the tallest plateau step. The label always stays inside the panel.'),
-                figexp.Option('show_legend', 'Aliquot legend', 'bool', True),
-                figexp.Option('legend_ages', 'Ages in legend', 'choice',
+                export.Option('show_legend', 'Aliquot legend', 'bool', True),
+                export.Option('legend_ages', 'Ages in legend', 'choice',
                               values=[('off', 'Names only'),
+                                      ('all', 'Plateau age ± analytical / internal / external'),
                                       ('int', 'Plateau age ± internal'),
                                       ('ana', 'Plateau age ± analytical'),
                                       ('ext', 'Plateau age ± external')],
@@ -7033,18 +7211,18 @@ class PlateauWindow(QMainWindow):
             ]
         else:
             opts += [
-                figexp.Option('show_bracket', 'Plateau bracket', 'bool', True),
-                figexp.Option('bracket_at', 'Line at (Ma)', 'text', placeholder='auto',
+                export.Option('show_bracket', 'Plateau bracket', 'bool', True),
+                export.Option('bracket_at', 'Line at (Ma)', 'text', placeholder='auto',
                               depends=('show_bracket', True),
                               tip='Age (Ma) the plateau line sits at; type a lower value to bring the line and its label down. Blank = automatic, just above the tallest plateau step. The label always stays inside the panel.'),
-                figexp.Option('show_step_labels', 'Step labels', 'bool', True),
-                figexp.Option('show_int_age', 'Total-gas age', 'bool', True),
+                export.Option('show_step_labels', 'Step labels', 'bool', True),
+                export.Option('show_int_age', 'Total-gas age', 'bool', True),
             ]
         # names: the figure title, plus one field per aliquot in stack mode
         # Names: the main window's, the experiment names as loaded (before any
         # renaming), or typed.  The fields are always editable and show the
         # chosen names; pick 'Typed below' to put edits in the figure.
-        opts.append(figexp.Option(
+        opts.append(export.Option(
             'names_from', 'Names in the figure', 'choice', group='Names', wide=True,
             values=[('window', 'Main window'),
                     ('raw', 'Experiment names (as loaded, before renaming)'),
@@ -7055,7 +7233,7 @@ class PlateauWindow(QMainWindow):
                    'if renamed since. The fields below show the chosen names; '
                    'edit them, then pick "Typed below" to use your edits.')))
         if self._stack_mode:
-            opts.append(figexp.Option(
+            opts.append(export.Option(
                 'title', 'Title', 'text', group='Names', wide=True,
                 default='Stacked aliquots', placeholder='figure title'))
             # excluded (×) aliquots are not drawn, so they get no field
@@ -7063,7 +7241,7 @@ class PlateauWindow(QMainWindow):
                 if sess.get('excluded', False):
                     continue
                 cur = sess.get('title', f'Aliquot {k + 1}')
-                opts.append(figexp.Option(
+                opts.append(export.Option(
                     f'name_{k}', f'Aliquot {k + 1}', 'text', group='Names', wide=True,
                     default=cur,
                     follows=('names_from', {'window': cur,
@@ -7071,28 +7249,28 @@ class PlateauWindow(QMainWindow):
                     ident=sess.get('orig_title') or cur))
         else:
             cur = self.title_edit.text()
-            opts.append(figexp.Option(
+            opts.append(export.Option(
                 'title', 'Title', 'text', group='Names', wide=True, default=cur,
                 placeholder='figure title',
                 follows=('names_from', {'window': cur,
                                         'raw': self._raw_single_title()})))
         # axis ranges: blank means "as on screen"
         opts += [
-            figexp.Option('x_min', 'X from', 'text', group='Axis ranges',
+            export.Option('x_min', 'X from', 'text', group='Axis ranges',
                           default='0', placeholder='auto'),
-            figexp.Option('x_max', 'to', 'text', group='Axis ranges',
+            export.Option('x_max', 'to', 'text', group='Axis ranges',
                           default='100', placeholder='auto'),
-            figexp.Option('y_min', 'Age from', 'text', group='Axis ranges',
+            export.Option('y_min', 'Age from', 'text', group='Axis ranges',
                           default=f'{yr[0]:.3f}', placeholder='auto'),
-            figexp.Option('y_max', 'to', 'text', group='Axis ranges',
+            export.Option('y_max', 'to', 'text', group='Axis ranges',
                           default=f'{yr[1]:.3f}', placeholder='auto'),
-            figexp.Option('cak_min', 'Ratio from', 'text', group='Axis ranges',
+            export.Option('cak_min', 'Ratio from', 'text', group='Axis ranges',
                           placeholder='auto'),
-            figexp.Option('cak_max', 'to', 'text', group='Axis ranges',
+            export.Option('cak_max', 'to', 'text', group='Axis ranges',
                           placeholder='auto'),
-            figexp.Option('p40_min', '%\u2074\u2070Ar* from', 'text',
+            export.Option('p40_min', '%\u2074\u2070Ar* from', 'text',
                           group='Axis ranges', placeholder='auto'),
-            figexp.Option('p40_max', 'to', 'text', group='Axis ranges',
+            export.Option('p40_max', 'to', 'text', group='Axis ranges',
                           default=(f'{_P40_MAX:g}' if _P40_MAX else ''),
                           placeholder='auto',
                           tip='Steps above this are cut off at the top of the '
@@ -7102,43 +7280,43 @@ class PlateauWindow(QMainWindow):
         # page 1: the isochron as a small window inside the age panel
         I1 = 'Isochron window in the age panel'
         opts += [
-            figexp.Option('iso_inset', 'Show isochron window', 'bool', False,
+            export.Option('iso_inset', 'Show isochron window', 'bool', False,
                           group=I1,
                           tip='A small isochron inside the age spectrum. '
                               'Independent of page 2.'),
-            figexp.Option('iso_inset_type', 'Diagram', 'choice', group=I1,
+            export.Option('iso_inset_type', 'Diagram', 'choice', group=I1,
                           values=[('inverse', 'Inverse'), ('normal', 'Normal')],
                           depends=('iso_inset', True)),
-            figexp.Option('iso_x', 'x (%)', 'float', default=58.0,
+            export.Option('iso_x', 'x (%)', 'float', default=58.0,
                           lo=0.0, hi=100.0, step=1.0, group=I1,
                           depends=('iso_inset', True)),
-            figexp.Option('iso_y', 'y (%)', 'float', default=6.0,
+            export.Option('iso_y', 'y (%)', 'float', default=6.0,
                           lo=0.0, hi=100.0, step=1.0, group=I1,
                           depends=('iso_inset', True)),
-            figexp.Option('iso_w', 'Width (%)', 'float', default=38.0,
+            export.Option('iso_w', 'Width (%)', 'float', default=38.0,
                           lo=10.0, hi=95.0, step=1.0, group=I1,
                           depends=('iso_inset', True)),
-            figexp.Option('iso_h', 'Height (%)', 'float', default=38.0,
+            export.Option('iso_h', 'Height (%)', 'float', default=38.0,
                           lo=10.0, hi=95.0, step=1.0, group=I1,
                           depends=('iso_inset', True)),
-            figexp.Option('iso_inset_intercept', 'Intercept marker', 'bool', True,
+            export.Option('iso_inset_intercept', 'Intercept marker', 'bool', True,
                           group=I1, depends=('iso_inset', True),
                           tip='The fitted y-intercept (trapped \u2074\u2070Ar/'
                               '\u00b3\u2076Ar) with its error bar, drawn on the '
                               'y-axis.'),
-            figexp.Option('iso_inset_init', '\u2074\u2070Ar/\u00b3\u2076Ar\u2080 label',
+            export.Option('iso_inset_init', '\u2074\u2070Ar/\u00b3\u2076Ar\u2080 label',
                           'bool', False, group=I1, depends=('iso_inset', True)),
-            figexp.Option('iso_inset_atm', 'Atmospheric reference', 'bool', False,
+            export.Option('iso_inset_atm', 'Atmospheric reference', 'bool', False,
                           group=I1, depends=('iso_inset', True)),
-            figexp.Option('iso_ins_x0', 'x from', 'text', group=I1,
+            export.Option('iso_ins_x0', 'x from', 'text', group=I1,
                           placeholder='auto', depends=('iso_inset', True),
                           tip='Axis ranges of the window only; blank = automatic '
                               '(always reaching the y-intercept).'),
-            figexp.Option('iso_ins_x1', 'to', 'text', group=I1,
+            export.Option('iso_ins_x1', 'to', 'text', group=I1,
                           placeholder='auto', depends=('iso_inset', True)),
-            figexp.Option('iso_ins_y0', 'y from', 'text', group=I1,
+            export.Option('iso_ins_y0', 'y from', 'text', group=I1,
                           placeholder='auto', depends=('iso_inset', True)),
-            figexp.Option('iso_ins_y1', 'to', 'text', group=I1,
+            export.Option('iso_ins_y1', 'to', 'text', group=I1,
                           placeholder='auto', depends=('iso_inset', True)),
         ]
         opts += self._layout_options()
@@ -7148,7 +7326,7 @@ class PlateauWindow(QMainWindow):
         if self._stack_mode:
             k = next((i for i, o in enumerate(iso) if o.id == 'iso_heading_text'),
                      len(iso) - 1) + 1
-            iso.insert(k, figexp.Option(
+            iso.insert(k, export.Option(
                 'iso_legend', 'Aliquot legend on this page', 'bool', False,
                 group='Isochron', page=1,
                 tip='Off: the legend on page 1 serves, the colours are the '
@@ -7161,52 +7339,52 @@ class PlateauWindow(QMainWindow):
         the only page when the window is in isochron mode)."""
         G, GI, GN = 'Isochron', 'Inverse isochron axes', 'Normal isochron axes'
         o = [
-            figexp.Option('iso_type', 'Diagram', 'choice', group=G, page=page,
+            export.Option('iso_type', 'Diagram', 'choice', group=G, page=page,
                           values=[('inverse', 'Inverse  (\u00b3\u2076Ar/\u2074\u2070Ar vs \u00b3\u2079Ar/\u2074\u2070Ar)'),
                                   ('normal',  'Normal  (\u2074\u2070Ar/\u00b3\u2076Ar vs \u00b3\u2079Ar/\u00b3\u2076Ar)'),
                                   ('both',    'Both, side by side')]),
-            figexp.Option('iso_heading', 'Heading', 'choice', group=G, page=page,
+            export.Option('iso_heading', 'Heading', 'choice', group=G, page=page,
                           values=[('sample', 'Sample name'),
                                   ('type', 'Diagram name (Inverse / Normal isochron)'),
                                   ('custom', 'Custom text'),
                                   ('none', 'None')],
                           tip='With both diagrams, each keeps its diagram name '
                               'and the sample name / custom text goes above them.'),
-            figexp.Option('iso_heading_text', 'Heading text', 'text', group=G,
+            export.Option('iso_heading_text', 'Heading text', 'text', group=G,
                           page=page, wide=True, depends=('iso_heading', 'custom')),
-            figexp.Option('iso_stats', 'Stats box', 'bool', True, group=G, page=page),
-            figexp.Option('iso_stats_pos', 'Stats corner', 'choice', group=G,
+            export.Option('iso_stats', 'Stats box', 'bool', True, group=G, page=page),
+            export.Option('iso_stats_pos', 'Stats corner', 'choice', group=G,
                           page=page, depends=('iso_stats', True),
                           values=[('auto', 'Automatic'), ('ul', 'Upper left'),
                                   ('ur', 'Upper right'), ('ll', 'Lower left'),
                                   ('lr', 'Lower right')]),
-            figexp.Option('iso_err_tier', 'Age error shown', 'choice', group=G,
+            export.Option('iso_err_tier', 'Age error shown', 'choice', group=G,
                           page=page, depends=('iso_stats', True),
                           values=[('int', 'Internal (analytical + J)'),
                                   ('ana', 'Analytical only'),
                                   ('ext', 'External (+ calibration)')]),
-            figexp.Option('iso_err_line', 'Analytical / internal / external line',
+            export.Option('iso_err_line', 'Analytical / internal / external line',
                           'bool', True, group=G, page=page,
                           depends=('iso_stats', True),
                           tip='Untick to show only the chosen error in the age '
                               'line, tagged int., ana. or ext.'),
-            figexp.Option('iso_labels', 'Step labels', 'bool', True, group=G,
+            export.Option('iso_labels', 'Step labels', 'bool', True, group=G,
                           page=page),
-            figexp.Option('iso_intercept', 'Intercept marker', 'bool', True,
+            export.Option('iso_intercept', 'Intercept marker', 'bool', True,
                           group=G, page=page,
                           tip='The fitted y-intercept with its error bar: the '
                               'initial \u2074\u2070Ar/\u00b3\u2076Ar of the sample.'),
-            figexp.Option('iso_init', '\u2074\u2070Ar/\u00b3\u2076Ar\u2080 label',
+            export.Option('iso_init', '\u2074\u2070Ar/\u00b3\u2076Ar\u2080 label',
                           'bool', False, group=G, page=page,
                           tip='The trapped \u2074\u2070Ar/\u00b3\u2076Ar from the '
                               'y-intercept as a one-line label; works with the '
                               'statistics box off.'),
-            figexp.Option('iso_atm', 'Atmospheric reference', 'bool', False,
+            export.Option('iso_atm', 'Atmospheric reference', 'bool', False,
                           group=G, page=page,
                           tip='Dashed line at the atmospheric \u2074\u2070Ar/'
                               '\u00b3\u2076Ar of Lee et al. (2006), 298.56; an '
                               'intercept on it means no excess argon.'),
-            figexp.Option('iso_spread', 'Spread of the points', 'bool', False,
+            export.Option('iso_spread', 'Spread of the points', 'bool', False,
                           group=G, page=page,
                           tip='How much of the atmospheric-to-radiogenic range '
                               'the steps cover. A wide spread pins the trapped '
@@ -7216,24 +7394,24 @@ class PlateauWindow(QMainWindow):
         for grp, pre, xl, yl in ((GI, 'iso_inv', '\u00b3\u2079Ar/\u2074\u2070Ar', '\u00b3\u2076Ar/\u2074\u2070Ar'),
                                  (GN, 'iso_nor', '\u00b3\u2079Ar/\u00b3\u2076Ar', '\u2074\u2070Ar/\u00b3\u2076Ar')):
             o += [
-                figexp.Option(f'{pre}_x0', f'{xl} from', 'text', group=grp,
+                export.Option(f'{pre}_x0', f'{xl} from', 'text', group=grp,
                               page=page, placeholder='auto',
                               tip='Blank = automatic (always reaching the '
                                   'y-intercept). Applies to this diagram on '
                                   'its own page; the window in the age panel '
                                   'stays automatic.'),
-                figexp.Option(f'{pre}_x1', 'to', 'text', group=grp, page=page,
+                export.Option(f'{pre}_x1', 'to', 'text', group=grp, page=page,
                               placeholder='auto'),
-                figexp.Option(f'{pre}_y0', f'{yl} from', 'text', group=grp,
+                export.Option(f'{pre}_y0', f'{yl} from', 'text', group=grp,
                               page=page, placeholder='auto'),
-                figexp.Option(f'{pre}_y1', 'to', 'text', group=grp, page=page,
+                export.Option(f'{pre}_y1', 'to', 'text', group=grp, page=page,
                               placeholder='auto'),
             ]
         if page == 1:
             o += [
-                figexp.Option('iso_page', 'As page 2 of the PDF', 'bool', False,
+                export.Option('iso_page', 'As page 2 of the PDF', 'bool', False,
                               group='Export this page', page=page),
-                figexp.Option('iso_file', 'As a separate file', 'bool', False,
+                export.Option('iso_file', 'As a separate file', 'bool', False,
                               group='Export this page', page=page),
             ]
         return o
@@ -7259,15 +7437,7 @@ class PlateauWindow(QMainWindow):
                      else s0 for j, s0 in enumerate(steps)]
         if spec['options'].get('cak_mode') != 'kca':
             return steps
-        out = []
-        for s0 in steps:
-            s1 = dict(s0)
-            cak = s0.get('caK', 0.0)
-            if cak:
-                s1['caK'] = 1.0 / cak
-                s1['err_cak'] = s0.get('err_cak', 0.0) / (cak * cak)
-            out.append(s1)
-        return out
+        return _kca_steps(steps)
 
     def _export_sessions(self, spec):
         """Stack sessions for the export: renamed aliquots, and Ca/K inverted
@@ -7281,7 +7451,7 @@ class PlateauWindow(QMainWindow):
         _shown = [self._export_name(spec['options'], k, sess)
                   for k, sess in enumerate(self._sessions)
                   if not sess.get('excluded', False)]
-        _pad = dict(zip(_shown, figexp.pad_names(_shown, 7.5)))
+        _pad = dict(zip(_shown, export.pad_names(_shown, 7.5)))
         out = []
         shown = 0
         for k, sess in enumerate(self._sessions):
@@ -7293,9 +7463,14 @@ class PlateauWindow(QMainWindow):
                 # legend showed the same colour twice
                 s2['color'] = SAMPLE_COLORS[shown % len(SAMPLE_COLORS)]
                 shown += 1
-            if tier in ('int', 'ana', 'ext'):
+            if tier in ('all', 'int', 'ana', 'ext'):
                 p = sess.get('plateau')
-                if p:
+                if p and tier == 'all':
+                    e = [(p.get(f'e1s_{t}') or 0.0) * sig_scale for t in ('ana', 'int', 'ext')]
+                    s2['legend_label'] = (f"{_pad.get(s2.get('title', ''), s2.get('title', ''))}"
+                                          f"{p['r']['mean']:{_af}} ± "
+                                          f"{e[0]:{_af}}/{e[1]:{_af}}/{e[2]:{_af}} Ma")
+                elif p:
                     e1s = p.get(f'e1s_{tier}', p.get('e1s_int', 0.0))
                     s2['legend_label'] = (f"{_pad.get(s2.get('title', ''), s2.get('title', ''))}"
                                           f"{p['r']['mean']:{_af}} ± "
@@ -7304,15 +7479,7 @@ class PlateauWindow(QMainWindow):
                     s2['legend_label'] = (f"{_pad.get(s2.get('title', ''), s2.get('title', ''))}"
                                           "(no plateau)")
             if kca:
-                steps = []
-                for s0 in sess.get('steps_c', []):
-                    s1 = dict(s0)
-                    cak = s0.get('caK', 0.0)
-                    if cak:
-                        s1['caK'] = 1.0 / cak
-                        s1['err_cak'] = s0.get('err_cak', 0.0) / (cak * cak)
-                    steps.append(s1)
-                s2['steps_c'] = steps
+                s2['steps_c'] = _kca_steps(sess.get('steps_c', []))
             out.append(s2)
         return out
 
@@ -7335,8 +7502,8 @@ class PlateauWindow(QMainWindow):
     def _legend_ages_title(self, opts):
         """Legend heading when plateau ages are listed in it, e.g.
         'Plateau age ± 2σ (internal)'; empty for names only."""
-        tier = {'int': 'internal', 'ana': 'analytical',
-                'ext': 'external'}.get(opts.get('legend_ages', 'off'))
+        tier = {'int': 'internal', 'ana': 'analytical', 'ext': 'external',
+                'all': 'analytical / internal / external'}.get(opts.get('legend_ages', 'off'))
         if not tier:
             return ''
         return f"Plateau age ± {self._disp()[2]} ({tier})"
@@ -7477,7 +7644,7 @@ class PlateauWindow(QMainWindow):
     def _export_render(self, fig, spec):
         """Draw the whole export figure. Called by the dialog and on save."""
         opts = spec['options']
-        layout = [(pid, w) for pid, w in figexp.active_panels(spec)]
+        layout = [(pid, w) for pid, w in export.active_panels(spec)]
         cak_label = 'K/Ca' if opts.get('cak_mode') == 'kca' else 'Ca/K'
         title = opts.get('title', '') if opts.get('show_title', True) else ''
         if opts.get('show_title', True) and not self._stack_mode:
@@ -7611,14 +7778,14 @@ class PlateauWindow(QMainWindow):
             # below everything, centred, instead of under the spectrum only
             if leg_spec.get('legend', 'auto') == 'auto':
                 leg_spec = dict(leg_spec, legend='below')
-            figexp.place_legend(axes['age'], leg_spec,
+            export.place_legend(axes['age'], leg_spec,
                                 span=True, keep_cols=True)
             leg_spec = dict(leg_spec, legend='auto')
         for pid in ('age', 'p40', 'cak'):
             ax = axes.get(pid)
             if ax in fig.axes:
-                figexp.place_legend(ax, leg_spec)
-        figexp.scale_text(fig, spec.get('font_scale', 1.0),
+                export.place_legend(ax, leg_spec)
+        export.scale_text(fig, spec.get('font_scale', 1.0),
                       spec.get('line_scale', 1.0), spec.get('marker_scale', 1.0))
         if ins is not None:
             # last, once the text has its final size
@@ -7707,11 +7874,11 @@ class PlateauWindow(QMainWindow):
                     ax.get_legend().remove()       # one shared legend (below)
             if lspec.get('legend') != 'off' and axs[0].get_legend() is not None:
                 if lspec['legend'] in ('below', 'above'):
-                    figexp.place_legend(axs[0], lspec, span=True)
+                    export.place_legend(axs[0], lspec, span=True)
                 else:
-                    figexp.place_legend(axs[0], lspec)
+                    export.place_legend(axs[0], lspec)
             else:
-                figexp.place_legend(axs[0], lspec)
+                export.place_legend(axs[0], lspec)
             if text:
                 fig.suptitle(text, fontsize=10, fontweight='bold')
             fig.subplots_adjust(left=0.09, right=0.985,
@@ -7723,8 +7890,8 @@ class PlateauWindow(QMainWindow):
             self._draw_isochron_into(ax, spec, title=('' if heading == 'type' else text))
             if heading in ('none', 'custom') and not text:
                 ax.set_title('')
-            figexp.place_legend(ax, spec)
-        figexp.scale_text(fig, spec.get('font_scale', 1.0),
+            export.place_legend(ax, spec)
+        export.scale_text(fig, spec.get('font_scale', 1.0),
                           spec.get('line_scale', 1.0), spec.get('marker_scale', 1.0))
 
     def _sigma_is_1s(self):
@@ -7738,14 +7905,14 @@ class PlateauWindow(QMainWindow):
         """Open the shared export dialog: panels, sizes, text, legend, preview."""
         if self._isochron_mode:
             name = (self.title_edit.text().replace(' ', '_') or 'plateau') + '_isochron'
-            dlg = figexp.FigureExportDialog(
-                self, 'plateau_isochron', [figexp.Panel('iso', 'Isochron', fixed=True)],
+            dlg = export.FigureExportDialog(
+                self, 'plateau_isochron', [export.Panel('iso', 'Isochron', fixed=True)],
                 self._isochron_page_options(page=0),
                 self._export_render_isochron_only, default_name=name)
         else:
             base = 'stacked_overlay' if self._stack_mode else \
                 (self.title_edit.text().replace(' ', '_') or 'plateau')
-            dlg = figexp.FigureExportDialog(
+            dlg = export.FigureExportDialog(
                 self, 'plateau_stack' if self._stack_mode else 'plateau',
                 self._export_panels(), self._export_options(),
                 self._export_render, default_name=base,
@@ -7760,10 +7927,10 @@ class PlateauWindow(QMainWindow):
     # ── Export every sample ──────────────────────────────────────────────────
     def _batch_panels(self):
         return [
-            figexp.Panel('p40', '% \u2074\u2070Ar*',   on=True, weight=0.8),
-            figexp.Panel('cak', 'Ca/K  (or K/Ca)',        on=True, weight=0.8),
-            figexp.Panel('age', 'Age spectrum',           on=True, weight=2.8),
-            figexp.Panel('iso', 'Isochrons',              on=True, weight=2.6),
+            export.Panel('p40', '% \u2074\u2070Ar*',   on=True, weight=0.8),
+            export.Panel('cak', 'Ca/K  (or K/Ca)',        on=True, weight=0.8),
+            export.Panel('age', 'Age spectrum',           on=True, weight=2.8),
+            export.Panel('iso', 'Isochrons',              on=True, weight=2.6),
         ]
 
     def _batch_options(self):
@@ -7775,14 +7942,14 @@ class PlateauWindow(QMainWindow):
                if not o.id.startswith(('iso_inv_', 'iso_nor_', 'iso_heading'))]
         for k, o in enumerate(iso):
             if o.id == 'iso_type':
-                iso[k] = figexp.Option(
+                iso[k] = export.Option(
                     'iso_type', 'Diagrams', 'choice', group=o.group,
                     values=[('both', 'Inverse and normal, side by side'),
                             ('inverse', 'Inverse only'),
                             ('normal', 'Normal only')])
         out = []
         if n >= 2:
-            out.append(figexp.Option(
+            out.append(export.Option(
                 'samples', 'Samples', 'choice', group='Samples and output',
                 values=[('all', f'All {n} samples'),
                         ('current', 'Current sample only')]
@@ -7790,28 +7957,29 @@ class PlateauWindow(QMainWindow):
                 tip='The preview always shows the sample that is open now '
                     '(in stack mode, the first session).'))
         out += [
-            figexp.Option('batch_one_pdf', 'One PDF, one page per sample', 'bool',
+            export.Option('batch_one_pdf', 'One PDF, one page per sample', 'bool',
                           True, group='Samples and output',
                           tip='Untick to write one file per sample into a folder. '
                               'PNG, SVG, EPS and TIFF always go that way.'),
-            figexp.Option('text_style', 'Text', 'choice', group='Text size',
+            export.Option('text_style', 'Text', 'choice', group='Text size',
                           values=[('displayed', 'As displayed'),
                                   ('big', 'Big text, for small figures in print')],
                           tip='Big text enlarges the numbers, letters, lines and '
                               'points by the factor below, on top of the Text × '
                               'and Lines × above, so they stay readable when '
                               'the figure is reduced to fit a page.'),
-            figexp.Option('big_factor', 'Big text ×', 'float', default=1.6,
+            export.Option('big_factor', 'Big text ×', 'float', default=1.6,
                           lo=1.0, hi=3.0, step=0.1, group='Text size',
                           depends=('text_style', 'big')),
-            figexp.Option('cak_mode', 'Ratio panel', 'choice',
+            export.Option('cak_mode', 'Ratio panel', 'choice',
+                          default='kca' if self._kca_view() else 'cak',
                           values=[('cak', 'Ca/K'), ('kca', 'K/Ca')]),
-            figexp.Option('show_title', 'Title', 'bool', True),
-            figexp.Option('show_err_box', 'Error box', 'bool', True),
-            figexp.Option('show_bracket', 'Plateau bracket', 'bool', True),
-            figexp.Option('show_step_labels', 'Step labels', 'bool', True),
-            figexp.Option('show_int_age', 'Total-gas age', 'bool', True),
-            figexp.Option('red_outside', 'Steps outside the plateau in red', 'bool',
+            export.Option('show_title', 'Title', 'bool', True),
+            export.Option('show_err_box', 'Error box', 'bool', True),
+            export.Option('show_bracket', 'Plateau bracket', 'bool', True),
+            export.Option('show_step_labels', 'Step labels', 'bool', True),
+            export.Option('show_int_age', 'Total-gas age', 'bool', True),
+            export.Option('red_outside', 'Steps outside the plateau in red', 'bool',
                           True),
         ]
         return out + self._layout_options() + iso
@@ -7914,7 +8082,7 @@ class PlateauWindow(QMainWindow):
         pdf = None
         try:
             self._stack_mode = False     # each session is drawn as a single sample
-            with matplotlib.rc_context(figexp.EDITABLE_TEXT):
+            with matplotlib.rc_context(export.EDITABLE_TEXT):
                 if one_pdf:
                     pdf = PdfPages(path)
                 for si, (k, slot) in enumerate(slots):
@@ -7928,10 +8096,10 @@ class PlateauWindow(QMainWindow):
                         no_iso.append(title)
                         s2['panels'] = [dict(p, on=False) if p['id'] == 'iso' else p
                                         for p in spec['panels']]
-                    fig = Figure(figsize=figexp.figsize(s2), facecolor='white')
+                    fig = Figure(figsize=export.figsize(s2), facecolor='white')
                     self._export_render(fig, s2)
                     if pdf is not None:
-                        figexp.settle_legends(fig)
+                        export.settle_legends(fig)
                         pdf.savefig(fig, dpi=int(s2.get('dpi', 300)),
                                     facecolor='white', bbox_inches='tight',
                                     pad_inches=0.05)
@@ -7945,14 +8113,14 @@ class PlateauWindow(QMainWindow):
                             name = f'{base}_{n_}'
                         used.add(name)
                         fp = os.path.join(path, f'{name}.{fmt}')
-                        figexp.save_figure(fig, fp, s2)
+                        export.save_figure(fig, fp, s2)
                         written.append(fp)
                 progress(len(slots), len(slots), '')
         finally:
             if pdf is not None:
                 # the fonts are written when the file is closed, so the
                 # editable-text setting must still be on then
-                with matplotlib.rc_context(figexp.EDITABLE_TEXT):
+                with matplotlib.rc_context(export.EDITABLE_TEXT):
                     pdf.close()
             self._restore_single_state(saved)
         lines = []
@@ -7973,7 +8141,7 @@ class PlateauWindow(QMainWindow):
         elif not self._carousel and not self.raw_steps:
             QMessageBox.information(self, "Export All Samples", "No sessions loaded.")
             return
-        dlg = figexp.FigureExportDialog(
+        dlg = export.FigureExportDialog(
             self, 'plateau_all_samples', self._batch_panels(),
             self._batch_options(), self._export_render_batch,
             default_name='all_samples', batch=self._export_samples_all,
@@ -7989,7 +8157,6 @@ class PlateauWindow(QMainWindow):
         spectrum directly via canvas.redraw(), and saves to PdfPages.  The
         currently displayed slot is restored exactly as found.
         """
-        import copy as _copy
         from matplotlib.backends.backend_pdf import PdfPages
 
         n = len(self._carousel)
@@ -8022,7 +8189,7 @@ class PlateauWindow(QMainWindow):
             return
 
         # ── Snapshot current state (to restore after export) ─────────────────
-        saved_raw       = _copy.deepcopy(self.raw_steps)
+        saved_raw       = copy.deepcopy(self.raw_steps)
         saved_cfg       = self.cfg.copy()
         saved_steps_c   = list(self.steps_c)
         saved_plateau   = self.plateau
@@ -8039,7 +8206,7 @@ class PlateauWindow(QMainWindow):
             with PdfPages(path) as pdf:
                 for i, slot in enumerate(slots_to_export):
                     # Load slot data into instance variables (no Qt widget updates)
-                    self.raw_steps     = _copy.deepcopy(slot['raw_steps'])
+                    self.raw_steps     = copy.deepcopy(slot['raw_steps'])
                     self.cfg           = saved_cfg.copy()   # keep shared UI settings…
                     self.cfg.update(slot['cfg'])            # …then overlay per-slot cfg
                     self._sp_flux_hole = slot.get('flux_hole')  # per-slot flux assignment
@@ -8211,10 +8378,10 @@ class PlateauWindow(QMainWindow):
             return
         default = self.title_edit.text().replace(' ', '_') or 'plateau'
         path, _flt = dfold.get_save_file_name(
-            self, "Export Data", default + '.xlsx', dexp.save_filter())
+            self, "Export Data", default + '.xlsx', export.save_filter())
         if not path:
             return
-        path = dexp.ensure_ext(path, _flt)
+        path = export.ensure_ext(path, _flt)
         slots = None
         if len(self._carousel) > 1:
             box = QMessageBox(self)
@@ -8232,24 +8399,24 @@ class PlateauWindow(QMainWindow):
 
         try:
             import csv
-            _sink = dexp.TableSink(path)
+            _sink = export.TableSink(path)
             with _sink as f:
                 w = csv.writer(f)
                 if slots is None:
                     _entries = [(self.cfg, self.cfg.get('constants'),
-                                 [dexp.step_meta(s) for s in self.steps_c])]
+                                 [export.step_meta(s) for s in self.steps_c])]
                 else:
                     _entries = [({**self.cfg, **sl['cfg']},
                                  sl['cfg'].get('constants'),
-                                 [dexp.step_meta(s) for s in sl['raw_steps']])
+                                 [export.step_meta(s) for s in sl['raw_steps']])
                                 for _k, sl in slots]
-                dexp.write_constants(w, groups=dexp.constants_groups(_entries),
+                export.write_constants(w, groups=export.constants_groups(_entries),
                                      atm=ATM_40_36)
                 _raw_items = []
                 if slots is None:
                     self._csv_write_sample(w)
                     _raw_items.append((self.title_edit.text() or '', self.steps_c,
-                                       [dexp.step_meta(s) for s in self.steps_c],
+                                       [export.step_meta(s) for s in self.steps_c],
                                        self.cfg.get('constants')))
                 else:
                     _saved = self._single_state()
@@ -8260,7 +8427,7 @@ class PlateauWindow(QMainWindow):
                             w.writerow([])      # blank row between samples
                             _raw_items.append((self.title_edit.text() or f'Sample {_k + 1}',
                                                self.steps_c,
-                                               [dexp.step_meta(s) for s in self.steps_c],
+                                               [export.step_meta(s) for s in self.steps_c],
                                                (_slot.get('cfg') or {}).get('constants')))
                     finally:
                         self._restore_single_state(_saved)
@@ -8269,7 +8436,6 @@ class PlateauWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.critical(self, "Export Error", str(exc))
 
-
     def _csv_write_sample(self, w):
         """Step table, plateau, integrated age and isochron results of the
         loaded sample, written to csv writer *w*."""
@@ -8277,7 +8443,7 @@ class PlateauWindow(QMainWindow):
         plat_title = self.title_edit.text() or ''
         plat = self.plateau
         ir = integrated_age(self.steps_c, self.cfg.get('lambdaYr', LAMBDA_DEFAULT))
-        _metas = [dexp.step_meta(s) for s in self.steps_c]
+        _metas = [export.step_meta(s) for s in self.steps_c]
         # The R standard / J in force: the typed values with the assigned
         # disk-flux hole's R overlaid, exactly what the ages were computed from.
         _cfg_e = self._effective_single_cfg()
@@ -8289,7 +8455,7 @@ class PlateauWindow(QMainWindow):
         _mode_lbl = _AGEMODE_LABEL.get(_cfg_e.get('ageFluxMode', 'imported'), 'imported')
         w.writerow([f'STEP DATA, {plat_title}  [Age source: {_mode_lbl}]'])
         w.writerow(['RunID', 'Label', 'Power', 'Run date/time',
-                    'Days since irradiation', *dexp.FLUX_HEADERS,
+                    'Days since irradiation', *export.FLUX_HEADERS,
                     'Age (Ma)', '±1σ Ana (Ma)',
                     '%39Ar', 'K/Ca', '±1σ', '%40Ar*',
                     '40Ar*/39ArK', '±1σ',
@@ -8299,17 +8465,18 @@ class PlateauWindow(QMainWindow):
                     'In plateau', 'Status'])
         for i, s in enumerate(self.steps_c):
             cak = s['caK']
-            if cak and cak != 0:
+            if cak and cak > 0:
                 kca_str   = fsig(1.0 / cak, 5)
-                kca_e_str = fsig(s["err_cak"] / (cak * cak), 3)
+                kca_e_str = (fsig(s['err_cak'] / (cak * cak), 3)
+                             if s.get('err_cak') is not None else '')
             else:
                 kca_str = kca_e_str = ''
             w.writerow([
                 s.get('runID', ''),
                 s['label'],
                 f"{s['power']:.3f}",
-                s.get('run_dt', ''), dexp.fmt_days(_metas[i]),
-                *dexp.flux_cells(_cfg_e, *(_jc or (s.get('j_val'), s.get('j_err'))),
+                s.get('run_dt', ''), export.fmt_days(_metas[i]),
+                *export.flux_cells(_cfg_e, *(_jc or (s.get('j_val'), s.get('j_err'))),
                                  show_r=_show_r_standard(_cfg_e)),
                 f"{s['age']:.8f}",
                 f"{s['err1s']:.8f}",
@@ -8520,9 +8687,9 @@ class PlateauWindow(QMainWindow):
         if is_v:
             # Save the current (WM + √MSWD) errMode so it is restored when switching back.
             self._wm_errMode_saved = self._global_cfg.get('errMode', 'sem_mswd_2s')
-            # Vermeesch always uses sem_mswd_2s: scales each aliquot's per-plateau
-            # uncertainty by √MSWD before GLS weighting; ω then captures only
-            # the residual inter-aliquot scatter by maximum likelihood.
+            # GLS + ML uses sem_mswd_2s here: each aliquot's plateau error is
+            # scaled by √MSWD before the GLS weighting, and ω takes up only the
+            # remaining scatter between aliquots (maximum likelihood).
             _forced = 'sem_mswd_2s'
             self._global_cfg['errMode'] = _forced
             self.cfg['errMode']         = _forced
@@ -8584,6 +8751,11 @@ class PlateauWindow(QMainWindow):
                 continue
             self._disk_flux.update(new)
             loaded += len(new)
+            _mons = {fx.get('monitor', 'FCs') for fx in new.values()}
+            _mn = monitor_mismatch_note(self.cfg, _mons.pop() if len(_mons) == 1 else 'FCs',
+                                        f'the flux in {os.path.basename(p)}')
+            if _mn:
+                QMessageBox.information(self, "Load disk flux", _mn)
         if loaded:
             self._lbl_flux_status.setText(
                 f"{loaded} disk(s) loaded: "
@@ -8606,8 +8778,8 @@ class PlateauWindow(QMainWindow):
         self._flux_no_ratio = set()
         for sess in self._sessions:
             self._stack_recompute(sess)
-        # Reflect the matched flux J in the group panels so the displayed J never
-        # contradicts the J actually used (the screenshot's "discrepancy").
+        # Show the matched flux R / J in the group panels, so the panels show
+        # the values the ages are computed with.
         self._refresh_flux_group_display()
         if hasattr(self, '_stack_refresh_table'):
             self._stack_refresh_table()
@@ -8717,8 +8889,8 @@ class PlateauWindow(QMainWindow):
     def _flux_match_session(self, sess, si=None):
         """Return ((irr,disk_id), hole_idx) for a session, or None.
 
-        A manual override (set via "Assign holes…") wins; otherwise auto-matches
-        by disk_id + hole_id from the session cfg.
+        A hole picked in Disk flux… wins; otherwise auto-matches by
+        disk_id + hole_id from the session cfg.
 
         ``si`` is the session's index in ``self._sessions``.  Pass it whenever
         it is known: ``_flux_override`` is keyed by index, and falling back to
@@ -8747,7 +8919,6 @@ class PlateauWindow(QMainWindow):
         return self._flux_auto_match(cfg.get('disk_id'), cfg.get('hole_id'),
                                      cfg.get('irradiation'))
 
-
     def _stack_systematics(self, used, ages):
         """(standard groups, n × k systematic components) for aliquot ages.
 
@@ -8765,7 +8936,7 @@ class PlateauWindow(QMainWindow):
     def _build_stack_pcorr(self, si_list):
         """NxN J-flux correlation matrix over the given session indices.
 
-        Priority: loaded-flux match -> true cross-hole rho; else the position
+        Priority: loaded-flux match -> the .jflux ρ between the holes; else the position
         identity (arar_math.position_ident: disk, hole, typed J group, then the
         J itself), same -> 1, different -> 0.  The rule itself is
         arar_math.j_correlation, shared with the Age distribution tool so both
@@ -8798,8 +8969,8 @@ class PlateauWindow(QMainWindow):
         A session on a loaded hole (ticked to the shown disk, picked in the
         Hole column, or matched automatically) is aged from that hole's
         monitor ratio R and σ_R (R mode, R standard = hole R), over every
-        cfg-/group-level R or J, also on Imported ages, as in the probability
-        tool.  This is the same overlay the single plateau and the carousel
+        cfg-/group-level R or J, also on Imported ages, as in the Age
+        distribution tool.  This is the same overlay the single plateau and the carousel
         use (_cfg_with_flux).  A legacy flux without R gives the hole's J,
         re-derived for ``cfg``'s calibration.  A session on no loaded hole
         keeps its own R / J, and j_correlation makes it independent of the
@@ -8842,10 +9013,9 @@ class PlateauWindow(QMainWindow):
         """Effective cfg for session si (global cfg overlaid with its flux group,
         then with the R of the disk-flux hole it is on, if any).
 
-        Every age/error consumer (per-session recompute, the n = steps combine's
-        J₁ + Eq.18 tiers, the GLS + ML tiers, and the Stats dialog) reads its J
-        through this one method, so the disk flux is applied identically and
-        consistently everywhere, the mantra: everything from R via one J source.
+        The per-session recompute, the n = steps combination, the GLS + ML
+        tiers and the Stats dialog all read their J through this method, so
+        the disk flux is applied the same way in each.
         """
         eff = self._stored_cfg_for(si)
         if 0 <= si < len(self._sessions):
@@ -8954,7 +9124,7 @@ class PlateauWindow(QMainWindow):
         fb.addRow(lbl_jErrPct, le_jErrPct)
         frame.le_jErrPct = le_jErrPct; frame.lbl_jErrPct = lbl_jErrPct
 
-        le_rStd = QLineEdit(f"{group['flux_cfg'].get('rStd', 70.0):.8g}")
+        le_rStd = QLineEdit(f"{from_fcs_r(group['flux_cfg'].get('rStd', 70.0), group['flux_cfg']):.8g}")
         le_rStd.setPlaceholderText("e.g. 5.753")
         lbl_rStd = QLabel("⁴⁰Ar/³⁹Ar R standard:")
         fb.addRow(lbl_rStd, le_rStd)
@@ -9098,7 +9268,7 @@ class PlateauWindow(QMainWindow):
                     vals = {(round(ov['rStd'], 12), round(ov['rStdErrPct'], 12)) for ov in ovs}
                     fields = (panel.le_rStd, panel.le_rStdErr)
                     if len(vals) == 1:
-                        panel.le_rStd.setText(f"{ovs[0]['rStd']:.8g}")
+                        panel.le_rStd.setText(f"{from_fcs_r(ovs[0]['rStd'], fc):.8g}")
                         panel.le_rStdErr.setText(f"{ovs[0]['rStdErrPct']:.8g}")
                         for _i in range(panel.cb_rErrMode.count()):
                             if panel.cb_rErrMode.itemData(_i) == 'pct':
@@ -9129,7 +9299,7 @@ class PlateauWindow(QMainWindow):
             else:
                 panel.le_jVal.setText(f"{fc.get('jVal', 1e-3):.8g}")
                 panel.le_jErrPct.setText(f"{fc.get('jErrPct', 0.0):.8g}")
-                panel.le_rStd.setText(f"{fc.get('rStd', 70.0):.8g}")
+                panel.le_rStd.setText(f"{from_fcs_r(fc.get('rStd', 70.0), fc):.8g}")
                 panel.le_rStdErr.setText(f"{fc.get('rStdErrPct', 0.10):.8g}")
                 for _i in range(panel.cb_rErrMode.count()):
                     if panel.cb_rErrMode.itemData(_i) == fc.get('rStdErrMode', 'pct'):
@@ -9175,7 +9345,7 @@ class PlateauWindow(QMainWindow):
             jForce        = (bool(fc.get('jForce')) if flux_locked
                              else _manual_mode == 'ratio_J'),
             rStd          = (fc.get('rStd', 70.0) if flux_locked
-                             else _f(panel.le_rStd, 70.0)),
+                             else to_fcs_r(_f(panel.le_rStd, 70.0), fc)),
             rStdErrPct    = (fc.get('rStdErrPct', 0.10) if flux_locked
                              else _f(panel.le_rStdErr, 0.10)),
             rStdErrMode   = (fc.get('rStdErrMode', 'pct') if flux_locked
@@ -9343,6 +9513,8 @@ class PlateauWindow(QMainWindow):
                F_norm = r4039_i * (Ji / J1)
              Error propagation (Koppers Eqs. 1-2):
                s2_Fnorm = (Ji/J1)^2 * [s2_r + r^2 * (s2_J1/J1^2 + s2_Ji/Ji^2)]
+             (here σ(F_norm) keeps the ratio error only; the J errors are
+             carried in step 4, see below)
 
           2. Weighted mean of all normalized ratios (Eq. 9):
                F_bar = sum(Ei*Fi) / sum(Ei)    with Ei = 1/s2_Fnorm
@@ -9357,7 +9529,7 @@ class PlateauWindow(QMainWindow):
              where C = 1 + J1*F_bar
 
         Eq. 18 carries J1's error alone, which is exact when every step shares
-        one J.  For aliquots on different J's this script instead carries each
+        one J.  For aliquots on different J's this tool instead carries each
         aliquot's own J error, once per aliquot (all its steps share it),
         weighted by the aliquot's share of F_bar and correlated between
         aliquots by the same hole / disk ρ as the n = aliquots path.  That
@@ -9479,11 +9651,10 @@ class PlateauWindow(QMainWindow):
                     norm   = Ji / J1 if J1 > 0 else 1.0
                     F_norm = r_val * norm
 
-                    # Koppers (2002): σ(F_norm_i) uses the ratio measurement
-                    # uncertainty only. Ji uncertainties are absorbed into the
-                    # normalisation value (F_norm = R·Ji/J1); they do not enter
-                    # σ(F_norm) or the analytical tier. J1 enters the internal
-                    # tier once, explicitly, via Eq. 18.
+                    # σ(F_norm_i) is the ratio measurement error only: the J
+                    # errors do not enter the weights or the analytical tier;
+                    # they are carried once per aliquot in the internal tier
+                    # below.
                     sF     = norm * sr   # ratio precision only
 
                     F_list.append(F_norm)
@@ -9539,12 +9710,12 @@ class PlateauWindow(QMainWindow):
             rho_J = self._build_stack_pcorr(si_list)
             var_J_yr = float(gJ @ rho_J @ gJ) / (C * lam)**2
 
-            # Internal 1σ: ratio-SEM + J uncertainty (both 1σ).
-            # Koppers (2002): when MSWD>1 "the analytical errors are multiplied by
-            # √MSWD"; the analytical error is the first term of Eq.18, so the
-            # The scaled SEM (sF_scaled) enters the internal/external tiers, while the
-            # J (and λ) systematics are not MSWD-scaled. Using sF_bar here would
-            # under-report internal (and could give internal < analytical).
+            # Internal 1σ: scaled ratio SEM ⊕ the J term (both 1σ).  The
+            # analytical error is the first term of Eq. 18 and is the one
+            # multiplied by √MSWD, so the scaled SEM (sF_scaled) enters the
+            # internal and external tiers; the J (and λ) terms are not
+            # MSWD-scaled.  The unscaled sF_bar here could give internal <
+            # analytical.
             sT_int_ma = math.sqrt((dT_dF * sF_scaled)**2 + var_J_yr) / 1e6
 
             # External 1σ: internal ⊕ the calibration systematic
@@ -9606,8 +9777,8 @@ class PlateauWindow(QMainWindow):
         r['method'] = 'age_space_fallback'
         return r, float(e1s_ana), float(e1s_int), float(e1s_ext)
 
-
     # ── Tree interactions ─────────────────────────────────────────────────────
+
     def _on_tree_name_edited(self, item, column):
         idx = item.data(0, Qt.UserRole)
         if not isinstance(idx, int) or idx < 0 or idx >= len(self._sessions):
@@ -9966,16 +10137,14 @@ class PlateauWindow(QMainWindow):
                         self._sessions[si]['cfg'].update(g['flux_cfg'])
             for si, sess in enumerate(self._sessions):
                 cfg = dict(sess['cfg']); cfg['errScale'] = 2
-                # Persist the computed plateau age + tiers (1σ) and the plateau
-                # step window (pset).  Downstream tools (e.g. the probability
-                # plot) must use this plateau age, recomputing from the saved
-                # steps would wrongly include non-plateau steps, since those are
-                # stored with status 'normal', not 'excluded'.
-                # The J this plateau's mean R was turned into an age with
-                # (group R_std, typed J or an applied flux-hole J) is saved with
-                # it, so a reader that rebuilds ages from R, like the probability
-                # plot, can put aliquots from different positions on one
-                # calibration without shifting any of them.
+                # Save the plateau age + tiers (1σ) and the plateau step window
+                # (pset): the steps outside the plateau are stored with status
+                # 'normal', so a reader (the Age distribution tool) needs the
+                # window to use this plateau.  The J its mean R was turned into
+                # an age with (group R_std, typed J or a flux-hole J) is saved
+                # too, so a reader that rebuilds ages from R can put aliquots
+                # from different positions on one calibration without shifting
+                # any of them.
                 plat_summary = _plateau_summary(sess.get('plateau'),
                                                 self._eff_cfg_for(si))
                 sessions_data.append({
@@ -10133,10 +10302,10 @@ class PlateauWindow(QMainWindow):
             QMessageBox.warning(self, 'No Data', 'No aliquots loaded.')
             return
         path, _flt = dfold.get_save_file_name(
-            self, 'Export Data', 'stacked_data.xlsx', dexp.save_filter())
+            self, 'Export Data', 'stacked_data.xlsx', export.save_filter())
         if not path:
             return
-        path = dexp.ensure_ext(path, _flt)
+        path = export.ensure_ext(path, _flt)
         try:
             import csv
             display_1sigma, sig_scale, sig_lbl = self._disp()
@@ -10146,7 +10315,7 @@ class PlateauWindow(QMainWindow):
             if not _inc:
                 QMessageBox.warning(self, 'No Data', 'No aliquots are included in the stack.')
                 return
-            _sink = dexp.TableSink(path)
+            _sink = export.TableSink(path)
             with _sink as f:
                 w = csv.writer(f)
 
@@ -10154,12 +10323,12 @@ class PlateauWindow(QMainWindow):
                 _raw_items, _entries = [], []
                 for si, sess in _inc:
                     _st = sess.get('steps_c', [])
-                    _ms = [dexp.step_meta(x) for x in _st]
+                    _ms = [export.step_meta(x) for x in _st]
                     _entries.append((self._eff_cfg_for(si),
                                      (sess.get('cfg') or {}).get('constants'), _ms))
                     _raw_items.append((sess.get('title', f'#{si+1}'), _st, _ms,
                                        (sess.get('cfg') or {}).get('constants')))
-                dexp.write_constants(w, groups=dexp.constants_groups(_entries),
+                export.write_constants(w, groups=export.constants_groups(_entries),
                                      atm=ATM_40_36)
                 _sink.set_raw_items(_raw_items)
 
@@ -10194,7 +10363,7 @@ class PlateauWindow(QMainWindow):
                         eff_cfg_s.get('ageFluxMode', 'imported'), 'imported')
                     w.writerow([f'STEP DATA, {title}  [Age source: {_mode_lbl_s}]'])
                     w.writerow(['RunID', 'Label', 'Power', 'Run date/time',
-                                'Days since irradiation', *dexp.FLUX_HEADERS,
+                                'Days since irradiation', *export.FLUX_HEADERS,
                                 'Age (Ma)', '±1σ Ana (Ma)',
                                 '%39Ar', 'K/Ca', '±1σ', '%40Ar*',
                                 '40Ar*/39ArK', '±1σ',
@@ -10204,16 +10373,17 @@ class PlateauWindow(QMainWindow):
                                 'In plateau', 'Status'])
                     for i, s in enumerate(sess.get('steps_c', [])):
                         cak = s['caK']
-                        if cak and cak != 0:
+                        if cak and cak > 0:
                             kca_str   = fsig(1.0 / cak, 5)
-                            kca_e_str = fsig(s["err_cak"] / (cak * cak), 3)
+                            kca_e_str = (fsig(s['err_cak'] / (cak * cak), 3)
+                                         if s.get('err_cak') is not None else '')
                         else:
                             kca_str = kca_e_str = ''
                         w.writerow([
                             s.get('runID', ''),
                             s['label'], f"{s['power']:.3f}",
-                            s.get('run_dt', ''), dexp.fmt_days(dexp.step_meta(s)),
-                            *dexp.flux_cells(eff_cfg_s, *(_jc_s or (s.get('j_val'), s.get('j_err'))),
+                            s.get('run_dt', ''), export.fmt_days(export.step_meta(s)),
+                            *export.flux_cells(eff_cfg_s, *(_jc_s or (s.get('j_val'), s.get('j_err'))),
                                              show_r=_show_r_standard(eff_cfg_s),
                                              r_val=_rv_s, r_err=_re_s),
                             f"{s['age']:.8f}", f"{s['err1s']:.8f}",
@@ -10366,9 +10536,8 @@ class PlateauWindow(QMainWindow):
                             'n', 'MSWD', 'p', f'ω ({sig_lbl} Ma)', 'notes'])
                 _comb_cfg = self._eff_cfg_for(0) if self._sessions else {}
 
-                # Vermeesch row, ω is the key statistic; MSWD/p omitted because
-                # when ω > 0 the model already absorbed the scatter (MSWD > 1 by
-                # construction, p small, both are redundant with ω > 0).
+                # GLS + ML row: ω carries the excess scatter, so MSWD and p are
+                # left blank here (the Stats dialog shows them).
                 _vr, _va, _vi, _vx = _both[METHOD_GLS]
                 if _vr and _vi is not None:
                     _od = _vr.get('overdispersion', 0.0)
@@ -10479,7 +10648,7 @@ class PlateauWindow(QMainWindow):
                              'S_ij = s_i × s_j if same monitor standard, else 0. '
                              'Monitor age and λ systematics are perfectly correlated within a calibration group.'),
                             ('V = A+P+S  (Ma²)', 'V',
-                             'Full external covariance matrix. GLS mean = (1\'V⁻¹1)⁻¹ · 1\'V⁻¹t  (Vermeesch Eq. 92).')]:
+                             'Covariance matrix of the external tier. GLS mean = (1\'V⁻¹1)⁻¹ · 1\'V⁻¹t  (Vermeesch Eq. 92).')]:
                         if _mkey in _mx:
                             w.writerow([_mname, _mdesc])
                             _write_matrix('', _mx[_mkey])

@@ -92,7 +92,7 @@ def combine_shared(ages_yr, ana, flux_same_position, comps_list):
     """Analytical-weight mean with exact shared-term propagation (1 sigma, yr).
 
     ana                : per-age analytical sigma (independent)
-    flux_same_position : per-age fluence sigma, all ages in ONE position (shared)
+    flux_same_position : per-age fluence sigma, all ages in one position (shared)
     comps_list         : per-age dict of signed systematic components (shared)
     """
     w = [1.0 / a**2 for a in ana]
