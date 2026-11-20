@@ -76,7 +76,7 @@ from arar_math import (
     cfg_j_err_frac, r_to_age, rr_from_age, fsig, ff,
     paired_lambda_index, paired_lambda, DEFAULT_STD_AGE_ERR_TYPE,
     external_sigma_array, age_error_budget,
-    full_systematics_warning, calibration_warning, force_light, calibration_group_key,
+    full_systematics_warning, calibration_warning, force_light, no_wheel_on_dropdowns, calibration_group_key,
     internal_sigma_array, systematic_matrix, dt_dlnR, fc_ingrowth, j_correlation, match_flux_hole, flux_hole_matches,
     external_route, DEFAULT_FC_NAME, DEFAULT_LAMBDA_NAME,
     cfg_J, scale_sem, position_ident, read_jflux, serialize_disk_flux,
@@ -85,7 +85,11 @@ from arar_math import (
     METHOD_WM, METHOD_GLS, method_key,
 )
 from flux_dialog import FluxAssignDialog, FluxHost
-from standards import MonitorCombo, monitor_text
+from calibration_dialog import CalibrationDialog
+from standards import MonitorCombo, monitor_text, route_line
+from arar_math import (route_cfg, route_from_cfg, route_text, route_options, custom_route,
+                       monitor_ingrowth, monitor_age, ROUTE_KEYS, set_route, STANDARD_IDS,
+                       reload_standards, sync_route, STANDARDS, flux_hole_rstd)
 from arar_math import (MONITOR_KEYS, to_fcs_r, from_fcs_r, cfg_monitor, calibration_notes,
                        monitor_mismatch_note)
 import export
@@ -579,7 +583,7 @@ def integrated_age(steps_c, lam):
 
 
 def _recalc_ages_in_steps(steps, lam1, fc1_ma, j1_default, lam2, fc2_ma,
-                           fc2_err_ma=0.0):
+                           fc2_err_ma=0.0, ing1=None, ing2=None):
     """Convert step ages from (lam1, fc1_ma) to (lam2, fc2_ma).
 
     Uses the per-step r4039 ratio when available; otherwise back-calculates R
@@ -593,13 +597,17 @@ def _recalc_ages_in_steps(steps, lam1, fc1_ma, j1_default, lam2, fc2_ma,
     the plateau age (find_plateau._compute_tiers → external_sigma_array).
 
     fc2_err_ma only selects the anchored chain for the new FC age (fc_ingrowth);
-    it does not enter err1s.
+    it does not enter err1s.  ing1 and ing2, when given, are the monitor
+    ingrowths e^{λ t_M} − 1 of the old and new calibration (arar_math.
+    monitor_ingrowth), which include the route from the monitor; they replace
+    the two FC ingrowths.
     """
     _MAY = 1e6
     # monitor ingrowth of the old and new calibrations (anchored chain where
     # the calibration has an orbital anchor), so J2 = J1 · denom2 / denom1
-    denom1 = fc_ingrowth(fc1_ma, lam1)
-    denom2 = fc_ingrowth(fc2_ma, lam2, fc2_err_ma if fc2_err_ma else None)
+    denom1 = ing1 if ing1 is not None else fc_ingrowth(fc1_ma, lam1)
+    denom2 = (ing2 if ing2 is not None
+              else fc_ingrowth(fc2_ma, lam2, fc2_err_ma if fc2_err_ma else None))
     if denom1 <= 0:
         return steps
     fc_ratio  = denom2 / denom1
@@ -1171,6 +1179,26 @@ class AgeRecalcDialog(QDialog):
 # Quick calibration dialog
 # --------------------------------------------------------------------------
 
+def _calib_origin(cfg, orig):
+    """Where the constants of the stored ages and J come from, in words."""
+    keys = ('stdAgeMa', 'lambdaYr', 'monitor')
+    same = bool(orig) and all(orig.get(k) == cfg.get(k) for k in keys)
+    if orig and not same:
+        return "Set by the last Calibration…; Revert to original goes back to the file's own."
+    if (cfg.get('constants') or {}).get('file_std_age'):
+        return ("Read from the file: the monitor age and λ of the mass-spectrometer export, "
+                "as the Data converter found them.")
+    return ("Read from the file or session. Change them only if the data were calculated "
+            "with other constants, e.g. ages and a J copied from an older study.")
+
+
+def _recast_j(cfg):
+    """The J the stored ages of steps without a J of their own were calculated
+    with: the flux J of an R mode, else the typed J."""
+    J, _ = cfg_J(cfg)
+    return J if J else (cfg.get('jVal', 0.0) or 0.0)
+
+
 def _match_calibration_name(lam, fc_ma, fc_err_ma):
     """Name of the FC preset matching these constants (with its anchored λ),
     or None if they do not correspond to a known calibration."""
@@ -1182,188 +1210,7 @@ def _match_calibration_name(lam, fc_ma, fc_err_ma):
     return None
 
 
-class _CalibrationDialog(QDialog):
-    """Recalibrate already-loaded steps to a new decay constant / FC standard.
-
-    Shows the current constants (read-only) and a single calibration selector
-    for the target: picking Phillips, Carter, etc. sets the FC age, its error,
-    the external flag and the decay constant that calibration is anchored to.
-    On accept the caller runs _recalc_ages_in_steps and updates cfg.
-
-    REVERT = 42, result code for the "Revert to original" button.
-    """
-
-    REVERT = 42
-
-    def __init__(self, old_lam, old_lam_err, old_fc_ma, old_fc_err_ma, parent=None,
-                 can_revert=False, old_mode='ratio_R_std', n_aliquots=1, old_monitor='FCs'):
-        super().__init__(parent)
-        self.setWindowTitle("Calibration and age source")
-        self.setMinimumWidth(470)
-        layout = QVBoxLayout(self)
-
-        # Age source: where the step ages come from.  Lives here (instead of a
-        # separate drop-down in the settings) so choosing R mode and the
-        # calibration happen in one step, for every aliquot at once.
-        src_box = QGroupBox("Age source")
-        src_lay = QFormLayout(src_box)
-        src_lay.setLabelAlignment(Qt.AlignRight)
-        self._mode_cb = QComboBox()
-        self._mode_cb.addItem("R mode", 'ratio_R_std')
-        self._mode_cb.addItem("R mode (insert J)", 'ratio_J')
-        self._mode_cb.addItem("Imported ages", 'imported')
-        for _i in range(self._mode_cb.count()):
-            if self._mode_cb.itemData(_i) == old_mode:
-                self._mode_cb.setCurrentIndex(_i)
-        self._mode_cb.setToolTip(
-            "R mode: ages from the ⁴⁰Ar*/³⁹ArK ratios and the R standard.\n"
-            "R mode (insert J): the same, with a J value you type or pick.\n"
-            "Imported ages: use the ages stored in the file as they are.")
-        src_lay.addRow("Age source:", self._mode_cb)
-        self._apply_all_cb = QCheckBox(f"Apply to all {n_aliquots} aliquots")
-        self._apply_all_cb.setChecked(True)
-        self._apply_all_cb.setVisible(n_aliquots >= 2)
-        src_lay.addRow("", self._apply_all_cb)
-        layout.addWidget(src_box)
-
-        # Current constants (read-only)
-        old_box = QGroupBox("Current calibration  (from loaded data)")
-        old_lay = QFormLayout(old_box)
-        old_lay.setLabelAlignment(Qt.AlignRight)
-        old_lay.addRow("λ (yr⁻¹):",    QLabel(f"{old_lam:.6e}"))
-        old_lay.addRow("λ ±1σ:",       QLabel(f"{old_lam_err:.4e}"))
-        old_lay.addRow("FC age (Ma):", QLabel(f"{old_fc_ma:.4f}"))
-        old_lay.addRow("FC ±1σ (Ma):", QLabel(f"{old_fc_err_ma:.4f}"))
-        cur = _match_calibration_name(old_lam, old_fc_ma, old_fc_err_ma)
-        if cur:
-            cur_lbl = QLabel(cur)
-            cur_lbl.setStyleSheet("color: #1565c0;")
-            old_lay.addRow("Calibration:", cur_lbl)
-        layout.addWidget(old_box)
-
-        # Target: one selector brings its own anchored λ
-        # (Phillips/Rivera/Kuiper → Min 2000; Renne → own λ; Carter → Carter).
-        tgt_box = QGroupBox("Target calibration  (convert to)")
-        tgt_lay = QFormLayout(tgt_box)
-        tgt_lay.setLabelAlignment(Qt.AlignRight)
-
-        _fcc = _fc_idx(DEFAULT_FC_NAME)
-        # start on the calibration already in force, so confirming without
-        # touching it only changes what you changed (e.g. the age source)
-        if cur:
-            for _k, _row in enumerate(_RECALC_FC_OPTS):
-                if _row[0] == cur:
-                    _fcc = _k
-                    break
-        _fc4 = _RECALC_FC_OPTS[_fcc]
-        self._cust_fc = len(_RECALC_FC_OPTS) - 1
-        self._fc_cb = QComboBox()
-        self._fc_cb.addItems([x[0] for x in _RECALC_FC_OPTS])
-        self._fc_cb.setCurrentIndex(_fcc)
-        self._fc_cb.setToolTip(
-            "Target calibration. The FC monitor age, its error, the external\n"
-            "flag and the decay constant the calibration is anchored to are\n"
-            "all set together. Pick Custom… to enter your own values.")
-
-        self._fc_sp = QDoubleSpinBox()
-        self._fc_sp.setDecimals(3)
-        self._fc_sp.setRange(0.001, 99999.0)
-        self._fc_sp.setValue(_fc4[1])
-        self._fc_sp.setEnabled(False)
-
-        self._fc_err_sp = QDoubleSpinBox()
-        self._fc_err_sp.setDecimals(4)
-        self._fc_err_sp.setRange(0.0, 99.0)
-        self._fc_err_sp.setSuffix(" Ma")
-        self._fc_err_sp.setValue(_fc4[2])
-        self._fc_err_sp.setEnabled(False)
-
-        # Whether the FC error is external comes with each preset (the
-        # intercalibrated / full external choice handles it); the flag is kept
-        # to set stdAgeErrType.
-        self._fc_ext = bool(_fc4[3])
-
-        _pl0 = paired_lambda(_fc4[0])
-        self._lam_le = QLineEdit(f"{_pl0[1]:.6e}")
-        self._lam_le.setEnabled(False)
-        self._lam_err_le = QLineEdit(f"{_pl0[2]:.4e}")
-        self._lam_err_le.setEnabled(False)
-
-        def _fc_ch(idx):
-            custom = (idx == self._cust_fc)
-            for w in (self._fc_sp, self._fc_err_sp,
-                      self._lam_le, self._lam_err_le):
-                w.setEnabled(custom)
-            if not custom:
-                row = _RECALC_FC_OPTS[idx]
-                self._fc_sp.setValue(row[1])
-                self._fc_err_sp.setValue(row[2])
-                self._fc_ext = bool(row[3])
-                pl = paired_lambda(row[0])
-                if pl is not None:
-                    self._lam_le.setText(f"{pl[1]:.6e}")
-                    self._lam_err_le.setText(f"{pl[2]:.4e}")
-        self._fc_cb.currentIndexChanged.connect(_fc_ch)
-
-        self._mon_cb = MonitorCombo()
-        self._mon_cb.set_monitor(old_monitor)
-        self._mon_info = QLabel('')
-        self._mon_info.setWordWrap(True)
-        self._mon_info.setStyleSheet('color:#555; font-size:10px;')
-        tgt_lay.addRow("Monitor:", self._mon_cb)
-        tgt_lay.addRow("Calibration:", self._fc_cb)
-        tgt_lay.addRow("", self._mon_info)
-        tgt_lay.addRow("FC age (Ma):", self._fc_sp)
-        tgt_lay.addRow("FC age ±1σ:", self._fc_err_sp)
-        tgt_lay.addRow("λ (yr⁻¹):", self._lam_le)
-        tgt_lay.addRow("λ ±1σ:", self._lam_err_le)
-        layout.addWidget(tgt_box)
-        for _w in (self._mon_cb, self._fc_cb):
-            _w.currentIndexChanged.connect(self._update_mon_info)
-        self._fc_sp.valueChanged.connect(self._update_mon_info)
-        self._lam_le.textChanged.connect(self._update_mon_info)
-        self._update_mon_info()
-
-        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        bb.accepted.connect(self.accept)
-        bb.rejected.connect(self.reject)
-        if can_revert:
-            btn_revert = QPushButton("Revert to original")
-            btn_revert.setToolTip(
-                "Undo all calibrations: restore the ages and constants\n"
-                "exactly as they were when the file was first loaded.")
-            btn_revert.clicked.connect(lambda: self.done(self.REVERT))
-            bb.addButton(btn_revert, QDialogButtonBox.ResetRole)
-        layout.addWidget(bb)
-
-    def _update_mon_info(self, *_):
-        try:
-            cfg = dict(stdAgeMa=self._fc_sp.value(), stdAgeErrMa=self._fc_err_sp.value(),
-                       lambdaYr=float(self._lam_le.text()), **self._mon_cb.keys())
-            txt = '\n'.join([t for t in [monitor_text(cfg)] + calibration_notes(cfg) if t])
-        except (ValueError, TypeError):
-            txt = ''
-        self._mon_info.setText(txt)
-        self._mon_info.setVisible(bool(txt))
-
-    def get_params(self):
-        try:
-            lam2 = float(self._lam_le.text())
-        except ValueError:
-            lam2 = LAMBDA_DEFAULT
-        try:
-            lam2_err = float(self._lam_err_le.text())
-        except ValueError:
-            lam2_err = 0.0
-        return dict(
-            lam2=lam2, lam2_err=lam2_err,
-            fc2_ma=self._fc_sp.value(),
-            fc2_err_ma=self._fc_err_sp.value(),
-            fc2_external=bool(getattr(self, '_fc_ext', True)),
-            monitor_keys=self._mon_cb.keys(),
-            age_mode=self._mode_cb.currentData(),
-            apply_all=bool(self._apply_all_cb.isChecked()),
-        )
+_CalibrationDialog = CalibrationDialog        # shared with Age distribution
 
 
 # --------------------------------------------------------------------------
@@ -2642,6 +2489,18 @@ class IsochronCanvas(FigureCanvas):
                 bbox=dict(boxstyle='round,pad=0.25', facecolor='white',
                           edgecolor='#ccc', alpha=0.85))
 
+    def _show_atmospheric(self, ax, inverse=True):
+        """With the atmospheric reference on, raise the top of the y axis to
+        it when it lies above (an intercept below atmosphere would otherwise
+        leave the line off the plot)."""
+        atm = getattr(self, '_atm_ratio', None)
+        if not atm or atm <= 0:
+            return
+        y = (1.0 / float(atm)) if inverse else float(atm)
+        lo, hi = ax.get_ylim()
+        if y >= hi:
+            ax.set_ylim(lo, y + 0.06 * (y - lo))
+
     def _draw_atmospheric(self, ax, inverse=True):
         """Mark atmospheric argon on the y axis, when a value is set.
 
@@ -2761,6 +2620,7 @@ class IsochronCanvas(FigureCanvas):
                 margin = (y1 - 0) * 0.08 or y_int * 0.08
                 y1 = max(y1, y_int + margin)
             ax.set_ylim(0.0, y1)
+        self._show_atmospheric(ax, inverse=normal_isochron)
         self._apply_user_lims(ax)
         ax.autoscale(enable=False)   # freeze so regression line won't expand limits
 
@@ -3062,6 +2922,7 @@ class IsochronCanvas(FigureCanvas):
                         y_int2 = fit2['intercept'] + 2 * fit2['intercept_1s'] * _iso_scale(fit2)
                         y1 = max(y1, y_int2 + y1 * 0.08)
                     self.ax.set_ylim(0.0, y1)
+                self._show_atmospheric(self.ax, inverse=show_inv)
                 self._apply_user_lims(self.ax)
                 self.ax.autoscale(enable=False)
 
@@ -4367,6 +4228,8 @@ class PlateauWindow(QMainWindow):
         btn_eimg.setToolTip("Choose which panels go in the figure, how tall each one is, "
                             "the page size, text size and legend, with a live preview.")
         btn_ecsv = QPushButton("Save XLSX / CSV")
+        btn_ecsv.setToolTip("The step data and plateau of the open sample, or of all "
+                            "loaded samples in one file (asked first).")
         for b, fn in [(btn_eimg, self.export_figure),
                       (btn_ecsv, self.export_csv)]:
             b.clicked.connect(fn)
@@ -4442,33 +4305,33 @@ class PlateauWindow(QMainWindow):
         self._rb_disp_2s.toggled.connect(self._queue_redraw)
         _disp_l.addWidget(self._rb_disp_2s)
         _disp_l.addWidget(self._rb_disp_1s)
-        _disp_sep = QFrame()
-        _disp_sep.setFrameShape(QFrame.VLine)
-        _disp_sep.setStyleSheet("color: #ccc;")
-        _disp_sep.setFixedWidth(12)
-        _disp_l.addWidget(_disp_sep)
-        _disp_l.addWidget(QLabel("Decimals:"))
+        _disp_l.addStretch()
+        form.addRow("Display errors as:", _disp_w)
+        _disp_w = QWidget()
+        _disp_l = QHBoxLayout(_disp_w)
+        _disp_l.setContentsMargins(0, 0, 0, 0)
+        _disp_l.setSpacing(12)
         self._sp_ageDec = QSpinBox()
         self._sp_ageDec.setRange(0, 4)
         self._sp_ageDec.setValue(self.cfg.get('ageDec', 2))
-        self._sp_ageDec.setFixedWidth(44)
+        self._sp_ageDec.setFixedWidth(60)
         self._sp_ageDec.setToolTip("Decimal places for age and error values in table, plot, and summary")
         self._sp_ageDec.valueChanged.connect(self._on_cfg)
         _disp_l.addWidget(self._sp_ageDec)
-        _disp_sep2 = QFrame()
-        _disp_sep2.setFrameShape(QFrame.VLine)
-        _disp_sep2.setStyleSheet("color: #ccc;")
-        _disp_sep2.setFixedWidth(12)
-        _disp_l.addWidget(_disp_sep2)
+        _disp_l.addStretch()
+        form.addRow("Decimals:", _disp_w)
         self._cb_ratio = QComboBox()
         self._cb_ratio.addItem("Ca/K", 'cak')
         self._cb_ratio.addItem("K/Ca", 'kca')
         self._cb_ratio.setToolTip("Ratio panel and table column: Ca/K, or K/Ca = 1/(Ca/K). "
                                   "Steps with Ca/K ≤ 0 have no K/Ca and are left out.")
         self._cb_ratio.currentIndexChanged.connect(self._queue_redraw)
-        _disp_l.addWidget(self._cb_ratio)
-        _disp_l.addStretch()
-        form.addRow("Display errors as:", _disp_w)
+        _ratio_w = QWidget()
+        _ratio_l = QHBoxLayout(_ratio_w)
+        _ratio_l.setContentsMargins(0, 0, 0, 0)
+        _ratio_l.addWidget(self._cb_ratio)
+        _ratio_l.addStretch()
+        form.addRow("Ratio:", _ratio_w)
 
         self._lbl_flux_hd = _hd("Age & Flux Calibration")
         form.addRow(self._lbl_flux_hd)
@@ -4509,10 +4372,11 @@ class PlateauWindow(QMainWindow):
         _sp_flux_h.setContentsMargins(0, 0, 0, 0)
         _sp_flux_h.addWidget(self._btn_sp_flux)
         _sp_flux_h.addWidget(self._btn_calibrate)
-        _sp_flux_h.addWidget(self._lbl_sp_flux_state)
         _sp_flux_h.addStretch()
         self._sp_flux_w = _sp_flux_w
-        form.addRow(self._lbl_sp_flux, self._sp_flux_w)
+        form.addRow(self._sp_flux_w)
+        self._lbl_sp_flux_state.setWordWrap(True)
+        form.addRow(self._lbl_sp_flux, self._lbl_sp_flux_state)
         self._refresh_sp_flux_state()
 
         self._lbl_calib_state = QLabel("")
@@ -4521,6 +4385,14 @@ class PlateauWindow(QMainWindow):
         self._lbl_calib_state.setWordWrap(True)
         self._lbl_calib_state.setVisible(False)
         form.addRow("", self._lbl_calib_state)
+        self._lbl_route = QLabel("")
+        self._lbl_route.setWordWrap(True)
+        self._lbl_route.setStyleSheet("color:#555; font-size:9px;")
+        self._lbl_route.setToolTip("The calibration of this sample: the monitor, the R values from "
+                                   "Standards it goes through, and the calibration it ends on. "
+                                   "Change it with Calibration….")
+        self._lbl_route_hdr = QLabel("Calibration:")
+        form.addRow(self._lbl_route_hdr, self._lbl_route)
 
         self._flux_box = QFrame()
         self._flux_box.setFrameStyle(QFrame.StyledPanel)
@@ -4542,7 +4414,7 @@ class PlateauWindow(QMainWindow):
         self._lbl_jErrPct = QLabel("J error (% 1σ):")
         _fb.addRow(self._lbl_jErrPct, self._le_jErrPct)
 
-        self._le_rStd = QLineEdit(f"{from_fcs_r(self.cfg['rStd'], self.cfg):.8g}")
+        self._le_rStd = QLineEdit(f"{from_fcs_r(self.cfg['rStd'], self.cfg):.11g}")
         self._le_rStd.setPlaceholderText("e.g. 70.12345")
         self._le_rStd.textChanged.connect(self._on_cfg)
         self._lbl_rStd = QLabel("\u2074\u2070Ar/\u00b3\u2079Ar R standard:")
@@ -4609,12 +4481,16 @@ class PlateauWindow(QMainWindow):
         form.addRow(self._flux_box)
         # The External-error selector lives on `form` (not inside _flux_box, which
         # is hidden in stack mode) so it is visible and identical in both modes.
-        form.addRow("External error:", self._cb_externalMode)
+        # set in Calibration… (Advanced); kept here, hidden, for the settings
+        self._lbl_externalMode = QLabel("External error:")
+        form.addRow(self._lbl_externalMode, self._cb_externalMode)
+        self._lbl_externalMode.setVisible(False)
+        self._cb_externalMode.setVisible(False)
 
         # "Apply to all", only visible when carousel has 2+ aliquots
         self._btn_calib_apply_all = QPushButton("Apply calibration to all aliquots")
         self._btn_calib_apply_all.setToolTip(
-            "Copy the current J / R_std / monitor age / λ settings to every aliquot in the carousel.")
+            "Give every aliquot this calibration (route, monitor age, λ). Each keeps its own flux.")
         self._btn_calib_apply_all.setVisible(False)
         self._btn_calib_apply_all.clicked.connect(self._carousel_apply_calib_to_all)
         form.addRow("", self._btn_calib_apply_all)
@@ -4663,6 +4539,10 @@ class PlateauWindow(QMainWindow):
         self._rb_wm.toggled.connect(self._on_stack_method)
         _mrow.addWidget(self._rb_wm)
         _mrow.addWidget(self._rb_gls)
+        _mrow.addStretch()
+        _sfs_lay.addLayout(_mrow)
+        _mrow = QHBoxLayout(); _mrow.setSpacing(8)
+        _mrow.addWidget(QLabel("WM basis:"))
         # WM+√MSWD basis: pool step-ratios (n=steps) or per-plateau ages (n=aliquots)
         self._cb_wm_n = QComboBox()
         self._cb_wm_n.addItem("n = steps",    'steps')
@@ -5027,12 +4907,13 @@ class PlateauWindow(QMainWindow):
         else:
             old_mode = self.cfg.get('ageFluxMode', 'ratio_R_std')
             n_al = len(self._carousel) if len(self._carousel) >= 2 else 1
-        dlg = _CalibrationDialog(
-            old_lam=old_lam, old_lam_err=old_lam_err,
-            old_fc_ma=old_fc, old_fc_err_ma=old_fc_err,
-            parent=self, can_revert=can_revert,
-            old_mode=old_mode, n_aliquots=n_al,
-            old_monitor=cfg_monitor(eff0 if self._stack_mode else self.cfg)[0])
+        old_cfg = self._stored_cfg_for(0) if self._stack_mode else dict(self.cfg)
+        orig = (self._sessions[0].get('orig_calib_cfg', {}) if self._stack_mode
+                else getattr(self, '_orig_calib_cfg', None) or {})
+        dlg = _CalibrationDialog(old_cfg, parent=self, can_revert=can_revert,
+                                 old_mode=old_mode, n_aliquots=n_al,
+                                 origin=_calib_origin(old_cfg, orig),
+                                 full_external=bool(self.cfg.get('fullSystematics')))
         result = dlg.exec_()
         if result == QDialog.Rejected:
             return
@@ -5047,13 +4928,20 @@ class PlateauWindow(QMainWindow):
         fc2_err  = p['fc2_err_ma']
         fc2_ext  = p['fc2_external']
         new_mode = p.get('age_mode', old_mode)
-        mon_upd  = p.get('monitor_keys') or {}
+        rkeys    = p['route_keys']
+        _ext_str = 'external' if fc2_ext else 'internal'
+        cal_upd  = dict(lambdaYr=lam2, lambdaErrYr=lam2_err, stdAgeMa=fc2_ma,
+                        stdAgeErrMa=fc2_err, stdAgeErrType=_ext_str)
 
-        status_txt = (f"✓  λ {old_lam*1e10:.4f}→{lam2*1e10:.4f}"
-                      f"×10⁻¹⁰,  FC {old_fc:.3f}→{fc2_ma:.3f} Ma"
-                      f",  {_AGEMODE_LABEL.get(new_mode, new_mode)}"
-                      + (f",  monitor {mon_upd['monitor']}"
-                         if mon_upd.get('monitor', 'FCs') != 'FCs' else ''))
+        def _put(cfg):
+            """New calibration into cfg; the measured monitor ratio is kept."""
+            prod_old = cfg_monitor(cfg)[1]
+            cfg.update(cal_upd)
+            set_route(cfg, rkeys)
+            if cfg.get('rStd'):
+                cfg['rStd'] = cfg['rStd'] * prod_old / cfg_monitor(cfg)[1]
+
+        status_txt = f"✓  {route_text(rkeys)},  {_AGEMODE_LABEL.get(new_mode, new_mode)}"
 
         if self._stack_mode:
             # The stored step ages and per-step J are recast from each
@@ -5066,29 +4954,25 @@ class PlateauWindow(QMainWindow):
                 base   = self._stored_cfg_for(si)
                 steps  = sess.get('raw_steps', [])
                 if steps:
+                    ing1 = (p['ing1'] if si == 0 else
+                            monitor_ingrowth(base, base.get('lambdaYr', old_lam)))
                     _recalc_ages_in_steps(
                         steps, base.get('lambdaYr', old_lam),
                         base.get('stdAgeMa', old_fc),
-                        base.get('jVal', 0.0) or 0.0,
-                        lam2, fc2_ma,
-                        fc2_err_ma=fc2_err)
-                # Always update the raw session cfg for file persistence
-                sess.setdefault('cfg', {}).update(
-                    lambdaYr=lam2, lambdaErrYr=lam2_err,
-                    stdAgeMa=fc2_ma, stdAgeErrMa=fc2_err,
-                    stdAgeErrType='external' if fc2_ext else 'internal',
-                    **mode_upd, **mon_upd)
+                        _recast_j(self._eff_cfg_for(si)),
+                        lam2, fc2_ma, fc2_err_ma=fc2_err,
+                        ing1=ing1, ing2=p['ing2'])
+                c = sess.setdefault('cfg', {})
+                _put(c)
+                c.update(mode_upd)
 
             # Update each flux group's flux_cfg and its panel widgets.
             # Updating the panel text fires textChanged → _on_flux_group_cfg,
             # which writes back to flux_cfg and triggers _stack_recompute for
             # ratio modes, so we block signals and do one explicit recompute.
-            _ext_str = 'external' if fc2_ext else 'internal'
             for gi, group in enumerate(self._flux_groups):
-                group['flux_cfg'].update(
-                    lambdaYr=lam2, lambdaErrYr=lam2_err,
-                    stdAgeMa=fc2_ma, stdAgeErrMa=fc2_err,
-                    stdAgeErrType=_ext_str, **mode_upd, **mon_upd)
+                _put(group['flux_cfg'])
+                group['flux_cfg'].update(mode_upd)
                 panel = group.get('panel')
                 if panel is not None:
                     _cbm = getattr(panel, 'cb_mode', None)
@@ -5106,36 +4990,37 @@ class PlateauWindow(QMainWindow):
                         (panel.le_stdAgeErr, f"{fc2_err:.8g}"),
                     ]:
                         w.blockSignals(True); w.setText(txt); w.blockSignals(False)
-                    panel.std_age_err_type = 'external' if fc2_ext else 'internal'
+                    panel.std_age_err_type = _ext_str
 
             # Update global cfg fallback
-            self._global_cfg.update(
-                lambdaYr=lam2, lambdaErrYr=lam2_err,
-                stdAgeMa=fc2_ma, stdAgeErrMa=fc2_err,
-                stdAgeErrType=_ext_str, **mode_upd, **mon_upd)
+            _put(self._global_cfg)
+            self._global_cfg.update(mode_upd)
             for group in self._flux_groups:
                 panel = group.get('panel')
                 if panel is not None and getattr(panel, 'le_rStd', None) is not None:
                     v = group['flux_cfg'].get('rStd')
                     if v:
                         panel.le_rStd.blockSignals(True)
-                        panel.le_rStd.setText(f"{from_fcs_r(v, group['flux_cfg']):.8g}")
+                        panel.le_rStd.setText(f"{from_fcs_r(v, group['flux_cfg']):.11g}")
                         panel.le_rStd.blockSignals(False)
             self._recompute_all_sessions()
         else:
-            j1 = self.cfg.get('jVal', 0.0) or 0.0
+            j1 = _recast_j(self._effective_single_cfg())
             _recalc_ages_in_steps(
-                self.raw_steps, old_lam, old_fc, j1,
-                lam2, fc2_ma,
-                fc2_err_ma=fc2_err)
+                self.raw_steps, p['lam1'], old_fc, j1,
+                lam2, fc2_ma, fc2_err_ma=fc2_err,
+                ing1=p['ing1'], ing2=p['ing2'])
             rp = dict(lam2=lam2, lam2_err=lam2_err,
                       fc2_ma=fc2_ma, fc2_err_ma=fc2_err,
                       fc2_external=fc2_ext,
                       j1=j1, j1_err=0.0)
+            prod_old = cfg_monitor(self.cfg)[1]
             self._sync_settings_after_recalc(rp, self.raw_steps)
-            self.cfg.update(mon_upd)
+            set_route(self.cfg, rkeys)
+            if self.cfg.get('rStd'):
+                self.cfg['rStd'] = self.cfg['rStd'] * prod_old / cfg_monitor(self.cfg)[1]
             self._le_rStd.blockSignals(True)
-            self._le_rStd.setText(f"{from_fcs_r(self.cfg.get('rStd', 70.0), self.cfg):.8g}")
+            self._le_rStd.setText(f"{from_fcs_r(self.cfg.get('rStd', 70.0), self.cfg):.11g}")
             self._le_rStd.blockSignals(False)
             if new_mode != self.cfg.get('ageFluxMode'):
                 for _i in range(self._cb_ageFluxMode.count()):
@@ -5148,6 +5033,14 @@ class PlateauWindow(QMainWindow):
                 self._carousel_save_current()
                 self._carousel_recalibrate_others(p, old_mode)
 
+        self._warn_flux_monitor(rkeys)
+        if bool(p.get('full_external')) != bool(self.cfg.get('fullSystematics')):
+            self._cb_externalMode.setCurrentIndex(1 if p.get('full_external') else 0)
+            self._on_cfg()
+            _w = full_systematics_warning(self.cfg) if p.get('full_external') else ''
+            if _w:
+                QMessageBox.information(self, "Full external", _w)
+
         if self._stack_mode:
             # Show status at the bottom of each flux-group panel (inside the scroll area)
             for group in self._flux_groups:
@@ -5156,10 +5049,8 @@ class PlateauWindow(QMainWindow):
                     plbl.setText(status_txt)
                     plbl.setVisible(True)
         else:
-            lbl = getattr(self, '_lbl_calib_state', None)
-            if lbl is not None:
-                lbl.setText(status_txt)
-                lbl.setVisible(True)
+            # the route line under Calibration… shows the new calibration
+            self._show_route_line()
 
     def _revert_calibration(self):
         """Restore ages and calibration constants to their state at file load time.
@@ -5285,7 +5176,7 @@ class PlateauWindow(QMainWindow):
             fx = self._disk_flux.get((str(irr), str(disk)))
             if fx is not None and str(hole) in fx['idx']:
                 i = fx['idx'][str(hole)]
-                R = flux_hole_R(fx, i)
+                R = flux_hole_rstd(fx, i, cfg)
                 if R and R > 0:
                     rel = flux_hole_rel(fx, i)
                     relpct = (rel * 100.0 if rel is not None
@@ -5378,6 +5269,7 @@ class PlateauWindow(QMainWindow):
         return self._cfg_with_flux(self.cfg, getattr(self, '_sp_flux_hole', None))
 
     def _update_all(self):
+        self._show_route_line()
         eff          = self._effective_single_cfg()
         steps        = _compute_steps_with_age_mode(self.raw_steps, eff)
         self.steps_c = add_cumulative(steps)
@@ -5902,6 +5794,8 @@ class PlateauWindow(QMainWindow):
             self.cfg['jForce'] = True
         else:
             self.cfg.pop('jForce', None)
+        sync_route(self.cfg)
+        self._show_route_line()
         # Coherence check: warn once when Full external is selected over a
         # jointly calibrated λ (e.g. Carter), which is self-contradictory.
         if sndr is getattr(self, '_cb_externalMode', None) and self.cfg.get('fullSystematics'):
@@ -6006,6 +5900,35 @@ class PlateauWindow(QMainWindow):
             self._le_jErrPct.blockSignals(True)
             self._le_jErrPct.setText(f"{_pct:.6g}")
             self._le_jErrPct.blockSignals(False)
+
+    def _warn_flux_monitor(self, cfg):
+        """Warn when a disk flux in use was measured on another monitor than
+        the one cfg's route starts from (its R values are then read as that
+        monitor's; arar_math.monitor_mismatch_note)."""
+        holes = ([self._stack_flux_hole(si) for si in range(len(self._sessions))]
+                 if self._stack_mode else
+                 [self._sp_flux_hole] + [sl.get('flux_hole') for sl in self._carousel])
+        mons = {}
+        for h in holes:
+            fx = self._disk_flux.get((str(h[0]), str(h[1]))) if h else None
+            if fx is not None:
+                mons.setdefault(fx.get('monitor', 'FCs'), set()).add(str(h[1]))
+        notes = [monitor_mismatch_note(cfg, m, f"the disk flux of disk {', '.join(sorted(d))}")
+                 for m, d in mons.items()]
+        notes = [n for n in notes if n]
+        if notes:
+            QMessageBox.warning(self, "Calibration", '\n\n'.join(notes))
+
+    def _show_route_line(self):
+        lbl = getattr(self, '_lbl_route', None)
+        if lbl is not None:
+            try:
+                r = route_from_cfg(self.cfg)
+                lbl.setText(route_line(r) + (' · full external'
+                                             if self.cfg.get('fullSystematics') else ''))
+                lbl.setToolTip(route_text(r))
+            except (ValueError, KeyError, TypeError):
+                lbl.setText('')
 
     def _sync_settings_after_recalc(self, rp, steps):
         """Update settings-tab widgets to reflect the new calibration after recalculation."""
@@ -6450,7 +6373,7 @@ class PlateauWindow(QMainWindow):
             le.setText(f'{v:.8g}' if isinstance(v, float) else str(v))
             le.blockSignals(False)
         self._le_rStd.blockSignals(True)
-        self._le_rStd.setText(f"{from_fcs_r(float(cfg.get('rStd', 70.0) or 70.0), cfg):.8g}")
+        self._le_rStd.setText(f"{from_fcs_r(float(cfg.get('rStd', 70.0) or 70.0), cfg):.11g}")
         self._le_rStd.blockSignals(False)
         for cb, key in [(self._cb_errMode,     'errMode'),
                         (self._cb_ageFluxMode, 'ageFluxMode'),
@@ -6604,14 +6527,21 @@ class PlateauWindow(QMainWindow):
                 _recalc_ages_in_steps(
                     steps, cfg.get('lambdaYr', LAMBDA_DEFAULT),
                     cfg.get('stdAgeMa', STD_AGE_DEFAULT),
-                    cfg.get('jVal', 0.0) or 0.0,
-                    p['lam2'], p['fc2_ma'], fc2_err_ma=p['fc2_err_ma'])
+                    _recast_j(self._cfg_with_flux(cfg, slot.get('flux_hole'))),
+                    p['lam2'], p['fc2_ma'], fc2_err_ma=p['fc2_err_ma'],
+                    ing1=monitor_ingrowth(cfg, cfg.get('lambdaYr', LAMBDA_DEFAULT)),
+                    ing2=p.get('ing2'))
                 js = [s['j_val'] for s in steps if s.get('j_val', 0.0) > 0]
                 if js:
                     cfg['jVal'] = float(np.median(js))
+            prod_old = cfg_monitor(cfg)[1]
             cfg.update(lambdaYr=p['lam2'], lambdaErrYr=p['lam2_err'],
                        stdAgeMa=p['fc2_ma'], stdAgeErrMa=p['fc2_err_ma'],
                        stdAgeErrType=ext)
+            if p.get('route_keys'):
+                set_route(cfg, p['route_keys'])
+                if cfg.get('rStd'):
+                    cfg['rStd'] = cfg['rStd'] * prod_old / cfg_monitor(cfg)[1]
             if new_mode != old_mode:
                 cfg['ageFluxMode'] = new_mode
                 if new_mode != 'ratio_J':
@@ -6622,21 +6552,29 @@ class PlateauWindow(QMainWindow):
                     _compute_steps_with_age_mode(steps, eff)), eff)
 
     def _carousel_apply_calib_to_all(self, quiet=False):
-        """Copy current calibration settings to every other carousel slot."""
+        """Give every other carousel aliquot the open aliquot's calibration:
+        the route, monitor age and λ with their errors.  The flux is not
+        touched: each aliquot keeps its own J or R standard, its disk-flux
+        hole and its age source, and its ages are recast as the Calibration…
+        dialog's "Apply to all" does."""
         n = len(self._carousel)
         if n < 2:
             return
-        calib = {k: self.cfg[k] for k in self._CALIB_KEYS + tuple(MONITOR_KEYS)
-                 if k in self.cfg}
-        for i, slot in enumerate(self._carousel):
-            if i != self._carousel_idx:
-                slot['cfg'].update(calib)
-                self._slot_refresh_plateau(slot)
+        self._carousel_save_current()
+        c = self.cfg
+        lam = c.get('lambdaYr', LAMBDA_DEFAULT)
+        p = dict(lam2=lam, lam2_err=c.get('lambdaErrYr', 0.0),
+                 fc2_ma=c.get('stdAgeMa', STD_AGE_DEFAULT),
+                 fc2_err_ma=c.get('stdAgeErrMa', 0.0),
+                 fc2_external=c.get('stdAgeErrType') == 'external',
+                 route_keys={k: c[k] for k in ROUTE_KEYS if k in c},
+                 ing2=monitor_ingrowth(c, lam))
+        self._carousel_recalibrate_others(p, c.get('ageFluxMode'))
         if quiet:
             return
         QMessageBox.information(
             self, 'Applied',
-            f'Calibration applied to all {n} aliquots.')
+            f'Calibration applied to all {n} aliquots. Each keeps its own flux.')
 
     def _slot_flux_auto(self, slot):
         """Resolve a carousel slot to (irr, disk, hole) by identity, or None.
@@ -6655,8 +6593,10 @@ class PlateauWindow(QMainWindow):
         return (irr, disk, hole) if hole is not None else None
 
     # the typed flux of an aliquot: how J is given, its value and error
+    # (the R standard is copied as the measured monitor ratio; each aliquot
+    # keeps its own calibration and route)
     _TYPED_FLUX_KEYS = ('ageFluxMode', 'jVal', 'jErrPct', 'jForce',
-                        'rStd', 'rStdErrPct', 'rStdErrMode') + tuple(MONITOR_KEYS)
+                        'rStd', 'rStdErrPct', 'rStdErrMode')
 
     def _slot_refresh_plateau(self, slot):
         """Recompute a slot's plateau after its cfg changed, so a slot that is
@@ -6681,6 +6621,7 @@ class PlateauWindow(QMainWindow):
         if getattr(self, '_sp_flux_hole', None) is None:
             self._carousel_save_current()
             flux = {k: self.cfg[k] for k in self._TYPED_FLUX_KEYS if k in self.cfg}
+            prod = cfg_monitor(self.cfg)[1]
             for i, slot in enumerate(self._carousel):
                 if i == self._carousel_idx:
                     continue
@@ -6691,6 +6632,8 @@ class PlateauWindow(QMainWindow):
                         slot['cfg'][k] = flux[k]
                     else:
                         slot['cfg'].pop(k, None)
+                if slot['cfg'].get('rStd'):
+                    slot['cfg']['rStd'] = flux['rStd'] * prod / cfg_monitor(slot['cfg'])[1]
                 self._slot_refresh_plateau(slot)
             self._carousel_load_slot(self._carousel_idx)
             self._carousel_refresh_ui()
@@ -6700,7 +6643,7 @@ class PlateauWindow(QMainWindow):
                 what = f"J = {self.cfg.get('jVal', 0):.8g} ± {self.cfg.get('jErrPct', 0):.4g} %"
             else:
                 unit = ' %' if self.cfg.get('rStdErrMode', 'pct') == 'pct' else ''
-                what = (f"R standard = {self.cfg.get('rStd', 0):.8g} "
+                what = (f"R standard = {self.cfg.get('rStd', 0):.11g} "
                         f"± {self.cfg.get('rStdErrPct', 0):.4g}{unit} (1σ)")
             QMessageBox.information(self, 'Applied',
                                     f'Typed flux applied to all {n} aliquots: {what}.')
@@ -7060,8 +7003,9 @@ class PlateauWindow(QMainWindow):
 
         # Settings tab: hide single-aliquot flux section, show stack flux groups
         for w in (self._lbl_flux_hd,
-                  self._lbl_sp_flux, self._sp_flux_w, self._lbl_calib_state,
-                  self._flux_box):
+                  self._lbl_sp_flux, self._sp_flux_w, self._lbl_sp_flux_state,
+                  self._lbl_calib_state,
+                  self._lbl_route_hdr, self._lbl_route, self._flux_box):
             w.setVisible(not enabled)
         self._stack_flux_section.setVisible(enabled)
         if enabled:
@@ -7307,7 +7251,7 @@ class PlateauWindow(QMainWindow):
             export.Option('iso_inset_init', '\u2074\u2070Ar/\u00b3\u2076Ar\u2080 label',
                           'bool', False, group=I1, depends=('iso_inset', True)),
             export.Option('iso_inset_atm', 'Atmospheric reference', 'bool', False,
-                          group=I1, depends=('iso_inset', True)),
+                          group=I1, depends=('iso_inset', True), wide=True),
             export.Option('iso_ins_x0', 'x from', 'text', group=I1,
                           placeholder='auto', depends=('iso_inset', True),
                           tip='Axis ranges of the window only; blank = automatic '
@@ -8377,11 +8321,6 @@ class PlateauWindow(QMainWindow):
             QMessageBox.warning(self, "No Data", "No data to export.")
             return
         default = self.title_edit.text().replace(' ', '_') or 'plateau'
-        path, _flt = dfold.get_save_file_name(
-            self, "Export Data", default + '.xlsx', export.save_filter())
-        if not path:
-            return
-        path = export.ensure_ext(path, _flt)
         slots = None
         if len(self._carousel) > 1:
             box = QMessageBox(self)
@@ -8390,12 +8329,19 @@ class PlateauWindow(QMainWindow):
             b_all = box.addButton("All samples", QMessageBox.AcceptRole)
             b_one = box.addButton("This sample", QMessageBox.AcceptRole)
             box.addButton(QMessageBox.Cancel)
+            box.setDefaultButton(b_all)
             box.exec_()
             if box.clickedButton() is b_all:
                 self._carousel_save_current()
                 slots = list(enumerate(self._carousel))
+                default = 'all_samples'
             elif box.clickedButton() is not b_one:
                 return
+        path, _flt = dfold.get_save_file_name(
+            self, "Export Data", default + '.xlsx', export.save_filter())
+        if not path:
+            return
+        path = export.ensure_ext(path, _flt)
 
         try:
             import csv
@@ -8578,10 +8524,15 @@ class PlateauWindow(QMainWindow):
     _FLUX_KEYS = ('ageFluxMode', 'jVal', 'jErrPct', 'jForce',
                   'rStd', 'rStdErrPct', 'rStdErrMode',
                   'stdAgeMa', 'stdAgeErrMa', 'stdAgeErrType',
-                  'lambdaYr', 'lambdaErrYr')
+                  'lambdaYr', 'lambdaErrYr') + tuple(ROUTE_KEYS)
 
     @staticmethod
     def _flux_key(cfg):
+        # aliquots on different routes (monitors) never share a flux group
+        return PlateauWindow._flux_key_vals(cfg) + (route_line(route_from_cfg(cfg)),)
+
+    @staticmethod
+    def _flux_key_vals(cfg):
         mode = cfg.get('ageFluxMode', 'imported')
         if mode == 'ratio_J':
             return ('ratio_J', round(cfg.get('jVal', 0), 8),
@@ -8610,8 +8561,10 @@ class PlateauWindow(QMainWindow):
 
     @classmethod
     def _extract_flux_cfg(cls, cfg):
-        return {k: cfg.get(k, _SESSION_CFG_DEFAULTS.get(k))
-                for k in cls._FLUX_KEYS}
+        out = {k: cfg.get(k, _SESSION_CFG_DEFAULTS.get(k)) for k in cls._FLUX_KEYS}
+        # route keys only when the session has them (an empty stdCov would
+        # set a joint covariance to zero)
+        return {k: v for k, v in out.items() if k not in ROUTE_KEYS or v is not None}
 
     # ── Stacking method (WM + √MSWD / GLS + ML) + disk-flux import ─────────────
     def _open_single_stats(self):
@@ -8966,8 +8919,8 @@ class PlateauWindow(QMainWindow):
     def _flux_overlay(self, sess, cfg=None, si=None):
         """The disk-flux override for one session, or None.
 
-        A session on a loaded hole (ticked to the shown disk, picked in the
-        Hole column, or matched automatically) is aged from that hole's
+        A session on a loaded hole (picked in the Hole column, or matched
+        automatically) is aged from that hole's
         monitor ratio R and σ_R (R mode, R standard = hole R), over every
         cfg-/group-level R or J, also on Imported ages, as in the Age
         distribution tool.  This is the same overlay the single plateau and the carousel
@@ -9000,6 +8953,9 @@ class PlateauWindow(QMainWindow):
         group, its own flux keys): the settings the user chose, without the
         disk-flux hole overlay."""
         eff = dict(self._global_cfg)
+        # the route is the aliquot's own: none from the window-wide settings
+        for k in ('route', 'fcAnchor', 'calibClass', 'stdCov'):
+            eff.pop(k, None)
         for g in self._flux_groups:
             if si in g['indices']:
                 eff.update(g['flux_cfg'])
@@ -9124,7 +9080,7 @@ class PlateauWindow(QMainWindow):
         fb.addRow(lbl_jErrPct, le_jErrPct)
         frame.le_jErrPct = le_jErrPct; frame.lbl_jErrPct = lbl_jErrPct
 
-        le_rStd = QLineEdit(f"{from_fcs_r(group['flux_cfg'].get('rStd', 70.0), group['flux_cfg']):.8g}")
+        le_rStd = QLineEdit(f"{from_fcs_r(group['flux_cfg'].get('rStd', 70.0), group['flux_cfg']):.11g}")
         le_rStd.setPlaceholderText("e.g. 5.753")
         lbl_rStd = QLabel("⁴⁰Ar/³⁹Ar R standard:")
         fb.addRow(lbl_rStd, le_rStd)
@@ -9268,7 +9224,7 @@ class PlateauWindow(QMainWindow):
                     vals = {(round(ov['rStd'], 12), round(ov['rStdErrPct'], 12)) for ov in ovs}
                     fields = (panel.le_rStd, panel.le_rStdErr)
                     if len(vals) == 1:
-                        panel.le_rStd.setText(f"{from_fcs_r(ovs[0]['rStd'], fc):.8g}")
+                        panel.le_rStd.setText(f"{from_fcs_r(ovs[0]['rStd'], fc):.11g}")
                         panel.le_rStdErr.setText(f"{ovs[0]['rStdErrPct']:.8g}")
                         for _i in range(panel.cb_rErrMode.count()):
                             if panel.cb_rErrMode.itemData(_i) == 'pct':
@@ -9299,7 +9255,7 @@ class PlateauWindow(QMainWindow):
             else:
                 panel.le_jVal.setText(f"{fc.get('jVal', 1e-3):.8g}")
                 panel.le_jErrPct.setText(f"{fc.get('jErrPct', 0.0):.8g}")
-                panel.le_rStd.setText(f"{from_fcs_r(fc.get('rStd', 70.0), fc):.8g}")
+                panel.le_rStd.setText(f"{from_fcs_r(fc.get('rStd', 70.0), fc):.11g}")
                 panel.le_rStdErr.setText(f"{fc.get('rStdErrPct', 0.10):.8g}")
                 for _i in range(panel.cb_rErrMode.count()):
                     if panel.cb_rErrMode.itemData(_i) == fc.get('rStdErrMode', 'pct'):
@@ -9356,6 +9312,7 @@ class PlateauWindow(QMainWindow):
             lambdaYr      = _f(panel.le_lambda,     LAMBDA_DEFAULT),
             lambdaErrYr   = _f(panel.le_lambdaErr,  LAMBDA_ERR),
         ))
+        sync_route(group['flux_cfg'])
         # The groups are rebuilt from each session's own cfg on every regroup
         # (flux dialog Apply, adding or removing aliquots), so an edit that lives
         # only in group['flux_cfg'] is thrown away and the panel falls back to
@@ -10732,6 +10689,7 @@ def main():
     app.setApplicationName("Plateau & isochron")
     dfold.use_tool('plateau_isochron')
     force_light(app)   # shared light palette, same as the other tools
+    no_wheel_on_dropdowns(app)
     win = PlateauWindow()
     win.show()
     ret = app.exec_()

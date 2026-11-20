@@ -99,7 +99,7 @@ runs every test (the windows open off-screen): calibrations and external errors
 (`test_calibration.py`), the combination statistics and mixture models
 (`test_statistics.py`), Flux monitors and Flux regression (`test_flux.py`), the figure
 exports (`test_figures.py`), and the tools opening, saving and agreeing with each other
-(`test_tools.py`). The tests use made-up data
+(`test_tools.py`), and calibration routes checked independently of the route code (`test_routes.py`). The tests use made-up data
 (`tests/synthetic_data.py`) and check the tools against published values (the
 calibration papers, the metafor random-effects example) and against implementations
 written separately from the published equations (`tests/reference_framework.py`).

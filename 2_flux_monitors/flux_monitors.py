@@ -18,6 +18,7 @@ import math
 import os
 import re
 import sys
+import textwrap
 from collections import OrderedDict, Counter
 
 import pandas as pd
@@ -41,10 +42,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from arar_math import (
     FC_PRESETS, FC_PAIRED_LAMBDA, LAMBDA_PRESETS, fc_ingrowth, file_err_div,
     mswd_critical, DEFAULT_FC_NAME, STD_AGE_DEFAULT, STD_AGE_ERR,
-    LAMBDA_DEFAULT, LAMBDA_ERR, force_light, mono_font, monitor_keys,
+    LAMBDA_DEFAULT, LAMBDA_ERR, force_light, no_wheel_on_dropdowns, mono_font, monitor_keys,
     calibration_notes, edited_standards_note,
 )
-from standards import MonitorCombo, monitor_text
+from standards import MonitorCombo, monitor_text, route_line
+from calibration_dialog import CalibrationDialog
+from arar_math import (route_cfg, route_from_cfg, route_text, monitor_ingrowth, STANDARD_IDS)
 import data_folders as dfold
 
 
@@ -1362,8 +1365,27 @@ class FluxMonitorsWindow(QMainWindow):
         lbl.setStyleSheet(f"font-size: {size + 3}px;")
         self._plot_layout.addWidget(lbl)
 
+    @staticmethod
+    def _wrapped_suptitle(fig, head, note, fontsize=9):
+        """Title plus a note wrapped to the figure width, rewrapped when the
+        plot is resized; the layout leaves room for however many lines it takes."""
+        st = fig.suptitle(head, fontsize=fontsize)
+
+        def rewrap(_event=None):
+            width_px = fig.get_figwidth() * fig.dpi
+            char_px = 0.6 * fontsize * fig.dpi / 72
+            st.set_text(head + '\n' + textwrap.fill(note, max(40, int(0.95 * width_px / char_px))))
+        rewrap()
+        fig._rewrap = rewrap
+        try:
+            fig.set_layout_engine('constrained')
+        except AttributeError:          # matplotlib < 3.6
+            fig.tight_layout(rect=[0, 0, 1, 0.88])
+
     def _show_figure(self, fig):
         canvas = FigureCanvas(fig)
+        if hasattr(fig, '_rewrap'):
+            canvas.mpl_connect('resize_event', fig._rewrap)
         canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._plot_layout.addWidget(canvas)
         canvas.draw()
@@ -1615,6 +1637,32 @@ class FluxMonitorsWindow(QMainWindow):
         self.input_name        = input_name
         self._reset_overrides()
 
+    def _show_crystals(self):
+        """One line on the crystals in the loaded data."""
+        lbl = getattr(self, 'crystal_info_lbl', None)
+        if lbl is None:
+            return
+        fus = heat = 0
+        steps = []
+        for rows in (self.raw_category_data or {}).values():
+            seen = {}
+            for t in self._parse_crystal_structure(rows):
+                seen[t['grain_id']] = t['crystal_n_steps']
+            for n in seen.values():
+                if n == 1:
+                    fus += 1
+                else:
+                    heat += 1
+                    steps.append(n)
+        if not fus and not heat:
+            lbl.setText("No data analysed yet.")
+            return
+        txt = f"{fus + heat} crystals, {fus} fusion, {heat} step-heated"
+        if steps:
+            lo, hi = min(steps), max(steps)
+            txt += f" ({lo} steps)" if lo == hi else f" ({lo}–{hi} steps)"
+        lbl.setText(txt + ".")
+
     def _rerun_if_loaded(self):
         """Crystal basis or step grouping changed: redo the last analysis."""
         if self.raw_category_data and self.results is not None:
@@ -1667,8 +1715,7 @@ class FluxMonitorsWindow(QMainWindow):
 
     def _set_current_data(self, text):
         """Show what 'Analyse Data' will re-run, and allow it."""
-        self.format_info_var.set(f"Current data: {text}. Change any option below to re-run "
-                                 f"it, or press Analyse Data.")
+        self.format_info_var.set(f"Current data: {text}.")
         self.analyze_btn.setEnabled(True)
 
     @staticmethod
@@ -1703,6 +1750,7 @@ class FluxMonitorsWindow(QMainWindow):
                      f"J errors are from R only (FC age and λ are systematic).")
         mode = self.crystal_mode_var.get()
         self.log(f"Points averaged: {self.CRYSTAL_MODES.get(mode, mode)}")
+        self._show_crystals()
 
         ratio_res, j_res = OrderedDict(), OrderedDict()
         self.analysis_rows, self.crystal_stats, self.step_group_stats = {}, {}, {}
@@ -2046,7 +2094,40 @@ class FluxMonitorsWindow(QMainWindow):
                        lambdaYr=LAMBDA_DEFAULT, lambdaErrYr=LAMBDA_ERR)
         mc = getattr(self, 'monitor_combo', None)
         cfg.update(mc.keys() if mc is not None else monitor_keys('FCs'))
+        if getattr(self, '_route', None):
+            try:
+                return route_cfg(self._route)
+            except (ValueError, KeyError, TypeError):
+                pass
         return cfg
+
+    def _show_route(self):
+        lbl = getattr(self, 'route_lbl', None)
+        if lbl is not None:
+            r = route_from_cfg(self._monitor_cfg())
+            lbl.setText(route_line(r))
+            lbl.setToolTip(route_text(r))
+
+    def _open_calibrate(self):
+        """Calibration… : the dialog shared with the other tools."""
+        dlg = CalibrationDialog(self._monitor_cfg(), parent=self, age_source=False, stored=False)
+        if dlg.exec_() != QDialog.Accepted:
+            return
+        rk = dlg.get_params()['route_keys']
+        self._route = rk['route']
+        cfg = route_cfg(self._route)
+        self._applying_preset = True
+        name = next((n for n, *_ in FC_PRESETS if n == rk['route'].get('calibration')), 'Custom')
+        self.calib_var.set(name)
+        self.std_age_var.set(f"{cfg['stdAgeMa']:g}")
+        self.std_age_err_var.set(f"{cfg['stdAgeErrMa']:g}")
+        self.lambda_var.set(f"{cfg['lambdaYr']:.6g}")
+        self.lambda_err_var.set(f"{cfg['lambdaErrYr']:.6g}")
+        self._applying_preset = False
+        self.monitor_combo.set_monitor(cfg['monitor'] if cfg['monitor'] in STANDARD_IDS else 'FCs')
+        self._show_route()
+        if self.results:
+            self._run_analysis('calibration')
 
     def _monitor_R(self):
         """R of the monitor relative to FCs (1 for FCs)."""
@@ -2062,6 +2143,8 @@ class FluxMonitorsWindow(QMainWindow):
             fc_age_error = float(self.std_age_err_var.get())
         except (ValueError, AttributeError):
             lambda_val, fc_age, fc_age_error = LAMBDA_DEFAULT, STD_AGE_DEFAULT, STD_AGE_ERR
+        if getattr(self, '_route', None):
+            return monitor_ingrowth(self._monitor_cfg())
         return fc_ingrowth(fc_age, lambda_val, fc_age_error) * self._monitor_R()
 
     def _j_result_from_r(self, res):
@@ -2162,14 +2245,14 @@ class FluxMonitorsWindow(QMainWindow):
         # Import section
         imp = QGroupBox("Step 1: Import Data")
         il = QVBoxLayout(imp)
-        il.addWidget(_note("Ar-Ar session files from the Data converter / Plateau & isochron "
-                           "tool (.arar, .ararpt, .ararstack), or any Excel/CSV table", size=9))
         il.addWidget(QLabel("Data file:"))
         self.raw_file_var = Value("")
         file_le = bind_line_edit(self.raw_file_var, QLineEdit())
         file_le.setReadOnly(True)
         il.addWidget(file_le)
         b_arar = QPushButton("Load .arar / .ararstack…")
+        b_arar.setToolTip("Session files from the Data converter or Plateau & isochron "
+                          "(.arar, .ararpt, .ararstack)")
         b_arar.clicked.connect(self.browse_arar_files)
         b_tab = QPushButton("Import Excel/CSV…")
         b_tab.clicked.connect(self.browse_raw_file)
@@ -2202,14 +2285,18 @@ class FluxMonitorsWindow(QMainWindow):
         outl = QGroupBox("Outlier Rejection")
         orl = QVBoxLayout(outl)
         self.use_nmad_var = Value(True)
-        orl.addWidget(bind_check(self.use_nmad_var, QCheckBox("NMAD outlier rejection")))
+        cb_nmad = bind_check(self.use_nmad_var, QCheckBox("NMAD outlier rejection"))
+        cb_nmad.setToolTip("Removes a point if |x − median| > k × NMAD.")
+        orl.addWidget(cb_nmad)
         self.nmad_k_var = Value(2.5)
         orl.addLayout(_row(20, QLabel("k threshold:"),
-                           bind_spin(self.nmad_k_var, _spin(0.5, 20.0, 0.5)),
-                           _note("(flag if |x − median| > k × NMAD)")))
+                           bind_spin(self.nmad_k_var, _spin(0.5, 20.0, 0.5))))
         self.use_mswd_var = Value(False)
-        orl.addWidget(bind_check(self.use_mswd_var,
-                                 QCheckBox("MSWD outlier rejection (one point at a time)")))
+        cb_mswd = bind_check(self.use_mswd_var,
+                             QCheckBox("MSWD outlier rejection (one point at a time)"))
+        cb_mswd.setToolTip("Each round removes the point most at odds with the mean of the "
+                           "others,\nuntil the MSWD is within the limit.")
+        orl.addWidget(cb_mswd)
         self.mswd_rule_var = Value('wc')
         rb_wc, rb_fixed = QRadioButton("Wendt && Carl limit for n"), QRadioButton("fixed:")
         bind_radios(self.mswd_rule_var, [(rb_wc, 'wc'), (rb_fixed, 'fixed')])
@@ -2219,29 +2306,28 @@ class FluxMonitorsWindow(QMainWindow):
         self.mswd_discordant_var = Value(True)
         cb_disc = bind_check(self.mswd_discordant_var, QCheckBox(
             "Only remove a point that is discordant with the others (5 %, Bonferroni for n)"))
+        cb_disc.setToolTip(
+            "A point goes only if it is a significant outlier (5 %, Bonferroni for n),\n"
+            "judged against the others' errors and excess scatter (externally studentized\n"
+            "residual, Viechtbauer & Cheung 2010). Scatter that remains is left to\n"
+            "REML / √MSWD. Unticked, points go until the MSWD is reached, which trims\n"
+            "real scatter.")
         orl.addLayout(_row(20, cb_disc))
-        n = _note("Each round removes the one point most at odds with the mean of the "
-                  "others, until the MSWD is within the limit. With the discordance test "
-                  "the point is judged against the others' errors and their excess "
-                  "scatter τ (random-effects externally studentized residual, Viechtbauer "
-                  "& Cheung 2010) and goes only if it is a significant outlier; if none "
-                  "is, the remaining scatter is overdispersion and is left to REML / "
-                  "√MSWD. Without the test the point whose removal lowers χ² most goes "
-                  "each round until the MSWD is reached, which trims real scatter.")
-        orl.addLayout(_row(20, n, stretch=False))
+        orl.addLayout(_row(44, _note("Removes only significant outliers."), stretch=False))
         ol.addWidget(outl)
 
         # Statistical Models
         stats = QGroupBox("Statistical Models")
         sl = QVBoxLayout(stats)
-        sl.addWidget(_note("The inverse-variance weighted mean, MSWD and p are always computed "
-                           "(and exported); this box picks what is reported."))
         self.use_reml_var = Value(True)
-        sl.addWidget(bind_check(self.use_reml_var, QCheckBox("REML random-effects")))
-        sl.addWidget(_note("Estimates the excess scatter τ² by restricted maximum likelihood "
-                           "and reports the random-effects mean and its SE. Unticked: weighted "
-                           "mean, SE × √MSWD when the MSWD exceeds the Wendt & Carl (1991) "
-                           "limit 1 + 2√(2/(n−1))."))
+        cb_reml = bind_check(self.use_reml_var, QCheckBox("REML random-effects"))
+        cb_reml.setToolTip(
+            "Estimates the excess scatter τ² by restricted maximum likelihood and reports\n"
+            "the random-effects mean and its SE. Unticked: weighted mean, SE × √MSWD when\n"
+            "the MSWD exceeds the Wendt & Carl (1991) limit 1 + 2√(2/(n−1)).")
+        sl.addWidget(cb_reml)
+        sl.addWidget(_note("Better at assessing scatter. Unticked: inverse-variance weighted "
+                           "mean. The weighted mean, MSWD and p are always calculated."))
         ol.addWidget(stats)
 
         # Display σ
@@ -2274,19 +2360,37 @@ class FluxMonitorsWindow(QMainWindow):
         bind_radios(self.step_group_var, [(rb_pw, 'power'), (rb_st, 'step')],
                     command=self._rerun_if_loaded)
         cyl.addLayout(_row(QLabel("Compare steps by:"), rb_pw, 8, rb_st))
-        cyl.addWidget(_note(
-            "A crystal is the grain ID (CSV / Direct Input; a blank cell continues "
-            "the crystal above) or, for .arar files, the run-ID prefix or the laser-"
-            "power sequence. One step = fusion crystal; several = step-heated. "
-            "'One point per crystal' turns each step-heated crystal into its "
-            "³⁹Ar-weighted total-gas R, comparable with fusions. Per-crystal and "
-            "per-step-group statistics are written to the results and the export; "
-            "see the Plots tab views 'By crystal' and 'By step group'."))
+        cryst.setToolTip(
+            "A crystal is the grain ID (CSV / Direct Input; a blank cell continues the\n"
+            "crystal above) or, for .arar files, the run-ID prefix or the laser-power\n"
+            "sequence. One step = fusion; several = step-heated. 'One point per crystal'\n"
+            "uses each step-heated crystal's ³⁹Ar-weighted total-gas R. Per-crystal and\n"
+            "per-step-group statistics are in the results, the export and the Plots tab.")
+        cyl.addWidget(_note("What are my crystals up to?"))
+        self.crystal_info_lbl = _note("No data analysed yet.")
+        cyl.addWidget(self.crystal_info_lbl)
         ol.addWidget(cryst)
 
         # Standard age / decay constant settings
-        std = QGroupBox("Standard Age && Decay Constant (for J calculation)")
-        stl = QGridLayout(std)
+        std = QGroupBox("Calibration (for J)")
+        _stv = QVBoxLayout(std)
+        _cal_row = QHBoxLayout()
+        _b_cal = QPushButton("Calibration…")
+        _b_cal.setToolTip("Monitor and calibration J is calculated on: a route from Standards,\n"
+                          "or typed values under Advanced.")
+        _b_cal.clicked.connect(self._open_calibrate)
+        _cal_row.addWidget(_b_cal)
+        _cal_row.addStretch()
+        _stv.addLayout(_cal_row)
+        self.route_lbl = _note('')
+        _stv.addWidget(self.route_lbl)
+        # the preset fields are kept, hidden: they hold the values the rest of
+        # the tool and its exports read
+        _oldw = QWidget()
+        _oldw.setVisible(False)
+        _stv.addWidget(_oldw)
+        stl = QGridLayout(_oldw)
+        self._route = None
         self.std_age_var      = Value(f"{STD_AGE_DEFAULT:g}")
         self.std_age_err_var  = Value(f"{STD_AGE_ERR:g}")
         self.lambda_var       = Value(f"{LAMBDA_DEFAULT:.6g}")
@@ -2360,6 +2464,7 @@ class FluxMonitorsWindow(QMainWindow):
                             "export adds its R as FCs-equivalent. Pick a calibration, or edit "
                             "a field to switch to Custom."), 6, 0, 1, 3)
         _show_monitor()
+        self._show_route()
         ol.addWidget(std)
 
         self.analyze_btn = QPushButton("Analyse Data")
@@ -2370,10 +2475,7 @@ class FluxMonitorsWindow(QMainWindow):
         self.export_btn.setEnabled(False)
         self.export_btn.clicked.connect(self.export_results)
         lay.addWidget(self.export_btn)
-        lay.addWidget(_note("Analyse Data runs the current data (the files loaded, "
-                            "or the Direct Input data if that was analysed last). "
-                            "After a first analysis, changing any option above "
-                            "re-runs it by itself; manual exclusions are kept."))
+        lay.addWidget(_note("Changing an option re-runs the analysis; exclusions are kept."))
         lay.addStretch()
 
         # Re-run the current analysis whenever an option changes.
@@ -3290,11 +3392,11 @@ class FluxMonitorsWindow(QMainWindow):
 
         more = (f"  (first {MAXP} of {len(multi)} step-heated crystals)"
                 if len(multi) > MAXP else "")
-        fig.suptitle(f"{category}: {ylabel} by crystal{more}\n"
-                     f"black line + orange band: the crystal's total gas ±{sig} (its point in "
-                     f"'one point per crystal'); dashed green: category mean; "
-                     f"hollow grey: excluded steps; x labels: laser power", fontsize=9)
-        fig.tight_layout(rect=[0, 0, 1, 0.93])
+        self._wrapped_suptitle(
+            fig, f"{category}: {ylabel} by crystal{more}",
+            f"black line + orange band: the crystal's total gas ±{sig} (its point in "
+            f"'one point per crystal'); dashed green: category mean; "
+            f"hollow grey: excluded steps; x labels: laser power")
         self._show_figure(fig)
 
     def _plot_by_power_step(self, category, data_type):
@@ -3383,10 +3485,10 @@ class FluxMonitorsWindow(QMainWindow):
             ax.tick_params(labelsize=7)
             ax.grid(True, alpha=0.3)
 
-        fig.suptitle(f"{category}: {ylabel} by step group ({stats['by']})\n"
-                     f"black line + band: group mean ±{sig}; steps after manual exclusions "
-                     f"and the relative-error filter, no outlier rejection", fontsize=9)
-        fig.tight_layout(rect=[0, 0, 1, 0.92])
+        self._wrapped_suptitle(
+            fig, f"{category}: {ylabel} by step group ({stats['by']})",
+            f"black line + band: group mean ±{sig}; steps after manual exclusions "
+            f"and the relative-error filter, no outlier rejection")
         self._show_figure(fig)
 
     # ---------------------------------------------------------------------
@@ -3636,7 +3738,9 @@ class FluxMonitorsWindow(QMainWindow):
                   f'Reported {vn}', 'Reported SE (1σ)', 'Reported SE (2σ)', 'Method',
                   'MSWD rejection']
         mon = self._monitor_cfg()
-        fcs_eq = ratio and mon['monitor'] != 'FCs'
+        # an FCs-equivalent R only where the route goes through FCs
+        fcs_eq = (ratio and mon['monitor'] != 'FCs'
+                  and (mon.get('route') or {}).get('standard', 'FCs') == 'FCs')
         if ratio:
             header += ['J', 'J SE (1σ, R only)', 'J SE (2σ)', 'J % (1σ)']
         if fcs_eq:
@@ -3691,10 +3795,12 @@ class FluxMonitorsWindow(QMainWindow):
                         f"± {self.std_age_err_var.get()} Ma (1σ), λ {self.lambda_var.get()} "
                         f"± {self.lambda_err_var.get()} /yr (1σ)")
             mon = self._monitor_cfg()
+            if mon.get('route'):
+                crit.append(f"Calibration route: {route_text(mon)}")
             crit += [f"Note: {n}" for n in calibration_notes(mon)]
             if edited_standards_note():
                 crit.append(edited_standards_note())
-            if mon['monitor'] != 'FCs':
+            if mon['monitor'] != 'FCs' and not mon.get('route'):
                 crit.append(f"Monitor: {mon['monitor']}, R({mon['monitor']}/FCs) = "
                             f"{mon['monitorR']:.8g} ± {mon['monitorRErr']:.3g} (1σ); "
                             f"{monitor_text(mon)}. R (FCs-equivalent) = measured R / "
@@ -3860,6 +3966,7 @@ def main():
     app.setApplicationName("Flux monitors")
     dfold.use_tool('flux_monitors')
     force_light(app)
+    no_wheel_on_dropdowns(app)
     win = FluxMonitorsWindow()
     win.show()
     sys.exit(app.exec_())

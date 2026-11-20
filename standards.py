@@ -45,13 +45,13 @@ from PyQt5.QtWidgets import (
     QWidget, QListWidget, QListWidgetItem, QLabel, QLineEdit, QPlainTextEdit,
     QPushButton, QComboBox, QCheckBox, QTableWidget, QTableWidgetItem,
     QHeaderView, QMessageBox, QGroupBox, QSplitter, QAbstractItemView,
-    QInputDialog,
+    QInputDialog, QScrollArea, QFrame,
 )
 from PyQt5.QtCore import Qt
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_PATH = os.path.join(HERE, 'standards_default.json')
-SECTIONS = ('decay_constants', 'calibrations', 'standards')
+SECTIONS = ('decay_constants', 'calibrations', 'standards', 'routes')
 BASES = ('astronomical', 'joint', 'k-ar')
 
 
@@ -146,10 +146,17 @@ def diff(lib, default=None):
     return out
 
 
-def save(lib):
-    """Write the user's edits; removes the user file when nothing differs."""
+def save(lib, base=None):
+    """Write the user's edits; removes the user file when nothing differs.
+    base: the published values the editor was opened with.  An entry still
+    equal to them was not edited, even if the published file changed since."""
     p = user_path()
     d = diff(lib)
+    if base is not None:
+        for sec in SECTIONS:
+            k = key_of(sec)
+            b_rows = {r[k]: r for r in base.get(sec, [])}
+            d[sec] = [r for r in d[sec] if r.get('deleted') or r != b_rows.get(r[k])]
     if not any(d[sec] for sec in SECTIONS):
         if os.path.isfile(p):
             os.remove(p)
@@ -175,6 +182,36 @@ def find(lib, section, name):
 
 
 RATIOS = ('std/FCs', 'FCs/std')
+
+
+def ic_other(ic):
+    """The standard an intercalibration is measured against (FCs when not given)."""
+    return ic.get('other') or 'FCs'
+
+
+def ic_printed(ic, holder):
+    """(numerator, denominator, R, 1σ) of an intercalibration as its paper
+    prints it.  'ratio' is 'std/FCs' (holder / other) or 'FCs/std' (other /
+    holder), whatever the other standard is."""
+    R, s = float(ic['R']), float(ic.get('R_1s') or 0.0)
+    other = ic_other(ic)
+    if ic.get('ratio') == 'FCs/std':
+        return other, holder, R, s
+    return holder, other, R, s
+
+
+def intercalibrations(lib):
+    """Every R in the library as (holder id, ic, numerator, denominator, R, 1σ)."""
+    out = []
+    for st in lib.get('standards', []):
+        for ic in st.get('intercalibrations') or []:
+            try:
+                row = (st['id'], ic) + ic_printed(ic, st['id'])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if row[2] != row[3] and row[4] > 0:      # FCs/FCs = 1 is not a step
+                out.append(row)
+    return out
 
 
 def r_std_fcs(ic):
@@ -228,7 +265,7 @@ def short_ref(ref):
 def recommended_R(std):
     """(R standard/FCs, its 1σ, entry) of a standard's recommended
     intercalibration: the one marked recommended, else the first."""
-    ics = std.get('intercalibrations') or []
+    ics = [x for x in std.get('intercalibrations') or [] if ic_other(x) == 'FCs']
     if not ics:
         return None
     ic = next((x for x in ics if x.get('recommended')), ics[0])
@@ -253,10 +290,13 @@ def check(lib):
     for d in lib.get('decay_constants', []):
         if not (float(d.get('lambda') or 0) > 0):
             errs.append(f'Decay constant "{d.get("name")}": λ must be positive')
+    std_ids = {st.get('id') for st in lib.get('standards', [])}
     for c in lib.get('calibrations', []):
         n = c.get('name')
         if not (float(c.get('age') or 0) > 0):
-            errs.append(f'Calibration "{n}": the FCs age must be positive')
+            errs.append(f'Calibration "{n}": the age must be positive')
+        if c.get('standard', 'FCs') not in std_ids:
+            errs.append(f'Calibration "{n}": standard "{c.get("standard")}" is not in the library')
         if c.get('decay_constant') not in lam_names:
             errs.append(f'Calibration "{n}": decay constant "{c.get("decay_constant")}" is not in the library')
         if c.get('basis') not in BASES:
@@ -270,7 +310,159 @@ def check(lib):
                 errs.append(f'Standard "{s.get("id")}": every R must be positive')
             if ic.get('ratio', 'std/FCs') not in RATIOS:
                 errs.append(f'Standard "{s.get("id")}": R must be std/FCs or FCs/std')
+            if ic_other(ic) not in std_ids:
+                errs.append(f'Standard "{s.get("id")}": R against "{ic_other(ic)}", '
+                            'which is not another standard in the library')
+    for r in lib.get('routes', []):
+        for e in route_problems(r, lib):
+            errs.append(f'Route "{r.get("name")}": {e}')
     return errs
+
+
+# --------------------------------------------------------------------------
+# Routes
+#
+# A route ties the monitor of an irradiation to a calibration through R
+# values from the library:
+#
+#   {'name': ..., 'monitor': 'TCs',
+#    'steps': [{'from': 'TCs', 'to': 'FCs', 'num': 'TCs', 'den': 'FCs',
+#               'R': 1.0112, 'R_1s': 0.001, 'source': 'Renne et al. (1998)'}],
+#    'calibration': name of a calibration of the last standard,
+#    'lambda': name of a decay constant,
+#    'default': True}            (the route the tools use for this monitor)
+#
+# Each step holds the R as its paper prints it (num/den), so a file that
+# stores the route can be read without the library.  The age arithmetic is in
+# arar_math ("Calibration routes").
+# --------------------------------------------------------------------------
+
+def step_from_ic(holder, ic, frm):
+    """A route step leaving standard frm through intercalibration ic."""
+    num, den, R, s = ic_printed(ic, holder)
+    to = den if frm == num else num
+    return {'from': frm, 'to': to, 'num': num, 'den': den, 'R': R, 'R_1s': s,
+            'source': short_ref(ic.get('reference', '')) or ic.get('reference', '')}
+
+
+def steps_from(lib, std_id, visited=()):
+    """Every step the library supports out of std_id, to standards not in visited."""
+    out = []
+    for holder, ic, num, den, R, s in intercalibrations(lib):
+        if std_id not in (num, den):
+            continue
+        step = step_from_ic(holder, ic, std_id)
+        if step['to'] not in visited:
+            out.append(step)
+    return out
+
+
+def calibrations_of(lib, std_id):
+    """The calibrations whose age is that of std_id."""
+    return [c for c in lib.get('calibrations', []) if c.get('standard', 'FCs') == std_id]
+
+
+def _same_step(a, b):
+    return (a.get('num') == b.get('num') and a.get('den') == b.get('den')
+            and abs(float(a.get('R', 0)) - float(b.get('R', 0))) <= 1e-12 * abs(float(b.get('R', 1)))
+            and abs(float(a.get('R_1s', 0)) - float(b.get('R_1s', 0))) <= 1e-12 * max(1.0, abs(float(b.get('R_1s', 0)))))
+
+
+def route_problems(route, lib):
+    """What is wrong with a route, as a list of sentences (empty when usable)."""
+    errs = []
+    std_ids = {st.get('id') for st in lib.get('standards', [])}
+    at = route.get('monitor')
+    if at not in std_ids:
+        return [f'monitor "{at}" is not in the library']
+    seen = [at]
+    for i, st in enumerate(route.get('steps') or [], 1):
+        if st.get('from') != at:
+            errs.append(f'step {i} starts at {st.get("from")}, not at {at}')
+            break
+        if not any(_same_step(st, c) for c in steps_from(lib, at)):
+            errs.append(f'step {i}, {st.get("num")}/{st.get("den")} = {st.get("R")}, '
+                        'is not an R in the library')
+        at = st.get('to')
+        if at in seen:
+            errs.append(f'step {i} returns to {at}')
+            break
+        seen.append(at)
+    cal = find(lib, 'calibrations', route.get('calibration'))
+    if cal is None:
+        errs.append(f'calibration "{route.get("calibration")}" is not in the library')
+    elif cal.get('standard', 'FCs') != at:
+        errs.append(f'the route ends at {at}, but "{cal["name"]}" is a calibration of '
+                    f'{cal.get("standard", "FCs")}')
+    if find(lib, 'decay_constants', route.get('lambda')) is None:
+        errs.append(f'decay constant "{route.get("lambda")}" is not in the library')
+    return errs
+
+
+def default_calibration(lib, std_id='FCs'):
+    """The calibration the tools open on for a standard: the one marked default
+    when it is of std_id, else the first of std_id."""
+    cals = calibrations_of(lib, std_id)
+    return next((c for c in cals if c.get('default')), cals[0] if cals else None)
+
+
+def shortest_route(lib, monitor, target='FCs'):
+    """Steps from monitor to target through the R values marked Use (the first
+    R of a pair when none is marked), fewest steps first; None if there is no
+    such path."""
+    use = {}
+    for holder, ic, num, den, R, s in intercalibrations(lib):
+        key = frozenset((num, den))
+        if key not in use or (ic.get('recommended') and not use[key][1].get('recommended')):
+            use[key] = (holder, ic)
+    frontier, seen = [(monitor, [])], {monitor}
+    while frontier:
+        nxt = []
+        for at, steps in frontier:
+            if at == target:
+                return steps
+            for key, (holder, ic) in use.items():
+                if at in key:
+                    st = step_from_ic(holder, ic, at)
+                    if st['to'] not in seen:
+                        seen.add(st['to'])
+                        nxt.append((st['to'], steps + [st]))
+        frontier = nxt
+    return None
+
+
+def route_line(route):
+    """'TCs → FCs (Renne et al. (1998)) → Phillips et al. (2022) · λ Min et al. (2000)'."""
+    parts = [route.get('monitor', '')]
+    for st in route.get('steps') or []:
+        parts.append(f"{st.get('to')} ({st.get('source') or 'no source'})")
+    cal, lam = route.get('calibration'), route.get('lambda')
+    cal = cal.get('name', 'custom') if isinstance(cal, dict) else str(cal).split('  ')[0]
+    lam = lam.get('name', 'custom') if isinstance(lam, dict) else lam
+    return ' → '.join(parts) + f' · {cal} · λ {lam}'
+
+
+def default_route(lib, monitor):
+    """The route the tools use for a monitor: the one marked default in the
+    library; else, for a standard with an astronomical age of its own (A1,
+    Mes4), that age; else the shortest path to FCs on the default FCs
+    calibration (so a K–Ar standard such as GA1550 goes through FCs, not
+    through its own K–Ar age)."""
+    mine = [r for r in lib.get('routes', []) if r.get('monitor') == monitor]
+    r = next((x for x in mine if x.get('default')), None)
+    if r is not None:
+        return copy.deepcopy(r)
+    fcs_cal = default_calibration(lib, 'FCs')
+    own = next((c for c in calibrations_of(lib, monitor) if c.get('basis') == 'astronomical'), None)
+    if own is not None and monitor != 'FCs':
+        cal, steps = own, []
+    else:
+        steps = shortest_route(lib, monitor, 'FCs')
+        if steps is None or fcs_cal is None:
+            return None
+        cal = fcs_cal
+    return {'name': f'{monitor}: default', 'monitor': monitor, 'steps': steps,
+            'calibration': cal['name'], 'lambda': cal.get('decay_constant'), 'auto': True}
 
 
 # --------------------------------------------------------------------------
@@ -343,9 +535,9 @@ def monitor_text(cfg):
 #
 # The Standards window: view and edit the library above.
 #
-# Three pages: the monitors with their R values relative to Fish Canyon sanidine
-# and their published ages, the Fish Canyon calibrations, and the ⁴⁰K decay
-# constants.  Every value is 1σ.  Edits are kept in the window until Save; Save
+# Three pages: the Fish Canyon calibrations (the ages of FCs), the other
+# monitors with their R values relative to FCs and their published ages, and the
+# ⁴⁰K decay constants.  Every value is 1σ.  Edits are kept in the window until Save; Save
 # writes only what differs from the published values to the user's
 # configuration folder, so "Restore published" and "Reset all" can always go
 # back.  The tools read the library when they start.
@@ -391,6 +583,29 @@ def _note(text):
     return lab
 
 
+def _flip(ratio):
+    return 'std/FCs' if ratio == 'FCs/std' else 'FCs/std'
+
+
+def _ic_back(x, sid):
+    """A table row shown on sid's page, as stored with its holder (x['other'])."""
+    d = {'R': x['R'], 'R_1s': x.get('R_1s') or 0.0, 'ratio': _flip(x.get('ratio')),
+         'reference': x.get('reference', ''), 'doi': x.get('doi', ''), 'notes': x.get('notes', '')}
+    if sid != 'FCs':
+        d['other'] = sid
+    if x.get('recommended'):
+        d['recommended'] = True
+    return d
+
+
+def _ic_norm(ic):
+    """An intercalibration with defaults filled in, for comparison."""
+    g = lambda v: float(f'{float(v or 0.0):.10g}')
+    return (ic_other(ic), ic.get('ratio') or 'std/FCs', g(ic['R']),
+            g(ic.get('R_1s')), bool(ic.get('recommended')),
+            ic.get('reference') or '', ic.get('doi') or '', ic.get('notes') or '')
+
+
 class _Table(QTableWidget):
     """A small editable table of dicts with fixed columns."""
 
@@ -405,6 +620,7 @@ class _Table(QTableWidget):
             h.setSectionResizeMode(i, QHeaderView.Stretch if kind == 'text'
                                    else QHeaderView.ResizeToContents)
         self.lam_names = []
+        self.std_names = []
 
     def set_rows(self, rows):
         self.setRowCount(0)
@@ -424,8 +640,14 @@ class _Table(QTableWidget):
                 self.setCellWidget(i, j, cb)
             elif kind == 'ratio':
                 cb = QComboBox()
-                cb.addItems(['standard / FCs', 'FCs / standard'])
+                cb.addItems(['this / other', 'other / this'])
                 cb.setCurrentIndex(1 if r.get(key) == 'FCs/std' else 0)
+                self.setCellWidget(i, j, cb)
+            elif kind == 'std':
+                cb = QComboBox()
+                cb.addItems(self.std_names)
+                v = r.get(key) or 'FCs'
+                cb.setCurrentIndex(max(0, cb.findText(v)))
                 self.setCellWidget(i, j, cb)
             elif kind == 'check':
                 it = QTableWidgetItem()
@@ -454,6 +676,8 @@ class _Table(QTableWidget):
                     r[key] = None if cb.currentIndex() == 0 else cb.currentText()
                 elif kind == 'ratio':
                     r[key] = 'FCs/std' if self.cellWidget(i, j).currentIndex() == 1 else 'std/FCs'
+                elif kind == 'std':
+                    r[key] = self.cellWidget(i, j).currentText()
                 elif kind == 'check':
                     r[key] = self.item(i, j).checkState() == Qt.Checked
                 else:
@@ -474,7 +698,7 @@ class _Page(QWidget):
         super().__init__()
         self.editor = editor
         self._cur = None
-        lay = QHBoxLayout(self)
+        lay = QVBoxLayout(self)
         split = QSplitter(Qt.Horizontal)
         lay.addWidget(split)
         left = QWidget()
@@ -495,7 +719,12 @@ class _Page(QWidget):
         ll.addWidget(self.btn_restore)
         split.addWidget(left)
         self.form = QWidget()
-        split.addWidget(self.form)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setWidget(self.form)
+        split.addWidget(scroll)
         split.setStretchFactor(1, 3)
         split.setSizes([300, 860])
         self.build_form(self.form)
@@ -509,20 +738,27 @@ class _Page(QWidget):
         return key_of(self.section)
 
     def label(self, r):
-        tag = ' (added)' if r.get('user') else (' (edited)' if r.get('edited') else '')
-        return self.list_text(r) + tag
+        return self.list_text(r) + (' (added)' if r.get('user') else '')
 
     def list_text(self, r):
         return r.get(self.key(), '')
 
+    def hidden(self, r):
+        """Entries kept in the library but not listed on this page."""
+        return False
+
     def refresh_list(self, select=None):
         self.list.blockSignals(True)
         self.list.clear()
-        for r in self.rows:
+        for k, r in enumerate(self.rows):
             self.list.addItem(QListWidgetItem(self.label(r)))
+            self.list.setRowHidden(k, self.hidden(r))
         self.list.blockSignals(False)
-        if self.rows:
+        shown = [k for k, r in enumerate(self.rows) if not self.hidden(r)]
+        if shown:
             i = select if select is not None else max(0, min(self.list.count() - 1, self._cur or 0))
+            if i not in shown:
+                i = min(shown, key=lambda k: (k < i, abs(k - i)))
             self._cur = None
             self.list.setCurrentRow(i)
             self._on_select(i)
@@ -694,6 +930,9 @@ class CalibrationPage(_Page):
     section = 'calibrations'
     noun = 'calibration'
 
+    def list_text(self, r):
+        return f"{r.get('standard', 'FCs')} — {r.get('name', '')}"
+
     def build_form(self, w):
         g = QGridLayout(w)
         self.name, self.age, self.age_s, self.cov = QLineEdit(), QLineEdit(), QLineEdit(), QLineEdit()
@@ -706,9 +945,13 @@ class CalibrationPage(_Page):
         self.basis.currentIndexChanged.connect(lambda _i: self._basis_changed(self.basis.currentData()))
         self.incl = QCheckBox('The ± already includes the uncertainty of λ')
         self.default = QCheckBox('Default calibration of all tools')
+        self.std = QComboBox()
+        self.std.currentTextChanged.connect(lambda t: self.default.setEnabled(t == 'FCs'))
         g.addWidget(QLabel('Name'), 0, 0)
-        g.addWidget(self.name, 0, 1, 1, 3)
-        g.addWidget(QLabel('FCs age (Ma)'), 1, 0)
+        g.addWidget(self.name, 0, 1)
+        g.addWidget(QLabel('Standard'), 0, 2)
+        g.addWidget(self.std, 0, 3)
+        g.addWidget(QLabel('Age (Ma)'), 1, 0)
         g.addWidget(self.age, 1, 1)
         g.addWidget(QLabel('±1σ (Ma)'), 1, 2)
         g.addWidget(self.age_s, 1, 3)
@@ -717,10 +960,10 @@ class CalibrationPage(_Page):
         g.addWidget(QLabel('Determined by'), 3, 0)
         g.addWidget(self.basis, 3, 1)
         g.addWidget(self.incl, 4, 1, 1, 3)
-        g.addWidget(QLabel('cov(λ, t_FCs)'), 5, 0)
+        g.addWidget(QLabel('cov(λ, t)'), 5, 0)
         g.addWidget(self.cov, 5, 1)
         g.addWidget(_note('yr⁻¹·yr; joint calibrations only. Leave empty when none is '
-                          'published: the FCs age and λ are then treated as independent.'), 5, 2, 1, 2)
+                          'published: the age and λ are then treated as independent.'), 5, 2, 1, 2)
         self.anchor_box = QGroupBox('Astronomical anchor')
         ag = QGridLayout(self.anchor_box)
         self.a_name, self.a_age, self.a_age_s = QLineEdit(), QLineEdit(), QLineEdit()
@@ -728,13 +971,13 @@ class CalibrationPage(_Page):
         self.a_std = QComboBox()
         ag.addWidget(QLabel('Anchor'), 0, 0)
         ag.addWidget(self.a_name, 0, 1)
-        ag.addWidget(QLabel('Monitor'), 0, 2)
+        ag.addWidget(QLabel('Standard'), 0, 2)
         ag.addWidget(self.a_std, 0, 3)
         ag.addWidget(QLabel('Astronomical age (Ma)'), 1, 0)
         ag.addWidget(self.a_age, 1, 1)
         ag.addWidget(QLabel('±1σ'), 1, 2)
         ag.addWidget(self.a_age_s, 1, 3)
-        ag.addWidget(QLabel('R (FCs / anchor)'), 2, 0)
+        ag.addWidget(QLabel('R (standard / anchor)'), 2, 0)
         ag.addWidget(self.a_R, 2, 1)
         ag.addWidget(QLabel('±1σ'), 2, 2)
         ag.addWidget(self.a_R_s, 2, 3)
@@ -765,6 +1008,12 @@ class CalibrationPage(_Page):
         i = self.lam.findText(r.get('decay_constant', ''))
         self.lam.setCurrentIndex(max(i, 0))
         self.lam.blockSignals(False)
+        self.std.blockSignals(True)
+        self.std.clear()
+        self.std.addItems([st['id'] for st in self.editor.lib['standards']])
+        self.std.setCurrentIndex(max(0, self.std.findText(r.get('standard', 'FCs'))))
+        self.std.blockSignals(False)
+        self.default.setEnabled(self.std.currentText() == 'FCs')
         self.name.setText(r.get('name', ''))
         self.name.setReadOnly(not r.get('user', False))
         self.age.setText(_g(r.get('age')))
@@ -798,7 +1047,7 @@ class CalibrationPage(_Page):
         try:
             if r.get('basis') == 'astronomical' and a and lam:
                 t = math.log1p(float(a['R_fcs_anchor']) * math.expm1(lam * float(a['age']) * 1e6)) / lam / 1e6
-                return (f'From the anchor: FCs = {t:.4f} Ma with this decay constant. '
+                return (f"From the anchor: {r.get('standard', 'FCs')} = {t:.4f} Ma with this decay constant. "
                         'The printed R is usually rounded, so this can differ from the '
                         'published FCs age in the last digit; SimplAr uses the R that '
                         'reproduces the published age.')
@@ -808,7 +1057,7 @@ class CalibrationPage(_Page):
 
     def save(self, r):
         r['name'] = self.name.text().strip() or r.get('name', '')
-        r['standard'] = 'FCs'
+        r['standard'] = self.std.currentText() or 'FCs'
         r['age'] = _f(self.age.text())
         r['age_1s'] = _f(self.age_s.text()) or 0.0
         r['decay_constant'] = self.lam.currentText()
@@ -827,7 +1076,7 @@ class CalibrationPage(_Page):
                            'R_1s': _f(self.a_R_s.text()) or 0.0}
         else:
             r.pop('anchor', None)
-        if self.default.isChecked():
+        if self.default.isChecked() and r['standard'] == 'FCs':
             r['default'] = True
             for other in self.rows:
                 if other is not self.rows[self._cur] and other.get('default'):
@@ -848,6 +1097,7 @@ class StandardPage(_Page):
     def list_text(self, r):
         return f"{r.get('id', '')} — {r.get('name', '')}"
 
+
     def build_form(self, w):
         v = QVBoxLayout(w)
         g = QGridLayout()
@@ -866,15 +1116,20 @@ class StandardPage(_Page):
         g.addWidget(self.notes, 3, 1, 1, 3)
         v.addLayout(g)
 
-        box = QGroupBox('R relative to Fish Canyon sanidine (⁴⁰Ar*/³⁹Ar_K), as published')
+        box = QGroupBox('R relative to other standards (⁴⁰Ar*/³⁹Ar_K), as published')
         bl = QVBoxLayout(box)
-        self.ics = _Table([('ratio', 'Ratio', 'ratio'), ('R', 'R', 'num'), ('R_1s', '±1σ', 'num'),
+        self.ics = _Table([('other', 'Other', 'std'), ('ratio', 'Ratio', 'ratio'),
+                           ('R', 'R', 'num'), ('R_1s', '±1σ', 'num'),
                            ('recommended', 'Use', 'check'), ('reference', 'Reference', 'text'),
                            ('doi', 'DOI', 'text'), ('notes', 'Notes', 'text')])
         self.ics.itemChanged.connect(self._one_recommended)
-        self.ics.setMinimumHeight(120)
+        self.ics.setMinimumHeight(220)
         bl.addWidget(self.ics)
         bl.addLayout(self._row_buttons(self.ics))
+        bl.addWidget(_note('Use marks the R that default routes take, one for each pair of '
+                           'standards. Each R shows on the pages of both its standards; an edit on '
+                           'either page changes it on both. A value of your own lab can be added '
+                           'as a row and used in a route like a published one.'))
         v.addWidget(box, 1)
 
         box2 = QGroupBox('Published ages')
@@ -888,9 +1143,70 @@ class StandardPage(_Page):
         bl2.addLayout(self._row_buttons(self.ages))
         bl2.addWidget(_note('The ages authors have used for this monitor. The Recalculator and age '
                             'combiner offers them as the monitor age of a published dataset.'))
+        self._cals_lbl = QLabel('Calibrations of this standard (kept under Calibrations; '
+                                'double-click to open there):')
+        self._cals_lbl.setWordWrap(True)
+        self.cals = QListWidget()
+        self.cals.setMaximumHeight(110)
+        self.cals.itemDoubleClicked.connect(self._go_to_calibration)
+        bl2.addWidget(self._cals_lbl)
+        bl2.addWidget(self.cals)
         v.addWidget(box2, 1)
         self.derived = _note('')
         v.addWidget(self.derived)
+
+    def _go_to_calibration(self, item):
+        name = self._cal_names[self.cals.row(item)]
+        ed = self.editor
+        page = next(p for p in ed.pages if p.section == 'calibrations')
+        ed.tabs.setCurrentWidget(page)
+        names = [r.get('name') for r in page.rows]
+        if name in names:
+            page.list.setCurrentRow(names.index(name))
+
+    def _mark_holder(self, i, holder):
+        """A row stored with another standard: its Other is that standard."""
+        self.ics.item(i, 4).setData(Qt.UserRole, holder)
+        if holder:
+            self.ics.cellWidget(i, 0).setEnabled(False)
+            self.ics.cellWidget(i, 0).setToolTip(f'Stored with {holder}')
+
+    def commit(self):
+        """Also write back the rows stored with other standards."""
+        sid = getattr(self, '_sid', None)
+        ok = super().commit()
+        out, self._foreign_out = getattr(self, '_foreign_out', {}), {}
+        if not sid or self._cur is None:
+            return ok
+        for holder, xs in out.items():
+            k = next((i for i, st in enumerate(self.rows) if st.get('id') == holder), None)
+            if k is None:
+                continue
+            old = self.rows[k]
+            new_ics = [_ic_back(x, sid) for x in xs]
+            mine = [ic for ic in old.get('intercalibrations') or [] if ic_other(ic) == sid]
+            if len(mine) == len(new_ics) and all(_ic_norm(a) == _ic_norm(b) for a, b in zip(mine, new_ics)):
+                continue
+            it = iter(new_ics)
+            ics = []
+            for ic in old.get('intercalibrations') or []:
+                if ic_other(ic) != sid:
+                    ics.append(ic)
+                else:
+                    nxt = next(it, None)
+                    if nxt is not None:
+                        ics.append(nxt)
+            ics += list(it)
+            new = copy.deepcopy(_clean(old))
+            new['intercalibrations'] = ics
+            published = find(self.editor.published, self.section, holder)
+            if published is not None and _same(new, published):
+                new = copy.deepcopy(published)
+            new['user'] = published is None
+            new['edited'] = published is not None and new != published
+            self.rows[k] = new
+            self.editor.dirty = True
+        return ok
 
     def _row_buttons(self, table):
         row = QHBoxLayout()
@@ -903,12 +1219,13 @@ class StandardPage(_Page):
         return row
 
     def _one_recommended(self, item):
-        if item.column() != 3 or item.checkState() != Qt.Checked:
+        if item.column() != 4 or item.checkState() != Qt.Checked:
             return
+        other = self.ics.cellWidget(item.row(), 0).currentText()
         self.ics.blockSignals(True)
         for i in range(self.ics.rowCount()):
-            if i != item.row():
-                self.ics.item(i, 3).setCheckState(Qt.Unchecked)
+            if i != item.row() and self.ics.cellWidget(i, 0).currentText() == other:
+                self.ics.item(i, 4).setCheckState(Qt.Unchecked)
         self.ics.blockSignals(False)
 
     def blank(self):
@@ -924,26 +1241,49 @@ class StandardPage(_Page):
         self.loc.setCursorPosition(0)
         self.notes.setPlainText(r.get('notes', ''))
         self.ages.lam_names = [d['name'] for d in self.editor.lib['decay_constants']]
+        sid = r.get('id', '')
+        self.ics.std_names = [st['id'] for st in self.editor.lib['standards'] if st['id'] != sid]
+        ics = r.get('intercalibrations') or []
+        self._sid = sid
+        self._self_ics = [x for x in ics if ic_other(x) == sid]
+        rows = [x for x in ics if ic_other(x) != sid]
+        holders = [None] * len(rows)
+        for st in self.editor.lib['standards']:
+            if st.get('id') == sid:
+                continue
+            for ic in st.get('intercalibrations') or []:
+                if ic_other(ic) == sid:
+                    rows.append(dict(ic, other=st['id'], ratio=_flip(ic.get('ratio'))))
+                    holders.append(st['id'])
+        self._holders_shown = {h for h in holders if h}
         self.ics.blockSignals(True)
-        self.ics.set_rows(r.get('intercalibrations') or [])
+        self.ics.set_rows(rows)
+        for i, h in enumerate(holders):
+            self._mark_holder(i, h)
         self.ics.blockSignals(False)
         self.ages.set_rows(r.get('published_ages') or [])
+        self.cals.clear()
+        self._cal_names = []
+        for c in calibrations_of(self.editor.lib, sid):
+            self.cals.addItem(f"{pm_text(float(c['age']), float(c.get('age_1s') or 0))} Ma  ·  "
+                              f"{c['name']}  ·  {c.get('decay_constant') or 'no λ'}")
+            self._cal_names.append(c['name'])
+        self.cals.setVisible(bool(self._cal_names))
+        self._cals_lbl.setVisible(bool(self._cal_names))
         self.derived.setText(self._derived(r))
 
     def _derived(self, r):
-        rec = recommended_R(r) if r else None
-        cal = next((c for c in self.editor.lib['calibrations'] if c.get('default')),
-                   (self.editor.lib['calibrations'] or [None])[0])
-        if not rec or not cal:
+        if not r.get('id'):
             return ''
-        lam = next((d.get('lambda') for d in self.editor.lib['decay_constants']
-                    if d.get('name') == cal.get('decay_constant')), None)
+        route = default_route(self.editor.lib, r['id'])
+        if route is None:
+            return 'No route to a calibration: add an R against a standard that has one.'
         try:
-            t = math.log1p(rec[0] * math.expm1(lam * float(cal['age']) * 1e6)) / lam / 1e6
-        except (TypeError, ValueError):
+            import arar_math as am
+            t = am.monitor_age(am.route_cfg(route, self.editor.lib))
+        except Exception:
             return ''
-        return (f"With the R marked Use, this monitor is {t:.6g} Ma on {cal['name']} "
-                f"(FCs {cal['age']} Ma).")
+        return f"Default route: {route_line(route)}. On it, {r['id']} is {t:.6g} Ma."
 
     def save(self, r):
         r['id'] = self.sid.text().strip() or r.get('id', '')
@@ -952,21 +1292,202 @@ class StandardPage(_Page):
         r['locality'] = self.loc.text().strip()
         r['notes'] = self.notes.toPlainText().strip()
         ics = []
-        for x in self.ics.rows():
+        self._foreign_out = {h: [] for h in getattr(self, '_holders_shown', set())}
+        for i, x in enumerate(self.ics.rows()):
             if x.get('R') is None:
+                continue
+            holder = self.ics.item(i, 4).data(Qt.UserRole)
+            if holder:
+                self._foreign_out.setdefault(holder, []).append(x)
                 continue
             d = {'R': x['R'], 'R_1s': x.get('R_1s') or 0.0, 'ratio': x.get('ratio', 'std/FCs'),
                  'reference': x.get('reference', ''),
                  'doi': x.get('doi', ''), 'notes': x.get('notes', '')}
+            if (x.get('other') or 'FCs') != 'FCs':
+                d['other'] = x['other']
             if x.get('recommended'):
                 d['recommended'] = True
             ics.append(d)
-        r['intercalibrations'] = ics
+        r['intercalibrations'] = getattr(self, '_self_ics', []) + ics
         r['published_ages'] = [
             {'age': x['age'], 'age_1s': x.get('age_1s') or 0.0,
              'decay_constant': x.get('decay_constant'), 'reference': x.get('reference', ''),
              'doi': x.get('doi', ''), 'notes': x.get('notes', '')}
             for x in self.ages.rows() if x.get('age') is not None]
+        return r
+
+
+class RoutePage(_Page):
+    """Routes: the monitor, steps through R values in the library, and a
+    calibration of the standard the steps end at."""
+    section = 'routes'
+    noun = 'route'
+
+    def label(self, r):
+        tag = '  (default)' if r.get('default') else ''
+        return f"{r.get('monitor', '')} — {r.get('name', '')}{tag}"
+
+    def build_form(self, w):
+        g = QGridLayout(w)
+        self.name, self.mon, self.cal, self.lam = QLineEdit(), QComboBox(), QComboBox(), QComboBox()
+        self.default = QCheckBox('Default route for this monitor in all tools')
+        self.steps = QListWidget()
+        self.steps.setMaximumHeight(130)
+        self.next = QComboBox()
+        b_add, b_rem = QPushButton('Add step'), QPushButton('Remove last step')
+        b_add.clicked.connect(self._add_step)
+        b_rem.clicked.connect(self._remove_step)
+        self.mon.currentTextChanged.connect(self._monitor_changed)
+        self.cal.currentIndexChanged.connect(self._cal_changed)
+        self.lam.currentIndexChanged.connect(lambda _i: self._show())
+        g.addWidget(QLabel('Name'), 0, 0)
+        g.addWidget(self.name, 0, 1, 1, 3)
+        g.addWidget(QLabel('Monitor'), 1, 0)
+        g.addWidget(self.mon, 1, 1)
+        g.addWidget(QLabel('Steps'), 2, 0, Qt.AlignTop)
+        g.addWidget(self.steps, 2, 1, 1, 3)
+        g.addWidget(QLabel('Next step'), 3, 0)
+        g.addWidget(self.next, 3, 1)
+        g.addWidget(b_add, 3, 2)
+        g.addWidget(b_rem, 3, 3)
+        g.addWidget(_note('Only R values in the library are offered: one measured between the '
+                          'standard the route has reached and another it has not visited yet. '
+                          'Add your own R under Monitors to use it here.'), 4, 1, 1, 3)
+        g.addWidget(QLabel('Calibration'), 5, 0)
+        g.addWidget(self.cal, 5, 1, 1, 3)
+        g.addWidget(QLabel('Decay constant'), 6, 0)
+        g.addWidget(self.lam, 6, 1, 1, 3)
+        g.addWidget(self.default, 7, 1, 1, 3)
+        self.derived = QLabel('')
+        self.derived.setWordWrap(True)
+        self.derived.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        g.addWidget(self.derived, 8, 0, 1, 4)
+        g.setRowStretch(9, 1)
+        self._steps = []
+
+    # --- the route being edited ------------------------------------------
+    def _end(self):
+        return self._steps[-1]['to'] if self._steps else self.mon.currentText()
+
+    def _refill(self, cal_name=None, lam_name=None):
+        lib = self.editor.lib
+        self.steps.clear()
+        for st in self._steps:
+            self.steps.addItem(f"{st['from']} → {st['to']}:  R({st['num']}/{st['den']}) = "
+                               f"{pm_text(st['R'], st.get('R_1s') or 0.0)}, "
+                               f"{st.get('source') or 'no source'}")
+        visited = [self.mon.currentText()] + [st['to'] for st in self._steps]
+        self._cands = steps_from(lib, self._end(), visited)
+        self.next.clear()
+        for st in self._cands:
+            self.next.addItem(f"→ {st['to']}:  R({st['num']}/{st['den']}) = "
+                              f"{pm_text(st['R'], st.get('R_1s') or 0.0)}, "
+                              f"{st.get('source') or 'no source'}")
+        self.next.setEnabled(bool(self._cands))
+        cals = calibrations_of(lib, self._end())
+        self.cal.blockSignals(True)
+        self.cal.clear()
+        for c in cals:
+            self.cal.addItem(c['name'])
+        if not cals:
+            self.cal.addItem(f'(no calibration of {self._end()}: add a step)')
+        i = self.cal.findText(cal_name) if cal_name else -1
+        if i < 0:
+            dc = default_calibration(lib, self._end())
+            i = self.cal.findText(dc['name']) if dc else 0
+        self.cal.setCurrentIndex(max(0, i))
+        self.cal.setEnabled(bool(cals))
+        self.cal.blockSignals(False)
+        if lam_name:
+            self.lam.setCurrentIndex(max(0, self.lam.findText(lam_name)))
+        else:
+            self._cal_changed()
+        self._show()
+
+    def _monitor_changed(self, _t):
+        if self._steps and self._steps[0]['from'] != self.mon.currentText():
+            self._steps = []
+        self._refill()
+
+    def _cal_changed(self, *_):
+        c = find(self.editor.lib, 'calibrations', self.cal.currentText())
+        if c is not None:
+            self.lam.blockSignals(True)
+            self.lam.setCurrentIndex(max(0, self.lam.findText(c.get('decay_constant', ''))))
+            self.lam.blockSignals(False)
+        self._show()
+
+    def _add_step(self):
+        i = self.next.currentIndex()
+        if 0 <= i < len(self._cands):
+            self._steps.append(copy.deepcopy(self._cands[i]))
+            self._refill()
+
+    def _remove_step(self):
+        if self._steps:
+            self._steps.pop()
+            self._refill()
+
+    def _route(self):
+        return {'name': self.name.text().strip(), 'monitor': self.mon.currentText(),
+                'steps': copy.deepcopy(self._steps), 'calibration': self.cal.currentText(),
+                'lambda': self.lam.currentText()}
+
+    def _show(self):
+        r = self._route()
+        errs = route_problems(r, self.editor.lib)
+        if errs:
+            self.derived.setText('Not usable yet: ' + '; '.join(errs) + '.')
+            return
+        try:
+            import arar_math as am
+            c = am.route_cfg(r, self.editor.lib)
+            t = am.monitor_age(c)
+        except Exception as e:
+            self.derived.setText(f'Not usable: {e}')
+            return
+        prod = ' · '.join(f"{st['R']:g}" if st['num'] == st['from'] else f"1/{st['R']:g}"
+                          for st in self._steps)
+        end = self._end()
+        eq = (f"e^(λ t_{r['monitor']}) − 1 = {prod + ' · ' if prod else ''}(e^(λ t_{end}) − 1)"
+              if self._steps else '')
+        self.derived.setText(f"{route_line(r)}\n{eq}\n{r['monitor']} = {t:.6g} Ma on this route."
+                             .replace('\n\n', '\n'))
+
+    # --- _Page -----------------------------------------------------------
+    def blank(self):
+        cal = default_calibration(self.editor.lib, 'FCs') or {}
+        return {'monitor': 'FCs', 'steps': [], 'calibration': cal.get('name', ''),
+                'lambda': cal.get('decay_constant', '')}
+
+    def load(self, r):
+        lib = self.editor.lib
+        self.name.setText(r.get('name', ''))
+        self.name.setReadOnly(not r.get('user', False) and bool(r))
+        self.mon.blockSignals(True)
+        self.mon.clear()
+        self.mon.addItems([st['id'] for st in lib['standards']])
+        self.mon.setCurrentIndex(max(0, self.mon.findText(r.get('monitor', 'FCs'))))
+        self.mon.blockSignals(False)
+        self.lam.blockSignals(True)
+        self.lam.clear()
+        self.lam.addItems([d['name'] for d in lib['decay_constants']])
+        self.lam.blockSignals(False)
+        self.default.setChecked(bool(r.get('default')))
+        self._steps = copy.deepcopy(r.get('steps') or [])
+        self._refill(r.get('calibration'), r.get('lambda'))
+
+    def save(self, r):
+        r.update(self._route())
+        r['name'] = r['name'] or r.get('name', '')
+        if self.default.isChecked():
+            r['default'] = True
+            for other in self.rows:
+                if (other is not self.rows[self._cur] and other.get('default')
+                        and other.get('monitor') == r['monitor']):
+                    other.pop('default')
+        else:
+            r.pop('default', None)
         return r
 
 
@@ -980,19 +1501,15 @@ class StandardsEditor(QDialog):
         self.dirty = False
         self.saved = False
         v = QVBoxLayout(self)
-        v.addWidget(_note('Every uncertainty is 1σ. R is the ⁴⁰Ar*/³⁹Ar_K of a monitor '
-                          'divided by that of Fish Canyon sanidine (FCs) in the same '
-                          'irradiation, so it depends on no age or decay constant. Edited '
-                          'entries are marked; the published values stay available.'))
         self.tabs = QTabWidget()
-        self.pages = [StandardPage(self), CalibrationPage(self), DecayPage(self)]
-        for p, t in zip(self.pages, ['Monitors', 'Fish Canyon calibrations', 'Decay constants']):
+        self.pages = [StandardPage(self), CalibrationPage(self), RoutePage(self), DecayPage(self)]
+        for p, t in zip(self.pages, ['Monitors', 'Calibrations', 'Routes', 'Decay constants']):
             self.tabs.addTab(p, t)
         self.tabs.currentChanged.connect(self._tab_changed)
         v.addWidget(self.tabs, 1)
         row = QHBoxLayout()
         self.path_note = _note(f'Your edits are saved in {user_path()}. '
-                               'Tools read the standards when they start.')
+                               'The Calibration… dialogs of the tools read them each time they open.')
         row.addWidget(self.path_note, 1)
         b_reset = QPushButton('Reset all…')
         b_reset.clicked.connect(self._reset)
@@ -1025,18 +1542,17 @@ class StandardsEditor(QDialog):
             QMessageBox.warning(self, 'Not saved', 'Please correct these first:\n\n• ' + '\n• '.join(errs))
             return False
         try:
-            save(self.lib)
+            save(self.lib, self.published)
         except OSError as e:
             QMessageBox.warning(self, 'Not saved', f'Could not write the file:\n{e}')
             return False
         self.dirty = False
         self.saved = True
+        self.published = load_default()
         self.lib = load()
         for pg in self.pages:
             pg.refresh_list(pg.list.currentRow() if pg.list.currentRow() >= 0 else 0)
-        QMessageBox.information(self, 'Saved', 'Saved. Tools that are open use the new values '
-                                'after they are restarted; the Recalculator and age combiner '
-                                'updates at once.')
+        QMessageBox.information(self, 'Saved', 'Calibration available in tools')
         return True
 
     def _reset(self):
@@ -1067,6 +1583,8 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName('Standards')
     force_light(app)
+    from arar_math import no_wheel_on_dropdowns
+    no_wheel_on_dropdowns(app)
     dlg = StandardsEditor()
     dlg.show()
     sys.exit(app.exec_())

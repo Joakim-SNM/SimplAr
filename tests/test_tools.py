@@ -25,7 +25,7 @@ import subprocess
 
 import numpy as np
 import pandas as pd
-from PyQt5.QtWidgets import QApplication, QMessageBox, QFileDialog
+from PyQt5.QtWidgets import QApplication, QMessageBox, QFileDialog, QInputDialog, QDialog, QTableWidgetItem, QPushButton
 from PyQt5.QtGui import QFontDatabase, QFontInfo
 
 import arar_math as am
@@ -91,6 +91,97 @@ def test_every_window_opens():
         w.show()
     app.processEvents()
     ok(', '.join(names))
+
+
+def test_isochron_atmospheric_in_view():
+    print('Isochron, atmospheric reference:')
+    def iso_steps(b, xr, off=0.0):
+        out = []
+        for k in range(6):
+            x = xr * (0.45 + 0.1 * k) + off
+            y = b * (1 - x / xr)
+            out.append(dict(label=chr(65 + k), status='normal', iso_nx=x, iso_nsx=x * 1e-3,
+                            iso_ny=y, iso_nsy=max(y, 1e-6) * 1e-3 + 2e-8, iso_iri=0.02,
+                            pct39Ar=100 / 6, r4039=11.3, err_r4039=0.004))
+        return out
+    for data in (iso_steps(1 / 320, 1 / 11.3),
+                 [iso_steps(1 / 320, 1 / 11.3), iso_steps(1 / 320, 1 / 11.3, off=5e-4)]):
+        c = pl.IsochronCanvas()
+        c._showing_inverse, c._iso_zoom, c._atm_ratio = True, 'intercept', None
+        c.redraw(data, J=0.0027)
+        assert c.ax.get_ylim()[1] < 1 / 298.56
+        c._atm_ratio = 298.56
+        c.redraw(data, J=0.0027)
+        assert c.ax.get_ylim()[1] > 1 / 298.56, c.ax.get_ylim()
+    ok('an intercept below atmosphere: the axis reaches the reference line (one and several aliquots)')
+
+
+def test_no_wheel_on_dropdowns():
+    print('Mouse wheel over a dropdown:')
+    from PyQt5.QtCore import Qt, QPoint, QPointF
+    from PyQt5.QtGui import QWheelEvent
+    from PyQt5.QtWidgets import QComboBox, QScrollArea, QWidget, QVBoxLayout
+    app = QApplication.instance()
+    am.no_wheel_on_dropdowns(app)
+    area, inner = QScrollArea(), QWidget()
+    lay = QVBoxLayout(inner)
+    cb = QComboBox()
+    cb.addItems(['a', 'b', 'c'])
+    lay.addWidget(cb)
+    inner.setMinimumHeight(2000)
+    area.setWidget(inner)
+    area.resize(300, 200)
+    area.show()
+    app.processEvents()
+    ev = QWheelEvent(QPointF(5, 5), QPointF(cb.mapToGlobal(QPoint(5, 5))), QPoint(0, 0),
+                     QPoint(0, -120), Qt.NoButton, Qt.NoModifier, Qt.NoScrollPhase, False)
+    app.sendEvent(cb, ev)
+    assert cb.currentIndex() == 0
+    assert area.verticalScrollBar().value() > 0
+    area.close()
+    ok('the value stays; the page scrolls instead')
+
+
+def test_standards_window():
+    print('Standards window: monitors, calibrations, routes:')
+    se = load('standards.py', 'se2')
+    w = se.StandardsEditor()
+    assert [w.tabs.tabText(i) for i in range(w.tabs.count())] == \
+        ['Monitors', 'Calibrations', 'Routes', 'Decay constants']
+    mon, cal, rt, _ = w.pages
+    assert [r['id'] for r in mon.rows][0] == 'FCs' and not mon.list.isRowHidden(0)
+    assert 'Phillips' in mon.derived.text()
+    w._commit_all()
+    assert not w.dirty
+    ok('FCs listed with the other monitors; browsing changes nothing')
+    ids = [r['id'] for r in mon.rows]
+    mon.list.setCurrentRow(ids.index('FCs'))
+    acs = [i for i in range(mon.ics.rowCount()) if mon.ics.cellWidget(i, 0).currentText() == 'ACs']
+    assert acs and mon.ics.cellWidget(acs[0], 1).currentText() == 'other / this'
+    mon.ics.item(acs[0], 2).setText('0.0417')
+    mon.list.setCurrentRow(ids.index('ACs'))
+    assert mon.rows[ids.index('ACs')]['intercalibrations'][0]['R'] == 0.0417
+    assert mon.ics.item(0, 2).text() == '0.0417' and w.dirty
+    ok('an R stored with ACs shows and edits on the FCs page too')
+    w.lib = se.load()
+    w.dirty = False
+    for p in w.pages:
+        p._cur = None
+        p.refresh_list(0)
+    QInputDialog.getText = staticmethod(lambda *a, **k: ('TCs via FCs', True))
+    rt._add()
+    rt.mon.setCurrentText('TCs')
+    assert [rt.next.itemText(i).split(':')[0] for i in range(rt.next.count())] == ['→ FCs']
+    assert not rt.cal.isEnabled()                    # TCs has no calibration of its own
+    rt._add_step()
+    assert rt.cal.isEnabled() and rt.cal.currentText() == 'Phillips et al. (2022)'
+    rt.default.setChecked(True)
+    assert 'TCs = 28.4891 Ma' in rt.derived.text(), rt.derived.text()
+    w._commit_all()
+    lib = w.lib
+    assert not se.check(lib), se.check(lib)
+    assert se.default_route(lib, 'TCs')['name'] == 'TCs via FCs'
+    ok('route TCs → FCs → Phillips built step by step and made the TCs default')
 
 
 def test_data_folders():
@@ -277,6 +368,93 @@ def prob_pool(path, answer):
     return win
 
 
+def test_combiner_loads_files():
+    print('Age combiner: ages from .arar, .ararstack and .arprob files:')
+    rcm = load('6_recalculator/recalculator.py', 'rc_files')
+    # a stack: one row per aliquot, its plateau
+    w = make_stack()
+    rows, flux, notes = rcm.file_ages(save_stack(w))
+    assert len(rows) == 3 and flux, (len(rows), notes)
+    for row, sess in zip(rows, w._sessions):
+        p = sess['plateau']
+        close(row['age'], p['r']['mean'], 1e-12, f"{row['label']}: plateau age")
+        close(row['int'], p['e1s_int'], 1e-12, '  internal error')
+        assert row['hole'] == sess['cfg']['hole_id']
+    # a single .arar: its plateau, as the Plateau & isochron tool finds it
+    one = pl.PlateauWindow()
+    one.cfg.update(dict(PHIL, ageFluxMode='ratio_R_std', rStd=5.70, rStdErrPct=0.02))
+    one.raw_steps = steps(11.30, scatter=4e-4, seed=7)
+    one.title_edit.setText('single')
+    one._update_all()
+    path = os.path.join(tempfile.mkdtemp(), 'single.arar')
+    QFileDialog.getSaveFileName = staticmethod(lambda *a, **k: (path, ''))
+    one.save_session()
+    rows, _, _ = rcm.file_ages(path)
+    close(rows[0]['age'], one.plateau['r']['mean'], 1e-9, 'single .arar: plateau age')
+    close(rows[0]['ana'], one.plateau.get('e1s_ana', one.plateau['e1s_int']), 1e-9, '  analytical error')
+    src = rcm._file_source(rows[0]['cfg'])
+    assert src['std'] == 'FCs' and abs(src['std_age'] - 28.176) < 1e-6, src
+    # an .arprob: one row per sample, its combined age
+    a = pp.ProbabilityWindow()
+    a._load_docs(a.samples[0], [pp.parse_arar(path)])
+    a.samples[0].name = 'P'
+    p2 = os.path.join(tempfile.mkdtemp(), 's.arprob')
+    old = pp.dfold.get_save_file_name
+    pp.dfold.get_save_file_name = lambda *a_, **k: (p2, '')
+    a.save_session()
+    pp.dfold.get_save_file_name = old
+    rows, _, _ = rcm.file_ages(p2)
+    close(rows[0]['age'], a.samples[0].wm()['wm'], 1e-12, '.arprob: the sample\'s combined age')
+    # into the Combine page, recalculated onto the same calibration: unchanged
+    win = rcm.RecalculatorWindow()
+    tab = win.combine_tab
+    old = rcm.dfold.get_open_file_names
+    rcm.dfold.get_open_file_names = lambda *a_, **k: ([path], '')
+    tab.load_files()
+    rcm.dfold.get_open_file_names = old
+    assert tab.table.text(0, 0) == 'single' and tab.table.source(0)['std'] == 'FCs'
+    ok('plateau and sample ages load with their calibration')
+    # the flux window: "auto" finds the hole from Position, a pick replaces it,
+    # Apply recalculates and keeps the window open
+    import flux_dialog as fd
+    spath = save_stack(w)
+    rcm.dfold.get_open_file_names = lambda *a_, **k: ([spath], '')
+    tab.load_files()                       # the stack brings its disk flux
+    rcm.dfold.get_open_file_names = old
+    r = tab.filled_rows()[-1]
+    m = tab.match(r)
+    assert m is not None, tab.table.text(r, rcm.C_POS)
+    key = m[0]
+    holes = list(tab.disk_flux[key]['idx'])
+    other = next(h for h in holes if tab.disk_flux[key]['idx'][h] != m[1])
+    dlg = fd.FluxAssignDialog(tab, rcm._RecalcFluxHost(tab))
+    row = tab.filled_rows().index(r)
+    cb, choices = dlg._row_combos[row]
+    k = next(i for i, (_l, v) in enumerate(choices)
+             if isinstance(v, tuple) and (str(v[0]), str(v[1]), str(v[2])) == (key[0], key[1], other))
+    cb.setCurrentIndex(k)
+    dlg._apply()
+    assert tab.match(r) == (key, tab.disk_flux[key]['idx'][other])
+    btns = [b.text() for b in dlg.findChildren(QPushButton)]
+    assert 'Apply' in btns and 'Close' in btns and not any('shown disk' in t for t in btns), btns
+    assert dlg.tbl.horizontalHeaderItem(0).text() == 'Sample'
+    dlg.close()
+    ok('flux window: auto hole from Position, a picked hole replaces it, Apply and Close')
+    # recalculated ages: one line per sample above the combined age
+    tab.recalc()
+    txt = tab.report.toPlainText()
+    assert 'Combined age' in txt and txt.startswith('Combined age'), txt[:200]   # nothing moved
+    r0 = tab.filled_rows()[0]
+    src = dict(tab.table.source(r0), std_age=28.02)
+    tab.table.cellWidget(r0, rcm.C_SRC).set_source(src)
+    tab.recalc()
+    txt = tab.report.toPlainText()
+    head = txt.split('Combined age')[0]
+    for d in tab.items:
+        assert head.count(d['label'] + ':') == 1, (d['label'], head)
+    ok('recalculated ages listed per sample before the combined age')
+
+
 def test_stack_vs_probability():
     print('Plateau stack (n = aliquots) vs the Age distribution tool, same .ararstack:')
     w = make_stack()
@@ -360,6 +538,52 @@ def test_converter_file_from_R():
     (ages_R, _s), _ = am.r_to_age_cfg([11.40], [0.0], cfg)
     close(age_prob, float(ages_R[0]), 1e-12, 'Probability age = R-standard age at the cfg calibration')
     close(win.samples[0].j_cfg['jVal'], am.cfg_J(cfg)[0], 1e-15, 'jVal synced to the R standard')
+
+
+def test_arprob_as_sample():
+    print('An .arprob session loaded into a sample, like a stack:')
+    pp = load('5_age_distribution/age_distribution.py', 'pp_arprob')
+    d = tempfile.mkdtemp()
+    a = pp.ProbabilityWindow()
+    for i, rstd in enumerate((5.70, 5.72, 5.75)):
+        st = [dict(label=chr(65 + k), age=55.0, err2s=0.05, r4039=R, err_r4039=0.004,
+                   pct39Ar=25, status='normal')
+              for k, R in enumerate((11.40 + 0.01 * i, 11.41, 11.39, 11.405))]
+        f = os.path.join(d, f's{i}.arar')
+        json.dump(dict(title=f'S{i}', cfg=dict(PHIL, ageFluxMode='ratio_R_std', rStd=rstd,
+                                               rStdErrPct=0.02 + 0.01 * i, stepSigma=1),
+                       steps=st), open(f, 'w', encoding='utf-8'))
+        s = a.samples[0] if i == 0 else a.add_sample(pp.Sample(f'S{i}', pp._PALETTE[i]))
+        a._load_docs(s, [pp.parse_arar(f)])
+    a.samples[2].manual[1] = 'out'
+    path = os.path.join(d, 'three.arprob')
+    old_save, old_open = pp.dfold.get_save_file_name, pp.dfold.get_open_file_names
+    pp.dfold.get_save_file_name = lambda *a_, **k: (path, '')
+    a.save_session()
+    pp.dfold.get_open_file_names = lambda *a_, **k: ([path], '')
+    ages = [list(x.ages) for x in a.samples]
+    for answer in (QMessageBox.Yes, QMessageBox.No):
+        b = pp.ProbabilityWindow()
+        old_q = QMessageBox.question
+        QMessageBox.question = staticmethod(lambda *a_, **k: answer)
+        try:
+            b.load_into(b.samples[0])
+        finally:
+            QMessageBox.question = old_q
+        if answer == QMessageBox.Yes:
+            assert [x.name for x in b.samples] == ['S0', 'S1', 'S2']
+            for x, ref in zip(b.samples, ages):
+                for u, v in zip(x.ages, ref):
+                    assert abs(u - v) <= 1e-12 * abs(v), (u, v)
+            assert b.samples[2].manual[1] == 'out'
+            assert b.samples[1].j_cfg['rStd'] == 5.72
+        else:
+            assert len(b.samples) == 1 and len(b.samples[0].ages) == 12
+            for u, v in zip(b.samples[0].ages, sum(ages, [])):
+                assert abs(u - v) <= 1e-9 * abs(v), (u, v)
+            assert b.samples[0].manual[9] == 'out'
+    pp.dfold.get_save_file_name, pp.dfold.get_open_file_names = old_save, old_open
+    ok('Yes: one sample each, as saved; No: all points in one sample, ages unchanged')
 
 
 def test_wendt_carl_threshold():
@@ -578,11 +802,264 @@ def test_age_distribution_data_box():
     ok('Append into an empty sample keeps the R values')
 
 
+def test_plateau_calibration_dialog():
+    print('Plateau & isochron, Calibration…: monitor and route:')
+    w = pl.PlateauWindow()
+    w.raw_steps = steps(11.30, scatter=4e-4)
+    w._update_all()
+    J0 = am.cfg_J(w.cfg)[0]
+    t0 = w.plateau['r']['mean'] if w.plateau else w.steps_c[0]['age']
+    assert 'Phillips' in w._lbl_route.text()
+
+    def pick(monitor, index=0, typed=None):
+        def run(dlg):
+            dlg._mon_cb.setCurrentText(monitor)
+            dlg._route_cb.setCurrentIndex(index)
+            if typed:
+                dlg._cust_box.setChecked(True)
+                for le, v in zip((dlg._c_age, dlg._c_age_s, dlg._c_lam, dlg._c_lam_s), typed):
+                    le.setText(repr(v))
+            return QDialog.Accepted
+        pl._CalibrationDialog.exec_ = run
+        w._open_calibrate()
+
+    pick('TCs')
+    close(am.cfg_J(w.cfg)[0] / J0, 1.0112, 1e-12, 'TCs → FCs → Phillips: J × R(TCs/FCs)')
+    assert w.cfg['route']['steps'][0]['to'] == 'FCs' and 'TCs' in w._lbl_route.text()
+    comps = dict(am.systematic_components(55.0, w.cfg))
+    assert 'R(TCs/FCs), Renne et al. (1998)' in comps
+    pick('FCs')
+    close(am.cfg_J(w.cfg)[0] / J0, 1.0, 1e-12, 'back to FCs: J as before')
+    close(w.plateau['r']['mean'] if w.plateau else w.steps_c[0]['age'], t0, 1e-9, 'and the same age')
+    pick('FCs', typed=(28.02, 0.16, 5.543e-10, 0.0))
+    ing = math.expm1(5.543e-10 * 28.02e6)
+    close(am.monitor_ingrowth(w.cfg) / am.cfg_J(w.cfg)[0], w.cfg['rStd'], 1e-9, 'typed age and λ: J from them')
+    assert w.cfg['route']['calibration']['age'] == 28.02
+    close(am.monitor_ingrowth(w.cfg), ing, 1e-15, 'ingrowth of the typed calibration')
+    w._le_stdAge.setText('28.201')
+    w._le_stdAgeErr.setText('0.023')
+    w._le_lambda.setText(repr(5.463e-10))
+    w._le_lambdaErr.setText(repr(5.4e-12))
+    assert w.cfg['route']['calibration'] == 'Kuiper et al. (2008)', w.cfg['route']['calibration']
+    ok('typed values that match a calibration take it; the route line follows')
+
+    # ages without ratios in R mode: a calibration change recasts them by the
+    # change alone, whatever J placeholder the session holds
+    w2 = pl.PlateauWindow()
+    w2.raw_steps = synth.plateau_steps()
+    w2._update_all()
+    a0 = [x['age'] for x in w2.steps_c]
+    pick_w = w
+    w = w2
+    pick('FCs')
+    close(max(abs(x['age'] - y) for x, y in zip(w2.steps_c, a0)), 0.0, 1e-9,
+          'R mode, ages only: no change, same ages')
+    pick('TCs')
+    lam = 5.463e-10
+    t1 = math.log1p(1.0112 * math.expm1(lam * a0[0] * 1e6)) / lam / 1e6
+    close(w2.steps_c[0]['age'], t1, 1e-9, '  and TCs scales e^(λt) − 1 by R(TCs/FCs)')
+    w = pick_w
+
+    # a route built in Standards from the dialog is selected when Standards closes
+    import standards as stdmod
+    def build(ed):
+        rt = ed.pages[2]
+        QInputDialog.getText = staticmethod(lambda *a, **k: ('ACs straight to A1', True))
+        rt._add()
+        rt.mon.setCurrentText('ACs')
+        rt.next.setCurrentIndex([k for k, c in enumerate(rt._cands) if c['to'] == 'A1'][0])
+        rt._add_step()
+        ed._save()
+        return 0
+    stdmod.StandardsEditor.exec_ = build
+    seen = {}
+    def run(dlg):
+        dlg._open_standards()
+        seen['mon'] = dlg._mon_cb.currentText()
+        seen['route'] = dlg._route_cb.currentText()
+        return QDialog.Accepted
+    pl._CalibrationDialog.exec_ = run
+    w._open_calibrate()
+    assert seen == {'mon': 'ACs', 'route': 'ACs straight to A1'}, seen
+    assert w.cfg['route']['steps'][0]['to'] == 'A1' and w.cfg['route']['calibration'] == 'A1 astronomical age'
+    ok('route built in Standards from the dialog is picked and applied, no restart')
+    pick('FCs')
+    def choose(ed):                   # the route exists already: select it, close
+        rt = ed.pages[2]
+        rt.list.setCurrentRow([r['name'] for r in rt.rows].index('ACs straight to A1'))
+        return 0
+    stdmod.StandardsEditor.exec_ = choose
+    pl._CalibrationDialog.exec_ = run
+    w._open_calibrate()
+    assert seen == {'mon': 'ACs', 'route': 'ACs straight to A1'}, seen
+    assert w.cfg['monitor'] == 'ACs'
+    ok('an existing route selected in Standards is picked when Standards closes')
+
+    # a stack on an FCs .jflux, calibrated to TCs: warned, and the hole R read as TCs
+    ws = make_stack()
+    pl._CalibrationDialog.exec_ = lambda dlg: (dlg._mon_cb.setCurrentText('TCs'),
+                                               QDialog.Accepted)[1]
+    shown.clear()
+    ws._open_calibrate()
+    assert any('measured on FCs' in m[1][1] for m in shown), shown
+    eff = ws._eff_cfg_for(0)
+    close(eff['rStd'], 5.70 / 1.0112, 1e-9, 'stack hole R read as a TCs ratio')
+    ok('flux on another monitor than the calibration: warned')
+
+    w3 = pl.PlateauWindow()
+    w3.raw_steps = steps(11.30, scatter=4e-4)
+    w3._update_all()
+    pl._CalibrationDialog.exec_ = lambda dlg: (dlg._full_cb.setChecked(True), QDialog.Accepted)[1]
+    w3._open_calibrate()
+    assert w3.cfg['fullSystematics'] and w3._lbl_route.text().endswith('full external')
+    pl._CalibrationDialog.exec_ = lambda dlg: (dlg._full_cb.setChecked(False), QDialog.Accepted)[1]
+    w3._open_calibrate()
+    assert not w3.cfg['fullSystematics'] and 'full external' not in w3._lbl_route.text()
+    ok('Full external set under Advanced, shown in the route line')
+    stdmod.save(stdmod.load_default())
+    am.reload_standards()
+
+
+def test_age_distribution_calibration():
+    print('Age distribution, Calibration…: one bar, samples on different monitors:')
+    ad = load('5_age_distribution/age_distribution.py', 'ad_cal')
+    R, sR, _F, _sF = load_ratios()
+    win = ad.ProbabilityWindow()
+    for sm in list(win.samples):
+        win.remove_sample(sm)
+    for nm in ('A', 'B'):
+        smp = win.add_sample()
+        smp.name = nm
+        smp.input_mode = 'ratio'; smp.reject = 'none'
+        smp.j_cfg.update(CFG_R)
+        smp.r_vals = np.array(R[:10]); smp.r_uncs = np.array(sR[:10])
+        smp.recompute()
+    win._sync_calib_bar()
+    assert 'Phillips' in win.route_lbl.text() and not win.mon_info.text()
+    I0 = am.monitor_ingrowth(win.samples[1].j_cfg)
+    wm0 = win.samples[1].wm()['wm']
+
+    def run(dlg):
+        dlg._mon_cb.setCurrentText('TCs')
+        dlg._sample_cbs[0].setChecked(False)          # A stays on FCs
+        return QDialog.Accepted
+    ad.CalibrationDialog.exec_ = run
+    win._open_calibrate()
+    a, b = win.samples
+    assert am.cfg_monitor(a.j_cfg)[0] == 'FCs' and am.cfg_monitor(b.j_cfg)[0] == 'TCs'
+    close(am.monitor_ingrowth(b.j_cfg) / I0, 1.0112, 1e-12, 'B on TCs → FCs → Phillips: e^(λt_M) − 1 × 1.0112')
+    assert b.wm()['wm'] > wm0
+    assert '2 calibrations' in win.route_lbl.text() and not win.mon_info.text()
+    ok('A stays on FCs, B moves to TCs; same end calibration, so no warning')
+    win.pool_on = True
+    pr = win.pool()
+    ages = [a.wm()['wm'], b.wm()['wm']]
+    C, labels = am.systematic_matrix(ages, [a.j_cfg, b.j_cfg])
+    shared = [l for l in labels if (C[:, labels.index(l)] != 0).all()]
+    assert set(shared) == {'A1 astronomical age', 'R(FCs/A1), Phillips et al. (2022)',
+                           'λ, Min et al. (2000)'}, shared
+    assert any(l.startswith('R(TCs/FCs)') for l in labels)
+    ok('pooled: A1 age, R(FCs/A1) and λ shared; R(TCs/FCs) on B only')
+
+    def run2(dlg):
+        dlg._route_cb.setCurrentIndex([dlg._route_cb.itemText(i)
+                                       for i in range(dlg._route_cb.count())].index('Carter et al. (2025)'))
+        dlg._sample_cbs[1].setChecked(False)
+        return QDialog.Accepted
+    ad.CalibrationDialog.exec_ = run2
+    win._open_calibrate()
+    assert 'different calibrations' in win.mon_info.text()
+    ok('samples ending on different calibrations: noted under the bar')
+    ad.CalibrationDialog.exec_ = lambda dlg: (dlg._full_cb.setChecked(True), QDialog.Accepted)[1]
+    win._open_calibrate()
+    assert all(s_.j_cfg['fullSystematics'] for s_ in win.samples)
+    assert win.route_lbl.text().endswith('full external')
+    ok('Full external from the dialog, for every sample')
+
+
+def test_route_survives_files():
+    print('A route through the files: stack on TCs → FCs → Phillips, saved and read back:')
+    w = make_stack()
+    pl._CalibrationDialog.exec_ = lambda dlg: (dlg._mon_cb.setCurrentText('TCs'), QDialog.Accepted)[1]
+    w._open_calibrate()
+    w._stack_method, w._wm_n_basis = am.METHOD_WM, 'aliquots'
+    r, a, i, e = w._combined_plateau()
+    assert any(k.startswith('R(TCs/FCs)') for k, _ in am.systematic_components(r['mean'], w._eff_cfg_for(0)))
+    path = save_stack(w)
+    w2 = pl.PlateauWindow(); w2._toggle_stack_mode(True)
+    QFileDialog.getOpenFileNames = staticmethod(lambda *a_, **k: ([path], ''))
+    w2._stack_load()
+    w2._stack_method, w2._wm_n_basis = am.METHOD_WM, 'aliquots'
+    r2, a2, i2, e2 = w2._combined_plateau()
+    close(r2['mean'], r['mean'], 1e-12, 'Plateau stack reloaded: age')
+    close(e2, e, 1e-12, '  external 1σ')
+    assert am.cfg_monitor(w2._eff_cfg_for(0))[0] == 'TCs'
+    pp._STAT_METHOD = am.METHOD_WM
+    win = prob_pool(path, QMessageBox.Yes)
+    res = win.pool()
+    close(res['wm'], r['mean'], 1e-9, 'Age distribution, one sample per aliquot: age')
+    close(res['sigma_ext'], e, 1e-6, '  external 1σ (R(TCs/FCs) kept)')
+    assert all(am.cfg_monitor(s_.j_cfg)[0] == 'TCs' for s_ in win._active())
+
+
+def test_recalculator_and_converter_calibration():
+    print('Recalculator target and Data converter source, on routes:')
+    rc = load('6_recalculator/recalculator.py', 'rc_route')
+    box = rc.CalibrationBox()
+    # a published TCs age (TCs 28.34 Ma, S&J λ) onto FCs · Phillips, through the R
+    # chosen for TCs: the same as before routes
+    R, sR, ref = 1.0112, 0.001, 'Renne, P.R. et al. (1998) Chemical Geology 145, 117–152'
+    old = am.recalculate(55.0, 28.34, 5.543e-10, rc.target_cfg('Phillips et al. (2022)'), R, sR,
+                         'R(TCs/FCs)')
+    cfg = box.route_for('TCs', R, sR, ref)
+    new = am.recalculate(55.0, 28.34, 5.543e-10, cfg, am.cfg_monitor(cfg)[1], 0.0, '')
+    close(new['age'], old['age'], 1e-12, 'TCs data onto FCs · Phillips: age as before')
+    close(math.sqrt(sum(v * v for _, v in new['components'])),
+          math.sqrt(sum(v * v for _, v in old['components'])), 1e-12, '  and its systematic error')
+    # the target route TCs → FCs → Phillips: TCs data go through it as it is
+    import standards as S
+    box.set_route(S.default_route(am.STANDARDS, 'TCs'))
+    cfg2 = box.route_for('TCs')
+    close(am.cfg_monitor(cfg2)[1], 1.0112, 1e-12, 'target route on TCs used for TCs data')
+    assert 'TCs' in box.name()
+    ok('the Recalculator target is a route; the line shows it')
+    win = rc.RecalculatorWindow()
+    tab = win.recalc_tab
+    tab.in_sig.setCurrentText('1σ')
+    tab.inp.setCurrentCell(0, 0)
+    tab.inp.paste('S1\t55.0\t0.010\t\t0.10\nS2\t55.0\t0.010\t0.030\t0.10\nS3\t55.0\t0.010\t\t\n'
+                  'S4\t55.0\t\t0.060\t0.10\nS5\t55.0\t\t0.040\t0.10')
+    res = {d['label']: d for d in tab.results}
+    f = abs(am.recalculate(55.0, tab.src.current()['std_age'], tab.src.current()['lam'],
+                           tab.tgt.cfg(), 1.0, 0.0, '')['factor'])
+    want = math.hypot(0.010, am.dt_dlnR(55.0, tab.src.current()['lam']) * 0.001) * f
+    close(res['S1']['int'], want, 1e-12, 'analytical + J % → internal')
+    close(res['S2']['int'], 0.030 * f, 1e-12, 'a typed internal error is kept')
+    assert res['S3']['int'] is None
+    ok('no J %: analytical only, as before')
+    jt = am.dt_dlnR(55.0, tab.src.current()['lam']) * 0.001
+    close(res['S4']['ana'], math.sqrt(0.060 ** 2 - jt ** 2) * f, 1e-12, 'internal + J % → analytical')
+    close(res['S4']['int'], 0.060 * f, 1e-12, '  internal kept')
+    assert res['S5']['ana'] is None and tab.bad_j == 1 and 'larger than' in tab.status.text()
+    ok('an internal error below the J term alone gives no analytical error, and says so')
+    dc = load('1_data_converter/data_converter.py', 'dc_route')
+    d = dc.ConvertDialog('x.xlsx', ['Sample', 'Age'], 'massspec')
+    dc.CalibrationDialog.exec_ = lambda dlg: (dlg._mon_cb.setCurrentText('TCs'), QDialog.Accepted)[1]
+    d._open_calibrate()
+    assert d._mon_combo.monitor() == 'TCs' and d._route_lbl.text().startswith('TCs → FCs')
+    close(d.fc_age_ma(), am.monitor_age(am.route_cfg(S.default_route(am.STANDARDS, 'TCs'))), 1e-6,
+          'converter: the TCs age on the chosen calibration')
+
+
 if __name__ == '__main__':
     test_launcher_and_about()
     test_every_window_opens()
+    test_no_wheel_on_dropdowns()
+    test_isochron_atmospheric_in_view()
+    test_standards_window()
     test_data_folders()
     test_unicode_session_files()
+    test_arprob_as_sample()
     test_converter_file_names()
     test_fonts()
     test_position_ident()
@@ -592,8 +1069,13 @@ if __name__ == '__main__':
     test_converter_file_from_R()
     test_wendt_carl_threshold()
     test_stack_vs_probability()
+    test_combiner_loads_files()
     test_imported_J_in_internal()
     test_flux_on_disk_vs_external()
     test_gui_paths()
     test_age_distribution_data_box()
+    test_plateau_calibration_dialog()
+    test_age_distribution_calibration()
+    test_route_survives_files()
+    test_recalculator_and_converter_calibration()
     print('ALL PASSED')

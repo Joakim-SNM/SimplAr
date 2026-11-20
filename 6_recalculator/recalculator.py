@@ -36,7 +36,7 @@ from PyQt5.QtWidgets import (
     QDialog, QDialogButtonBox, QLineEdit, QSpinBox, QPlainTextEdit, QSplitter,
     QFormLayout,
 )
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QKeySequence
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -45,13 +45,15 @@ from arar_math import (
     FC_PRESETS, LAMBDA_PRESETS, STANDARDS, paired_lambda, calibration_class,
     recalculate, external_route, calibration_warning, combine, j_correlation,
     read_jflux, serialize_disk_flux, deserialize_disk_flux, match_flux_hole,
-    flux_hole_R, flux_hole_rel, dt_dlnR, force_light,
+    flux_hole_R, flux_hole_rel, dt_dlnR, force_light, no_wheel_on_dropdowns,
     DEFAULT_FC_NAME, MIN_DECAY_DEFAULT, METHOD_WM, METHOD_GLS, edited_standards_note,
 )
 import data_folders as dfold
 import export
 import standards as stdlib
 from flux_dialog import FluxAssignDialog, FluxHost
+from calibration_dialog import CalibrationDialog
+from arar_math import route_cfg, route_text, cfg_monitor
 
 
 # ---------------------------------------------------------------------------
@@ -64,23 +66,26 @@ def lam_value(name):
 
 def source_presets():
     """Every (monitor, monitor age, decay constant) combination the library
-    knows, as (label, source dict).  FCs ages are the calibrations; other
-    monitors their published ages.  Ages without a decay constant (astronomical
+    knows, as (label, source dict): the FCs calibrations, then every monitor's
+    published ages not already among them.  Ages without a decay constant (astronomical
     anchors) are left out; use a custom source for them."""
     out = []
     for c in STANDARDS['calibrations']:
+        if c.get('standard', 'FCs') != 'FCs':
+            continue
         lam = lam_value(c['decay_constant'])
         if lam is None:
             continue
         out.append((f"FCs {c['age']:g} Ma · {c['name'].split('  ')[0]}",
                     dict(std='FCs', std_age=float(c['age']), lam_name=c['decay_constant'],
                          lam=lam, cal=c['name'])))
+    seen = {(d['std'], d['std_age'], d['lam_name']) for _, d in out}
     for s in STANDARDS['standards']:
-        if s['id'] == 'FCs':
-            continue
         for pa in s.get('published_ages') or []:
             lam = lam_value(pa.get('decay_constant'))
             if lam is None or not pa.get('age'):
+                continue
+            if (s['id'], float(pa['age']), pa['decay_constant']) in seen:
                 continue
             out.append((f"{s['id']} {pa['age']:g} Ma · {stdlib.short_ref(pa.get('reference'))}",
                         dict(std=s['id'], std_age=float(pa['age']),
@@ -115,7 +120,7 @@ def target_cfg(cal_name, full=False):
 
 def r_choices(std_id):
     """[(label, R, R_1s, reference)] of a monitor's intercalibrations, the
-    recommended one first."""
+    one marked Use in Standards first."""
     s = am.library_standard(std_id)
     if s is None or std_id == 'FCs':
         return [('FCs (R = 1)', 1.0, 0.0, '')]
@@ -126,7 +131,7 @@ def r_choices(std_id):
         R, Rs = stdlib.r_std_fcs(x)
         num, den = ('FCs', std_id) if x.get('ratio') == 'FCs/std' else (std_id, 'FCs')
         label = (f"R({num}/{den}) = {stdlib.pm_text(float(x['R']), float(x.get('R_1s') or 0))}"
-                 f" · {stdlib.short_ref(x.get('reference'))}" + (' · recommended' if x.get('recommended') else ''))
+                 f" · {stdlib.short_ref(x.get('reference'))}")
         out.append((label, R, Rs, x.get('reference', '')))
     return out
 
@@ -228,47 +233,98 @@ class PasteTable(QTableWidget):
 
 
 class CalibrationBox(QGroupBox):
-    """Target calibration: a Fish Canyon calibration with its paired λ."""
+    """Target calibration: a route from the Calibration… dialog (the dialog of
+    the other tools).  A published dataset on another monitor reaches it
+    through route_for."""
+
+    changed = pyqtSignal()
 
     def __init__(self, title='Recalculate to', parent=None):
         super().__init__(title, parent)
         g = QGridLayout(self)
-        self.cal = QComboBox()
-        self.cal.addItems([r[0] for r in FC_PRESETS])
-        i = self.cal.findText(DEFAULT_FC_NAME)
-        self.cal.setCurrentIndex(max(i, 0))
+        b = QPushButton('Calibration…')
+        b.setToolTip('The calibration to recalculate to: a route from Standards, or typed\n'
+                     'values; the full decay-constant uncertainty is under Advanced.')
+        b.clicked.connect(self._open)
+        self.route_lbl = QLabel('')
+        self.route_lbl.setWordWrap(True)
+        # kept for the code and sessions that read them; set from the dialog
         self.full = QCheckBox('Full decay-constant uncertainty (Min et al., 2000)')
-        self.full.setToolTip('Replace the λ term of the external error by the uncertainty of the '
-                             'two partial decay constants of Min et al. (2000), for an independent '
-                             'test of the ⁴⁰K clock.')
+        self.full.setVisible(False)
         self.info = _note('')
-        g.addWidget(QLabel('Calibration'), 0, 0)
-        g.addWidget(self.cal, 0, 1)
-        g.addWidget(self.full, 1, 1)
-        g.addWidget(self.info, 2, 0, 1, 2)
-        self.cal.currentIndexChanged.connect(self._info)
-        self.full.toggled.connect(self._info)
+        g.addWidget(b, 0, 0)
+        g.addWidget(self.route_lbl, 0, 1)
+        g.addWidget(self.info, 1, 0, 1, 2)
+        self.route = route_cfg(stdlib.default_route(STANDARDS, 'FCs'))['route']
+        self.full.toggled.connect(lambda _b: (self._info(), self.changed.emit()))
         self._info()
 
+    def _open(self):
+        dlg = CalibrationDialog(self.cfg(), parent=self, age_source=False, stored=False,
+                                full_external=self.full.isChecked())
+        if dlg.exec_() != QDialog.Accepted:
+            return
+        p = dlg.get_params()
+        self.route = p['route_keys']['route']
+        self.full.blockSignals(True)
+        self.full.setChecked(bool(p.get('full_external')))
+        self.full.blockSignals(False)
+        self._info()
+        self.changed.emit()
+
     def name(self):
-        return self.cal.currentText()
+        return stdlib.route_line(self.route)
+
+    def cal_name(self):
+        c = self.route.get('calibration')
+        return c if isinstance(c, str) else ''
 
     def cfg(self):
-        return target_cfg(self.name(), self.full.isChecked())
+        return dict(route_cfg(self.route), fullSystematics=self.full.isChecked())
+
+    def route_for(self, monitor, R=None, R_1s=0.0, ref=''):
+        """cfg of the target for data on `monitor`: the target route itself
+        on its own monitor; from FCs onwards, the R chosen for the monitor
+        (R, R_1s, ref) as the first step; else the R values marked Use."""
+        tgt = self.route
+        T = tgt.get('monitor', 'FCs')
+        if monitor == T:
+            r = tgt
+        else:
+            if T == 'FCs' and R:
+                lead = [{'from': monitor, 'to': 'FCs', 'num': monitor, 'den': 'FCs', 'R': R,
+                         'R_1s': R_1s, 'source': stdlib.short_ref(ref) or ref}]
+            else:
+                lead = stdlib.shortest_route(STANDARDS, monitor, T)
+                if lead is None:
+                    raise ValueError(f'no R in Standards leads from {monitor} to {T}')
+            r = dict(tgt, name='', monitor=monitor, steps=lead + list(tgt.get('steps') or []))
+        return dict(route_cfg(r), fullSystematics=self.full.isChecked())
 
     def _info(self, *_):
-        name, age, err, _ = next(r for r in FC_PRESETS if r[0] == self.name())
-        pl = paired_lambda(name)
-        txt = (f'FCs = {age:g} ± {err:g} Ma, λ = {fmt_lam(pl[1], pl[2])}, {pl[0]} (1σ). '
-               f'External error: {external_route(self.cfg())}.')
+        self.route_lbl.setText(self.name() + (' · full external' if self.full.isChecked() else ''))
+        self.route_lbl.setToolTip(route_text(self.route))
+        txt = f'External error: {external_route(self.cfg())}.'
         if edited_standards_note():
             txt += ' ' + edited_standards_note()
         self.info.setText(txt)
 
     def set_name(self, name):
-        i = self.cal.findText(name)
-        if i >= 0:
-            self.cal.setCurrentIndex(i)
+        """A target given by the name of a calibration (sessions, the source's
+        own calibration): that calibration on its own monitor and λ."""
+        c = stdlib.find(STANDARDS, 'calibrations', name)
+        if c is None:
+            return
+        self.route = {'name': '', 'monitor': c.get('standard', 'FCs'), 'steps': [],
+                      'calibration': c['name'], 'lambda': c.get('decay_constant')}
+        self._info()
+        self.changed.emit()
+
+    def set_route(self, route):
+        if route:
+            self.route = route
+            self._info()
+            self.changed.emit()
 
 
 class SourceDialog(QDialog):
@@ -388,7 +444,7 @@ def ask_custom_source(combo, parent):
 # Recalculate tab
 # ---------------------------------------------------------------------------
 
-IN_COLS = ['Sample', 'Age', '± analytical', '± internal']
+IN_COLS = ['Sample', 'Age', '± analytical', '± internal', 'J % (1σ)']
 OUT_COLS = ['Sample', 'Age', '± analytical', '± internal', '± external', 'Change (%)']
 
 
@@ -451,7 +507,8 @@ class RecalcTab(QWidget):
         self.inp = PasteTable(IN_COLS, 20)
         ll.addWidget(self.inp)
         ll.addWidget(_note('Paste from Excel with Ctrl+V (Cmd+V). ± internal includes the J '
-                           'uncertainty; leave it empty if only the analytical error is known.'))
+                           'uncertainty. Give J % (1σ) with either error and the other is '
+                           'calculated; with neither, the analytical error is carried alone.'))
         split.addWidget(left)
         right = QWidget()
         rl = QVBoxLayout(right)
@@ -471,8 +528,7 @@ class RecalcTab(QWidget):
 
         self.src.currentIndexChanged.connect(self._src_changed)
         self.r_combo.currentIndexChanged.connect(self.recalc)
-        self.tgt.cal.currentIndexChanged.connect(self.recalc)
-        self.tgt.full.toggled.connect(self.recalc)
+        self.tgt.changed.connect(self.recalc)
         for w in (self.unit, self.in_sig, self.out_sig):
             w.currentIndexChanged.connect(self.recalc)
         self.dec.valueChanged.connect(self.recalc)
@@ -510,28 +566,51 @@ class RecalcTab(QWidget):
 
     # --- data ---------------------------------------------------------------
     def rows(self):
-        """[(label, age_Ma, ana_1s_Ma, int_1s_Ma or None)] of the filled rows."""
+        """[(label, age_Ma, ana_1s_Ma, int_1s_Ma or None)] of the filled rows.
+
+        With a J % and one of the two errors the other follows:
+        σ_int² = σ_ana² + (∂t/∂ln J · σ_J/J)², on the published age and the
+        source's decay constant.  An internal error smaller than the J term
+        alone gives no analytical error (counted in self.bad_j)."""
         k = 1e-3 if self.unit.currentText() == 'ka' else 1.0
         div = 2.0 if self.in_sig.currentText() == '2σ' else 1.0
+        src = self.src.current() or {}
+        lam = src.get('lam') or am.LAMBDA_DEFAULT
         out = []
+        self.bad_j = 0
         for r in range(self.inp.rowCount()):
             age = _num(self.inp.text(r, 1))
             if age is None:
                 continue
             a = _num(self.inp.text(r, 2))
             i = _num(self.inp.text(r, 3))
-            out.append((self.inp.text(r, 0) or f'Row {r + 1}', age * k,
-                        None if a is None else abs(a) * k / div,
-                        None if i is None else abs(i) * k / div))
+            jp = _num(self.inp.text(r, 4))
+            a = None if a is None else abs(a) * k / div
+            i = None if i is None else abs(i) * k / div
+            if jp:
+                jt = dt_dlnR(age * k, lam) * abs(jp) / 100.0
+                if i is None and a is not None:
+                    i = math.hypot(a, jt)
+                elif a is None and i is not None:
+                    if i > jt:
+                        a = math.sqrt(i * i - jt * jt)
+                    else:
+                        self.bad_j += 1
+            out.append((self.inp.text(r, 0) or f'Row {r + 1}', age * k, a, i))
         return out
 
     def recalc(self, *_):
         src = self.src.current()
         if src is None:
             return
-        cfg = self.tgt.cfg()
         R, R_1s, ref = self.R()
-        label = f"R({src['std']}/FCs) {stdlib.short_ref(ref)}" if src['std'] != 'FCs' else ''
+        try:
+            cfg = self.tgt.route_for(src['std'], R if src['std'] != 'FCs' else None, R_1s, ref)
+        except ValueError as e:
+            self.status.setText(str(e))
+            return
+        # the route carries the monitor's R and its steps' errors
+        R, R_1s, label = cfg_monitor(cfg)[1], 0.0, ''
         k = 1e-3 if self.unit.currentText() == 'ka' else 1.0
         mult = 2.0 if self.out_sig.currentText() == '2σ' else 1.0
         dec = self.dec.value()
@@ -571,10 +650,14 @@ class RecalcTab(QWidget):
                          'uncertainty.')
         if errs:
             notes.append(f'{errs} row(s) could not be recalculated.')
+        if getattr(self, 'bad_j', 0):
+            notes.append(f'{self.bad_j} row(s): the J % alone is larger than the ± internal, '
+                         'so no analytical error follows from them.')
         w = calibration_warning(cfg)
         if w:
             notes.append(w)
-        if src['std'] == 'FCs' and src.get('cal') == self.tgt.name() and not self.tgt.full.isChecked():
+        if (src['std'] == 'FCs' and src.get('cal') == self.tgt.cal_name()
+                and not self.tgt.route.get('steps') and not self.tgt.full.isChecked()):
             notes.append('Same calibration: the ages are unchanged and the external error is the '
                          'one this calibration implies.')
         self.status.setText(' '.join(notes))
@@ -620,7 +703,8 @@ class RecalcTab(QWidget):
 
     def state(self):
         return dict(source=self.src.current(), R=self.r_combo.currentIndex(),
-                    target=self.tgt.name(), full=self.tgt.full.isChecked(),
+                    target=self.tgt.cal_name(), target_route=self.tgt.route,
+                    full=self.tgt.full.isChecked(),
                     unit=self.unit.currentText(), in_sig=self.in_sig.currentText(),
                     out_sig=self.out_sig.currentText(), dec=self.dec.value(),
                     table=[[self.inp.text(r, c) for c in range(len(IN_COLS))]
@@ -631,6 +715,7 @@ class RecalcTab(QWidget):
         self.src.set_source(st.get('source'))
         self.src._last = self.src.current()
         self.tgt.set_name(st.get('target', DEFAULT_FC_NAME))
+        self.tgt.set_route(st.get('target_route'))
         self.tgt.full.setChecked(bool(st.get('full')))
         for w, key in [(self.unit, 'unit'), (self.in_sig, 'in_sig'), (self.out_sig, 'out_sig')]:
             i = w.findText(st.get(key, ''))
@@ -660,6 +745,121 @@ C_IN = ['Sample', 'Age', '± analytical', '± internal', 'Published on', 'Positi
 C_SRC, C_POS = 4, 5
 
 
+# ---------------------------------------------------------------------------
+# Ages from the files of the other tools
+# ---------------------------------------------------------------------------
+
+_TOOL_MODULES = {}
+
+
+def _tool_module(rel, name):
+    """A module of another tool (its file under the SimplAr folder), loaded once."""
+    if name not in _TOOL_MODULES:
+        import importlib.util
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        spec = importlib.util.spec_from_file_location(name, os.path.join(root, rel))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _TOOL_MODULES[name] = mod
+    return _TOOL_MODULES[name]
+
+
+def _file_source(cfg):
+    """The 'Published on' of a saved cfg: its monitor, the monitor's age on the
+    cfg's calibration, and the cfg's decay constant."""
+    lam = float(cfg.get('lambdaYr') or am.LAMBDA_DEFAULT)
+    ing = am.monitor_ingrowth(cfg, lam)
+    name = next((n for n, v, _ in LAMBDA_PRESETS if abs(v - lam) < 1e-20), '')
+    return dict(std=cfg_monitor(cfg)[0], std_age=math.log1p(ing) / lam / 1e6,
+                lam=lam, lam_name=name)
+
+
+def _plateau_row(pl, title, cfg, raw_steps, summary=None):
+    """One row from a Plateau & isochron session: its plateau, as the tool
+    finds it (or as saved with a stack aliquot).  None without a plateau."""
+    if summary is None:
+        steps = pl.add_cumulative(pl._compute_steps_with_age_mode(raw_steps, cfg))
+        summary = pl._plateau_summary(pl.find_plateau(steps, cfg), cfg)
+    if not summary or summary.get('age') is None:
+        return None
+    return dict(label=title, age=float(summary['age']),
+                ana=summary.get('e1s_ana'), int=summary.get('e1s_int'), cfg=cfg)
+
+
+def file_ages(path):
+    """(rows, disk flux, notes) from an .arar / .ararpt (its plateau), an
+    .ararstack (one row per aliquot that counts) or an .arprob (one row per
+    ticked sample, its combined age).  Ages and errors in Ma, 1σ."""
+    with open(path, encoding='utf-8') as f:
+        data = json.load(f)
+    base = os.path.basename(path)
+    rows, notes = [], []
+    low = path.lower()
+    if low.endswith('.arprob'):
+        ad = _tool_module(os.path.join('5_age_distribution', 'age_distribution.py'),
+                          '_simplar_age_distribution')
+        for sd in data.get('samples', []):
+            if not sd.get('ages'):
+                continue
+            if not sd.get('enabled', True):
+                notes.append(f"{base}: {sd.get('name')} is unticked and left out.")
+                continue
+            smp = ad._sample_from_dict(sd)
+            w = smp.wm()
+            if w is None:
+                notes.append(f"{base}: {smp.name} has no included points.")
+                continue
+            rows.append(dict(label=smp.name, age=float(w['wm']), ana=w.get('sigma_ana'),
+                             int=w.get('sigma_int'), cfg=smp.j_cfg,
+                             disk=smp.disk_id, hole=smp.hole_id,
+                             hole3=getattr(smp, '_flux_override', None)))
+        return rows, deserialize_disk_flux(data.get('disk_flux', [])), notes
+    pl = _tool_module(os.path.join('4_plateau_isochron', 'plateau_isochron.py'),
+                      '_simplar_plateau')
+    if data.get('format') == 'ararstack_v1':
+        g = data.get('global_cfg', {})
+        for k, sd in enumerate(data.get('sessions', [])):
+            title = sd.get('title') or f'Aliquot {k + 1}'
+            if sd.get('excluded'):
+                notes.append(f'{base}: {title} is excluded in the stack and left out.')
+                continue
+            sess = pl._load_session_data({'cfg': {**g, **sd.get('cfg', {})},
+                                          'steps': sd.get('steps', [])},
+                                         err_div=am.file_err_div({**g, **sd.get('cfg', {})}, 2.0))
+            row = _plateau_row(pl, title, sess['cfg'], sess['raw_steps'],
+                               sd.get('plateau') if 'plateau' in sd else None)
+            if row is None:
+                notes.append(f'{base}: {title} has no plateau and is left out.')
+                continue
+            c = sess['cfg']
+            row.update(disk=c.get('disk_id'), hole=c.get('hole_id'),
+                       hole3=sd.get('flux_hole'))
+            rows.append(row)
+        return rows, deserialize_disk_flux(data.get('disk_flux') or {}), notes
+    sess = pl._load_session_data(data, err_div=am.file_err_div(data.get('cfg', {}), 2.0))
+    title = sess['title'] or os.path.splitext(base)[0]
+    row = _plateau_row(pl, title, sess['cfg'], sess['raw_steps'])
+    if row is None:
+        notes.append(f'{base}: no plateau, left out.')
+    else:
+        c = sess['cfg']
+        row.update(disk=c.get('disk_id'), hole=c.get('hole_id'), hole3=data.get('flux_hole'))
+        rows.append(row)
+    return rows, deserialize_disk_flux(data.get('disk_flux') or {}), notes
+
+
+POSITION_GUIDE = (
+    'Where the sample was irradiated. It decides which ages share a J error.\n\n'
+    '• With a .jflux: type disk/hole (e.g. E_outer/10) or just the hole (10). '
+    'J correlation… then matches the row to that hole, which gives its J error and '
+    'its correlation with the other holes. A hole picked in J correlation… replaces it.\n\n'
+    '• Without a .jflux: the text is a label. Rows with the same label share one J error '
+    '(fully correlated); different labels are independent.\n\n'
+    '• Empty: the J error is independent, unless rows have the same manual J or R and '
+    'error in J correlation….\n\n'
+    'Load files… fills it in from the file.')
+
+
 class CombineTable(PasteTable):
     def __init__(self, tab, rows=10):
         super().__init__(C_IN, rows)
@@ -668,6 +868,11 @@ class CombineTable(PasteTable):
         for r in range(rows):
             self.row_added(r)
         self.setColumnWidth(C_SRC, 260)
+        hd = self.horizontalHeaderItem(C_POS)
+        hd.setText('Position  ⓘ')
+        hd.setToolTip('Click for how to use Position.')
+        self.horizontalHeader().sectionClicked.connect(
+            lambda c: c == C_POS and QMessageBox.information(self, 'Position', POSITION_GUIDE))
 
     def row_added(self, r):
         cb = SourceCombo()
@@ -690,6 +895,7 @@ class _RecalcFluxHost(FluxHost):
     title = 'J correlation'
     item_noun = 'Sample'
     manual = True
+    hole_source = 'Position'
     caption = ('Assign each age to the hole it was irradiated in to take the J correlation '
                'from the .jflux and, where ± internal is empty, the J error of that hole. '
                'Without a .jflux, type the J or the R standard of the position and its 1σ '
@@ -804,11 +1010,16 @@ class CombineTab(QWidget):
             opts.addWidget(w)
             opts.addSpacing(10)
         opts.addStretch()
-        for txt, fn in [('Paste', lambda: self.table.paste()), ('Add row', self.add_row),
+        for txt, fn in [('Paste', lambda: self.table.paste()), ('Load files…', self.load_files),
+                        ('Add row', self.add_row),
                         ('Remove row', self.remove_rows), ('Clear', self.clear),
                         ('Export…', self.export)]:
             b = QPushButton(txt)
             b.clicked.connect(fn)
+            if txt == 'Load files…':
+                b.setToolTip('Plateau ages from .arar / .ararpt and .ararstack files, and the '
+                             'combined age of each sample in an .arprob,\neach on the '
+                             'calibration it was saved with.')
             opts.addWidget(b)
         v.addLayout(opts)
 
@@ -835,8 +1046,7 @@ class CombineTab(QWidget):
                           'by all ages, and the R of a monitor by every age on that monitor.'))
 
         self.method.currentIndexChanged.connect(self.recalc)
-        self.tgt.cal.currentIndexChanged.connect(self.recalc)
-        self.tgt.full.toggled.connect(self.recalc)
+        self.tgt.changed.connect(self.recalc)
         for w in (self.unit, self.in_sig, self.out_sig):
             w.currentIndexChanged.connect(self.recalc)
         self.dec.valueChanged.connect(self.recalc)
@@ -871,6 +1081,57 @@ class CombineTab(QWidget):
 
     def filled_rows(self):
         return [r for r in range(self.table.rowCount()) if _num(self.table.text(r, 1)) is not None]
+
+    def load_files(self):
+        """Ages from saved files of the other tools, one row each, on the
+        calibration they were saved with."""
+        paths, _ = dfold.get_open_file_names(
+            self, 'Load files', '',
+            'SimplAr files (*.arar *.ararpt *.ararstack *.arprob);;All (*)')
+        if not paths:
+            return
+        rows, notes = [], []
+        for p in paths:
+            try:
+                rs, flux, ns = file_ages(p)
+            except Exception as e:
+                notes.append(f'{os.path.basename(p)}: {e}')
+                continue
+            for k, fx in flux.items():
+                self.disk_flux.setdefault(k, fx)
+            rows += rs
+            notes += ns
+        k = 1e-3 if self.unit.currentText() == 'ka' else 1.0
+        mult = 2.0 if self.in_sig.currentText() == '2σ' else 1.0
+        filled = set(self.filled_rows())
+        free = [r for r in range(self.table.rowCount()) if r not in filled]
+        self.table.blockSignals(True)
+        for d in rows:
+            if free:
+                r = free.pop(0)
+            else:
+                self.add_row()
+                r = self.table.rowCount() - 1
+            vals = [d['label'], f"{d['age'] / k:.10g}",
+                    '' if d.get('ana') is None else f"{d['ana'] * mult / k:.10g}",
+                    '' if d.get('int') is None else f"{d['int'] * mult / k:.10g}"]
+            for c, t in enumerate(vals):
+                self.table.setItem(r, c, QTableWidgetItem(t))
+            pos = '/'.join(str(x) for x in (d.get('disk'), d.get('hole')) if x)
+            self.table.setItem(r, C_POS, QTableWidgetItem(pos))
+            cb = self.table.cellWidget(r, C_SRC)
+            cb.blockSignals(True)
+            cb.set_source(_file_source(d['cfg']))
+            cb.blockSignals(False)
+            cb._last = cb.current()
+            h3 = d.get('hole3')
+            if isinstance(h3, (list, tuple)) and len(h3) == 3 \
+                    and (str(h3[0]), str(h3[1])) in self.disk_flux:
+                self.overrides[r] = tuple(str(x) for x in h3)
+        self.table.blockSignals(False)
+        self.sources_changed()
+        if notes:
+            QMessageBox.information(self, 'Load files', '\n'.join(notes))
 
     def disk_hole(self, r):
         pos = self.table.text(r, C_POS)
@@ -951,9 +1212,11 @@ class CombineTab(QWidget):
                 skipped.append(lab)
                 continue
             R, R_1s, ref = self.R(src['std'])
-            label = f"R({src['std']}/FCs) {stdlib.short_ref(ref)}"
             try:
-                res = recalculate(age * k, src['std_age'], src['lam'], cfg, R, R_1s, label)
+                rcfg = self.tgt.route_for(src['std'], R if src['std'] != 'FCs' else None,
+                                          R_1s, ref)
+                res = recalculate(age * k, src['std_age'], src['lam'], rcfg,
+                                  cfg_monitor(rcfg)[1], 0.0, '')
             except (ValueError, OverflowError):
                 skipped.append(lab)
                 continue
@@ -986,7 +1249,8 @@ class CombineTab(QWidget):
                 else:
                     si = sa
             sys_ = math.sqrt(sum(c * c for _, c in res['components']))
-            self.items.append(dict(row=r, label=lab, age=res['age'], ana=sa, int=si,
+            self.items.append(dict(row=r, label=lab, age=res['age'], age_in=age * k,
+                                   ana=sa, int=si,
                                    ext=math.hypot(si, sys_), components=res['components'],
                                    no_int=(i is None and not j_from_flux),
                                    j_flux=j_from_flux, ana_from_int=ana_from_int, src=src))
@@ -1069,6 +1333,14 @@ class CombineTab(QWidget):
         s_lab = self.out_sig.currentText()
         dec = self.dec.value()
         lines = []
+        # the ages on the new calibration first, when any of them changed
+        if any(abs(d['age'] - d['age_in']) > 1e-9 * abs(d['age_in']) for d in self.items):
+            for d in self.items:
+                lines.append(f"{d['label']}: {d['age'] / k:.{dec}f} {k_unit} "
+                             f"± {d['ana'] * mult / k:.{dec}f} analytical, "
+                             f"± {d['int'] * mult / k:.{dec}f} internal, "
+                             f"± {d['ext'] * mult / k:.{dec}f} external ({s_lab})")
+            lines.append('')
         res = self.result
         if res is None:
             lines.append('Add at least two ages to combine.')
@@ -1165,7 +1437,8 @@ class CombineTab(QWidget):
                              source=self.table.source(r), pos=self.table.text(r, C_POS),
                              override=self.overrides.get(r),
                              manual=list(self.manual[r]) if r in self.manual else None))
-        return dict(target=self.tgt.name(), full=self.tgt.full.isChecked(),
+        return dict(target=self.tgt.cal_name(), target_route=self.tgt.route,
+                    full=self.tgt.full.isChecked(),
                     method=self.method.currentIndex(), unit=self.unit.currentText(),
                     in_sig=self.in_sig.currentText(), out_sig=self.out_sig.currentText(),
                     dec=self.dec.value(), rows=rows,
@@ -1200,6 +1473,7 @@ class CombineTab(QWidget):
             self.add_row()
         self.table.blockSignals(False)
         self.tgt.set_name(st.get('target', DEFAULT_FC_NAME))
+        self.tgt.set_route(st.get('target_route'))
         self.tgt.full.setChecked(bool(st.get('full')))
         self.method.setCurrentIndex(int(st.get('method', 0)))
         for w, key in [(self.unit, 'unit'), (self.in_sig, 'in_sig'), (self.out_sig, 'out_sig')]:
@@ -1338,6 +1612,7 @@ def main():
     app.setApplicationName('Recalculator and age combiner')
     dfold.use_tool('recalculator')
     force_light(app)
+    no_wheel_on_dropdowns(app)
     win = RecalculatorWindow()
     win.show()
     sys.exit(app.exec_())

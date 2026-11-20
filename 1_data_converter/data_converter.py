@@ -22,7 +22,7 @@ except ImportError:
 from PyQt5.QtWidgets import (
     QApplication, QDialog, QVBoxLayout, QHBoxLayout, QGroupBox,
     QRadioButton, QTableWidget, QTableWidgetItem, QHeaderView,
-    QDialogButtonBox, QLabel, QAbstractItemView, QComboBox, QLineEdit,
+    QDialogButtonBox, QLabel, QAbstractItemView, QComboBox, QLineEdit, QPushButton,
 )
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QColor, QDoubleValidator
@@ -38,7 +38,11 @@ from arar_math import (
     paired_lambda as _paired_lambda, standard_age_on as _standard_age_on,
 )
 import data_folders as dfold
-from standards import MonitorCombo
+from standards import MonitorCombo, route_line as _route_line
+from calibration_dialog import CalibrationDialog
+from arar_math import (route_cfg as _route_cfg, route_from_cfg as _route_from_cfg,
+                       route_text as _route_text, monitor_age as _monitor_age,
+                       STANDARD_IDS as _STANDARD_IDS)
 
 
 def _monitor_calibration(t_m, lam, err, monitor):
@@ -935,6 +939,31 @@ class ConvertDialog(QDialog):
             lambda _i: self._on_fc_ref_changed(self._fc_combo.currentIndex()))
         self._on_fc_ref_changed(0)   # populate fields with first entry
 
+        # Both boxes above are set with Calibration… (the dialog of the tools)
+        # and kept, hidden, for the conversion to read.
+        mg.setVisible(False)
+        self._fc_group_hidden = True
+        cg0 = QGroupBox("Calibration of the file")
+        cl0 = QVBoxLayout(cg0)
+        row0 = QHBoxLayout()
+        b_cal = QPushButton("Calibration…")
+        b_cal.clicked.connect(self._open_calibrate)
+        row0.addWidget(b_cal)
+        row0.addStretch()
+        cl0.addLayout(row0)
+        self._route_lbl = QLabel('')
+        self._route_lbl.setStyleSheet("color: #333; font-size: 10px;")
+        row0.insertWidget(1, self._route_lbl, 1)
+        self.setMinimumWidth(max(self.minimumWidth(), 620))
+        n0 = QLabel("The monitor irradiated and the calibration of the file's J.\n"
+                    "ArArCALC files carry their own monitor age and λ; only the monitor is used.")
+        n0.setWordWrap(True)
+        n0.setStyleSheet("color: #666; font-size: 10px;")
+        cl0.addWidget(n0)
+        root.insertWidget(root.indexOf(mg), cg0)
+        self._src_route = None
+        self._show_src_route()
+
         # ── Column mapping table ─────────────────────────────────────────────
         cg = QGroupBox("Column mapping: edit any cell to override")
         cl = QVBoxLayout(cg)
@@ -966,6 +995,40 @@ class ConvertDialog(QDialog):
 
         self._refresh_table()
 
+    def _src_cfg(self):
+        if self._src_route:
+            return _route_cfg(self._src_route)
+        try:
+            t, e = float(self._fc_age_edit.text()), float(self._fc_err_edit.text() or 0)
+        except ValueError:
+            t, e = _STD_AGE_DEFAULT, _STD_AGE_ERR
+        mk = _monitor_keys(self._mon_combo.monitor())
+        t_eq = _fcs_equivalent_age(t, _LAMBDA_DEFAULT, mk['monitorR']) if mk['monitor'] != 'FCs' else t
+        return dict(_calibration_for(t_eq, _LAMBDA_DEFAULT, e), **mk)
+
+    def _show_src_route(self):
+        r = _route_from_cfg(self._src_cfg())
+        self._route_lbl.setText(_route_line(r))
+        self._route_lbl.setToolTip(_route_text(r))
+
+    def _open_calibrate(self):
+        dlg = CalibrationDialog(self._src_cfg(), parent=self, age_source=False, stored=False)
+        if dlg.exec_() != QDialog.Accepted:
+            return
+        self._src_route = dlg.get_params()['route_keys']['route']
+        c = _route_cfg(self._src_route)
+        mon = c['monitor'] if c['monitor'] in _STANDARD_IDS else 'FCs'
+        self._mon_combo.set_monitor(mon)
+        cal = self._src_route.get('calibration')
+        name = cal if isinstance(cal, str) else ''
+        idx = next((i for i, (lbl, _, _) in enumerate(_FC_REFERENCES)
+                    if name and lbl.startswith(name)), len(_FC_REFERENCES) - 1)
+        self._fc_combo.setCurrentIndex(idx)
+        # the monitor's own age on that calibration, as the fields hold it
+        self._fc_age_edit.setText(f"{_monitor_age(c):.9g}")
+        self._fc_err_edit.setText(f"{c['stdAgeErrMa']:g}")
+        self._show_src_route()
+
     def _effective_fmt(self) -> str:
         return "ararcalc" if self._rb_arar.isChecked() else "massspec"
 
@@ -994,7 +1057,7 @@ class ConvertDialog(QDialog):
 
     def _refresh_table(self):
         fmt  = self._effective_fmt()
-        self._fc_group.setVisible(fmt == "massspec")
+        self._fc_group.setVisible(False)      # set with Calibration…
         cols = ARARCALC_COLS if fmt == "ararcalc" else MASSSPEC_COLS
         nkey = _ARAR_N_KEY  if fmt == "ararcalc" else _MASS_N_KEY
 
@@ -1094,6 +1157,8 @@ def main():
 
     # ── read file (or pick it) ────────────────────────────────────────────────
     _app = QApplication.instance() or QApplication(sys.argv)   # keep a reference
+    from arar_math import no_wheel_on_dropdowns
+    no_wheel_on_dropdowns(_app)
     dfold.use_tool('data_converter')
 
     input_path = args.input

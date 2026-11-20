@@ -3,8 +3,7 @@ Recalculator and age combiner tools.
 
 One window: load .jflux, view the disk (holes coloured by R or J, matched holes
 ringed red), and assign each item (sample / session / aliquot) to a hole, either
-automatically by identity, by a per-row override, or by selecting a disk and
-applying it to the ticked rows. Every tool-specific behaviour lives in a small
+automatically by identity or by a per-row override. Every tool-specific behaviour lives in a small
 host adapter (see FluxHost), so the tools share one window.
 
 The dialog talks to its host through canonical override values:
@@ -16,7 +15,7 @@ The adapter translates those to and from whatever the host actually stores.
 
 from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QWidget, QPushButton, QLabel, QComboBox,
-    QSplitter, QTableWidget, QTableWidgetItem, QHeaderView, QCheckBox,
+    QSplitter, QTableWidget, QTableWidgetItem, QHeaderView,
     QMessageBox, QApplication, QLineEdit,
 )
 from PyQt5.QtCore import Qt
@@ -37,15 +36,6 @@ def flux_choices(disk_flux):
     return out
 
 
-def hole_in_disk(disk_id, hole_id, fx):
-    """The hole on the selected disk matching this item's hole_id, resolved
-    with arar_math.hole_candidates, the same rule as the automatic match."""
-    for h in hole_candidates(disk_id, hole_id):
-        if h in fx['idx']:
-            return h
-    return None
-
-
 class FluxHost:
     """Adapter interface between a tool and the shared dialog. Subclass per tool
     and override the pieces that differ. Static labels are plain attributes;
@@ -55,6 +45,7 @@ class FluxHost:
     title = 'Load disk flux'
     item_noun = 'Item'          # column header + message wording ('Sample' etc.)
     caption = ''                # optional explanatory line above the table
+    hole_source = 'the file'    # where a row's disk/hole is read from
     manual = False              # True: rows can be given a J or R typed by hand
 
     # --- registry / loading ------------------------------------------------
@@ -179,15 +170,16 @@ class FluxAssignDialog(QDialog):
         rv = QVBoxLayout(right)
         rv.setContentsMargins(0, 0, 0, 0)
         how = QLabel(
-            f'Pick each {host.item_noun.lower()}\'s hole in the "Hole" column, or tick '
-            '"Use shown disk" for the rows that sit on the disk shown on the left. '
-            'Apply & Close applies both. "auto" matches by the disk/hole in the file. '
+            f'"auto" finds each {host.item_noun.lower()}\'s hole from the disk/hole in '
+            f'{host.hole_source}; pick another hole in the "Hole" column to change it. '
             'A row on a hole is aged with that hole\'s J, correlated with the other '
             'holes through the flux. A row marked "not matched" (or set to "none") '
             'keeps its own R_std / J and is independent of the rows on the disk.')
         how.setWordWrap(True)
         rv.addWidget(how)
-        heads = ['Use\nshown disk', host.item_noun, 'disk/hole\nin file', 'Hole', 'Matched R']
+        heads = [host.item_noun,
+                 'disk/hole\nin file' if host.hole_source == 'the file' else host.hole_source,
+                 'Hole', 'Matched R']
         if host.manual:
             heads += ['Manual', 'J or R', '±1σ']
         self.tbl = QTableWidget(0, len(heads))
@@ -209,22 +201,18 @@ class FluxAssignDialog(QDialog):
                             'and keep their own R_std / J.')
         none_btn.clicked.connect(self._none_all)
         bb.addWidget(none_btn)
-        applysel_btn = QPushButton('Assign ticked rows to shown disk')
-        applysel_btn.clicked.connect(self._apply_selected_to_checked)
-        bb.addWidget(applysel_btn)
         bb.addStretch()
-        ok = QPushButton('Apply && Close')
-        ok.clicked.connect(self._apply_close)
+        ok = QPushButton('Apply')
+        ok.setToolTip('Recalculate with the holes picked, and keep this window open.')
+        ok.clicked.connect(self._apply)
         bb.addWidget(ok)
         cancel = QPushButton('Close')
-        cancel.setToolTip('Close, keeping the holes picked in the table (they apply as\n'
-                          'you pick them).  Ticked rows are only assigned by Apply & Close.')
+        cancel.setToolTip('Close, keeping the holes picked.')
         cancel.clicked.connect(self.reject)
         bb.addWidget(cancel)
         root.addLayout(bb)
 
         self._row_combos = []
-        self._row_checks = []
         self._refresh_pickers()
         self._populate()
 
@@ -274,12 +262,11 @@ class FluxAssignDialog(QDialog):
         items = self.host.items()
         self.tbl.setRowCount(len(items))
         self._row_combos = []
-        self._row_checks = []
         for row, item in enumerate(items):
             disk_id, hole_id = self.host.item_disk_hole(item)
             ident = f'{disk_id or "?"}/{hole_id or "?"}'
-            self.tbl.setItem(row, 1, self._ro(self.host.item_label(item)))
-            self.tbl.setItem(row, 2, self._ro(ident))
+            self.tbl.setItem(row, 0, self._ro(self.host.item_label(item)))
+            self.tbl.setItem(row, 1, self._ro(ident))
             cb = QComboBox()
             for label, _v in choices:
                 cb.addItem(label)
@@ -287,10 +274,7 @@ class FluxAssignDialog(QDialog):
                                                   self.host.get_override(row, item)))
             cb.currentIndexChanged.connect(lambda _i, r=row: self._on_assign(r))
             self._row_combos.append((cb, choices))
-            self.tbl.setCellWidget(row, 3, cb)
-            chk = QCheckBox()
-            self._row_checks.append(chk)
-            self.tbl.setCellWidget(row, 0, chk)
+            self.tbl.setCellWidget(row, 2, cb)
             if self.host.manual:
                 self._manual_cells(row, item)
             self._update_match_cell(row)
@@ -308,20 +292,20 @@ class FluxAssignDialog(QDialog):
             w.setFixedWidth(90)
             w.editingFinished.connect(lambda r=row: self._on_manual(r))
         kind.currentIndexChanged.connect(lambda _i, r=row: self._on_manual(r))
-        self.tbl.setCellWidget(row, 5, kind)
-        self.tbl.setCellWidget(row, 6, val)
-        self.tbl.setCellWidget(row, 7, err)
+        self.tbl.setCellWidget(row, 4, kind)
+        self.tbl.setCellWidget(row, 5, val)
+        self.tbl.setCellWidget(row, 6, err)
 
     def _on_manual(self, row):
         item = self.host.items()[row]
-        kind = self.tbl.cellWidget(row, 5).currentText()
+        kind = self.tbl.cellWidget(row, 4).currentText()
 
         def num(c):
             try:
                 return float(self.tbl.cellWidget(row, c).text().replace(',', '.'))
             except ValueError:
                 return None
-        v, e = num(6), num(7)
+        v, e = num(5), num(6)
         if kind in ('J', 'R') and v and v > 0 and e is not None and e >= 0:
             self.host.set_manual(row, item, (kind, v, e))
         else:
@@ -353,18 +337,17 @@ class FluxAssignDialog(QDialog):
                 txt = f'{fx["J"][i]:.8g}'
             else:
                 txt = '—'
-            self.tbl.setItem(row, 4, self._ro(txt))
+            self.tbl.setItem(row, 3, self._ro(txt))
         elif self.host.manual and self.host.get_manual(row, item):
             kind, v, e = self.host.get_manual(row, item)
-            self.tbl.setItem(row, 4, self._ro(f'manual {kind}'))
+            self.tbl.setItem(row, 3, self._ro(f'manual {kind}'))
         else:
             it = self._ro('not matched')
             it.setForeground(QColor('#c0392b'))
             it.setToolTip('No flux hole: this row keeps its own R_std / J and is '
                           'independent of the rows on the disk. Pick a '
-                          'hole in the "Hole" column, or tick "Use shown disk" and '
-                          'press Apply & Close.')
-            self.tbl.setItem(row, 4, it)
+                          'hole in the "Hole" column.')
+            self.tbl.setItem(row, 3, it)
 
     def _on_assign(self, row):
         cb, choices = self._row_combos[row]
@@ -400,57 +383,6 @@ class FluxAssignDialog(QDialog):
             self._update_match_cell(row)
         self._on_disk()
 
-    def _assign_ticked(self):
-        """Assign every ticked row to its hole on the disk shown on the left.
-        Returns (n_ticked, n_assigned, labels of ticked rows with no such hole),
-        or None when no disk is loaded."""
-        key = self._cur_key()
-        fx = self.host.disk_flux().get(key)
-        if fx is None:
-            return None
-        irr, disk = key
-        n_ok = n_checked = 0
-        misses = []
-        for row, item in enumerate(self.host.items()):
-            if not self._row_checks[row].isChecked():
-                continue
-            n_checked += 1
-            disk_id, hole_id = self.host.item_disk_hole(item)
-            hole = hole_in_disk(disk_id, hole_id, fx)
-            if hole is None:
-                misses.append(self.host.item_label(item))
-                continue
-            self.host.set_override(row, item, (irr, disk, hole))
-            self.host.on_row_change(row, item)
-            n_ok += 1
-        return n_checked, n_ok, misses
-
-    def _miss_text(self, misses):
-        irr, disk = self._cur_key()
-        noun = self.host.item_noun.lower()
-        return (f'{len(misses)} ticked {noun}(s) have no matching hole on {disk} '
-                f'({irr}):\n  • ' + '\n  • '.join(misses))
-
-    def _apply_selected_to_checked(self):
-        res = self._assign_ticked()
-        if res is None:
-            QMessageBox.warning(self, 'Apply selected', 'Select a loaded disk flux first.')
-            return
-        n_checked, n_ok, misses = res
-        n_miss = len(misses)
-        irr, disk = self._cur_key()
-        if n_checked == 0:
-            QMessageBox.information(
-                self, 'Apply selected',
-                f'Tick the {self.host.item_noun.lower()}s that belong to this disk first.')
-            return
-        self.host.apply()
-        self._populate()
-        msg = f'Assigned {n_ok} {self.host.item_noun.lower()}(s) to {disk}  ({irr}).'
-        if n_miss:
-            msg += '\n' + self._miss_text(misses)
-        QMessageBox.information(self, 'Apply selected', msg)
-
     # ---- load / delete / close --------------------------------------------
     def _load(self):
         self.host.load(self)
@@ -482,21 +414,11 @@ class FluxAssignDialog(QDialog):
 
     def reject(self):
         # Hole picks take effect as they are made (_on_assign), so closing
-        # finishes them like Apply does (the stack regroups), rather than
-        # leaving a half-applied state behind.
+        # applies them, rather than leaving a half-applied state behind.
         self.host.apply()
         super().reject()
 
-    def _apply_close(self):
-        # Ticked rows go to the disk shown, as with "Assign ticked rows".
-        res = self._assign_ticked()
-        misses = res[2] if res else []
+    def _apply(self):
         self.host.apply()
-        if misses:
-            self._populate()
-            self._on_disk()
-            QMessageBox.warning(self, 'Apply', self._miss_text(misses)
-                                + '\n\nThe other rows are applied. Pick a hole for '
-                                'these in the "Hole" column, or choose another disk.')
-            return
-        self.accept()
+        self._populate()
+        self._on_disk()

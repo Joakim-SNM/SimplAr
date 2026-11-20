@@ -62,7 +62,7 @@ import matplotlib
 import matplotlib.lines as _mlines
 import matplotlib.text as _mtext
 
-from arar_math import (cfg_J, cfg_monitor, monitor_age, calibration_notes,
+from arar_math import (cfg_J, cfg_monitor, monitor_age, calibration_notes, route_text,
                        edited_standards_note)
 import data_folders as dfold
 
@@ -171,7 +171,12 @@ def constants_rows(cfg, constants=None, metas=(), atm=None, extra=()):
     if c.get('air_40_38') not in (None, ''):
         add('Atmospheric 40Ar/38Ar', _g(c.get('air_40_38')), '')
 
-    add('FC age (Ma)', _g(cfg.get('stdAgeMa'), 8), 'Fish Canyon sanidine (FCs) calibration')
+    rec = cfg.get('route') or {}
+    std = rec.get('standard', 'FCs')
+    if rec:
+        add('Calibration', route_text(cfg), 'monitor → R values → calibration · λ')
+    add(f'{std} age (Ma)' if rec else 'FC age (Ma)', _g(cfg.get('stdAgeMa'), 8),
+        f'calibration of {std}' if rec else 'Fish Canyon sanidine (FCs) calibration')
     add('  ± (Ma, 1σ)', _g(cfg.get('stdAgeErrMa'), 6),
         'external' if cfg.get('stdAgeErrType') == 'external' else 'internal')
     for _n in calibration_notes(cfg):
@@ -180,7 +185,14 @@ def constants_rows(cfg, constants=None, metas=(), atm=None, extra=()):
     if _ed:
         add('Standards', _ed, '')
     mon, R_m, s_m = cfg_monitor(cfg)
-    if mon != 'FCs':
+    if rec and (mon != std or rec.get('steps')):
+        add('Flux monitor', mon, f'R standard values are on {std}: measured R / R({mon}/{std})')
+        add(f'  R({mon}/{std})', _g(R_m, 8), 'product of the steps in the Calibration row')
+        try:
+            add(f'  {mon} age (Ma)', _g(monitor_age(cfg), 8), 'on this calibration')
+        except (ValueError, ZeroDivisionError, OverflowError):
+            pass
+    elif not rec and mon != 'FCs':
         add('Flux monitor', mon, 'R standard values are FCs-equivalent: measured R / R(monitor/FCs)')
         add(f'  R({mon}/FCs)', _g(R_m, 8), f'± {_g(s_m, 4)} (1σ)')
         try:
@@ -685,6 +697,9 @@ def _write_sheet(ws, rows, bold_font, widths_cap=44):
             any(row[0].startswith(t) for t in _SECTIONS)
         for c, v in enumerate(row, start=1):
             cell = ws.cell(row=r, column=c, value=_cell(v))
+            if isinstance(v, str) and isinstance(cell.value, float) and '.' in v \
+                    and 'e' not in v.lower():
+                cell.number_format = '0.' + '0' * len(v.strip().split('.')[1])
             if is_title or prev_title:
                 cell.font = bold_font
             n = len(str(v)) if v not in (None, '') else 0

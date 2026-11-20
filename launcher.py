@@ -82,7 +82,7 @@ class ToolLauncher(QMainWindow):
         std_btn.setFont(QFont("Georgia", 12))
         std_btn.setMinimumHeight(38)
         std_btn.setObjectName("aboutButton")
-        std_btn.setToolTip("Monitors, Fish Canyon calibrations and decay constants")
+        std_btn.setToolTip("Monitors, calibrations, routes and decay constants")
         std_btn.clicked.connect(
             lambda: self.launch(("standards.py",), "the standards editor"))
         about_btn = QPushButton("About")
@@ -396,6 +396,8 @@ def _preset_table():
             '<tr><th>Monitor-age preset</th><th>Age (Ma)</th><th>1&sigma; (Ma)</th>'
             '<th>&lambda;</th><th>External &lambda;</th></tr>']
     for c in stdlib.load_default()['calibrations']:
+        if c.get('standard', 'FCs') != 'FCs':
+            continue
         rows.append(f"<tr><td>{c['name'].split('  ')[0]}</td><td>{c['age']:g}</td>"
                     f"<td>{c['age_1s']:g}</td><td>{c['decay_constant']}</td>"
                     f"<td>{'Yes' if c.get('sigma_includes_lambda') else 'No'}</td></tr>")
@@ -404,7 +406,7 @@ def _preset_table():
 
 
 def _monitor_table():
-    """The monitors and their recommended R, from the published library."""
+    """The monitors and the R marked Use, from the published library."""
     rows = ['<table>', '<tr><th>Monitor</th><th>R</th><th>1&sigma;</th>'
             '<th>Source</th></tr>']
     for s in stdlib.load_default()['standards']:
@@ -1104,14 +1106,15 @@ def build_about_html(base_dir):
     the decay constant &lambda;<sub>0</sub> the authors used, fixes the ratio of the
     sample to that monitor, which depends on neither constant:</p>
     """ + E(r'R_{u/S} = \frac{e^{\lambda_{0} t} - 1}{e^{\lambda_{0} t_{S}} - 1}') + """
-    <p>On the target calibration the ingrowth of the monitor is its R relative to
-    Fish Canyon sanidine times that of FCs (on the anchored chain of Section&nbsp;3
-    for an astronomical calibration), and the recalculated age is (Renne
-    et&nbsp;al., 1998; Mercer and Hodges, 2016)</p>
-    """ + E(r"t' = \frac{1}{\lambda}\ln\left[1 + R_{u/S}\,R_{S/FCs}\left(e^{\lambda t_{FCs}} - 1\right)\right]") + """
+    <p>On the target calibration the ingrowth of the monitor is the product of the
+    R values along its route times that of the calibrated standard C (routes are
+    described below; for S on an FCs calibration the product is R<sub>S/FCs</sub>),
+    and the recalculated age is (Renne et&nbsp;al., 1998; Mercer
+    and Hodges, 2016)</p>
+    """ + E(r"t' = \frac{1}{\lambda}\ln\left[1 + R_{u/S}\,\prod_{i} R_{i}\left(e^{\lambda t_{C}} - 1\right)\right]") + """
     <p>The analytical and internal errors are multiplied by d<i>t</i>&prime;/d<i>t</i>.
-    The external error is that of the target calibration (Section&nbsp;3) and, for a
-    monitor other than FCs, includes the uncertainty of R<sub>S/FCs</sub>.
+    The external error is that of the target calibration (Section&nbsp;3) and
+    includes the uncertainty of each R in the route.
     Recalculating onto the calibration the ages were published on leaves them
     unchanged and gives the external error that calibration implies, for example
     the astronomical terms of Phillips et&nbsp;al. (2022) for ages published with the
@@ -1127,24 +1130,33 @@ def build_about_html(base_dir):
     calibration terms are shared by all ages, and the R of a monitor by every age
     dated against it.</p>
     <h3>Standards</h3>
-    <p>The monitors, Fish Canyon calibrations and decay constants of all tools are
-    kept in one library, opened with Standards in the launcher. For each monitor it
-    holds the R relative to FCs with its source, and the ages published for it. The
+    <p>The monitors, calibrations, routes and decay constants of all tools are kept in
+    one library, opened with Standards in the launcher. Each monitor holds its R values
+    against other standards, with their sources, and the ages published for it. A
+    calibration is an age of one standard: an FCs age, or the astronomical age of A1 or
+    Melilla. A route goes from a monitor through one or more R values to a calibration,
+    and only R values in the library can be used as steps. The
     published values ship with SimplAr; edits are saved separately and can be reset.
-    The recommended R values:</p>
+    The R values marked Use:</p>
     """ + _monitor_table() + """
     <p>R<sub>S/FCs</sub> is the <sup>40</sup>Ar*/<sup>39</sup>Ar<sub>K</sub> of the
-    monitor divided by that of FCs in the same irradiation, R<sub>FCs/S</sub> its
+    monitor divided by that of FCs, R<sub>FCs/S</sub> its
     inverse; each is given as its paper prints it. All values 1&sigma;.</p>
     <h3>Monitors other than Fish Canyon sanidine</h3>
-    <p>Wherever a calibration is chosen, a monitor is chosen with it. A calibration is
-    always a Fish Canyon calibration; another monitor is tied to it by its
-    R<sub>S/FCs</sub> (the one marked Use in Standards), which gives its age on that
-    calibration. A measured monitor ratio is turned into its FCs-equivalent,
-    R/R<sub>S/FCs</sub>, where it enters (Flux monitors, the data converter, a typed
-    R standard), so the J and the ages are those the monitor implies and everything
-    downstream works on FCs. The uncertainty of R<sub>S/FCs</sub> is added to the
-    external tier as its own term, shared by every age on the same monitor.</p>
+    <p>A calibration is the age of one standard: an FCs age, or the astronomical age
+    of A1 or Melilla. A monitor reaches a calibration through a route, one or more
+    R values from the library; TCs dated on the A1 calibration, for example, goes
+    TCs &rarr; FCs &rarr; A1. The route gives the monitor's ingrowth on that
+    calibration, the product of its R values times the ingrowth of the calibrated
+    standard C:</p>
+    """ + E(r'e^{\lambda t_{M}} - 1 = \prod_{i} R_{i}\,\left(e^{\lambda t_{C}} - 1\right)') + """
+    <p>and J = (e<sup>&lambda;<i>t</i><sub>M</sub></sup> &minus; 1)/R<sub>M</sub>,
+    where R<sub>M</sub> is the measured <sup>40</sup>Ar*/<sup>39</sup>Ar<sub>K</sub>
+    of the monitor. Each monitor has a default route, which can be changed or built
+    in Standards; the Calibration&hellip; button of each tool shows the route in use
+    and can set another. A flux file keeps the monitor it was measured on, and a tool
+    whose route starts at a different monitor warns. Each R in the route adds its own
+    term to the external uncertainty, shared by every age that uses it.</p>
     <p class="back"><a href="#top">Back to top</a></p>
     """
 
@@ -1209,6 +1221,8 @@ def build_about_html(base_dir):
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName("SimplAr")
+    from arar_math import no_wheel_on_dropdowns
+    no_wheel_on_dropdowns(app)
     launcher = ToolLauncher()
     launcher.show()
     sys.exit(app.exec_())

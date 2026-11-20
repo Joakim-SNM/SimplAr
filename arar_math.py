@@ -15,6 +15,7 @@ All uncertainties passed in and returned are 1-sigma unless a name says
 otherwise. The 1s/2s choice belongs in the GUIs, at display time.
 """
 
+import copy
 import math
 
 import numpy as np
@@ -53,12 +54,17 @@ def t_crit(dof):
 import standards as _stdlib
 
 
+def _fcs_cals(lib):
+    """The calibrations of Fish Canyon sanidine (the FC presets of the tools)."""
+    return [c for c in lib['calibrations'] if c.get('standard', 'FCs') == 'FCs']
+
+
 def _load_library():
     """The standards library in use; the published values if the user's edits
     leave it unusable."""
     try:
         lib = _stdlib.load()
-        if not _stdlib.check(lib) and lib.get('calibrations') and lib.get('decay_constants'):
+        if not _stdlib.check(lib) and _fcs_cals(lib) and lib.get('decay_constants'):
             return lib
     except Exception:
         pass
@@ -66,6 +72,7 @@ def _load_library():
 
 
 STANDARDS = _load_library()
+
 
 # (name, lambda yr^-1, 1s error)
 LAMBDA_PRESETS = [(d['name'], float(d['lambda']), float(d.get('lambda_1s') or 0.0))
@@ -79,7 +86,7 @@ LAMBDA_PRESETS = [(d['name'], float(d['lambda']), float(d.get('lambda_1s') or 0.
 # the anchor (FC_ANCHORS: R_FCs/A, t_A) and lambda on the two-step chain.
 FC_PRESETS = [(c['name'], float(c['age']), float(c.get('age_1s') or 0.0),
                bool(c.get('sigma_includes_lambda')))
-              for c in STANDARDS['calibrations']]
+              for c in _fcs_cals(STANDARDS)]
 
 # The λ each FC calibration is anchored to.  The astronomically tuned ages
 # were derived with the Min et al. (2000) decay constant and should be used
@@ -100,8 +107,8 @@ STANDARD_IDS = [s['id'] for s in STANDARDS['standards']]
 # calibration; the paired lambda follows from FC_PAIRED_LAMBDA.
 # --------------------------------------------------------------------------
 
-DEFAULT_FC_NAME     = next((c['name'] for c in STANDARDS['calibrations'] if c.get('default')),
-                           STANDARDS['calibrations'][0]['name'])
+DEFAULT_FC_NAME     = next((c['name'] for c in _fcs_cals(STANDARDS) if c.get('default')),
+                           _fcs_cals(STANDARDS)[0]['name'])
 DEFAULT_LAMBDA_NAME = FC_PAIRED_LAMBDA[DEFAULT_FC_NAME]
 
 DEFAULT_FC_INDEX     = next(i for i, r in enumerate(FC_PRESETS)
@@ -204,7 +211,7 @@ def file_age_calibration(cfg, steps):
 # FC ages set by orbital tuning.  With the preset's own age and error they are
 # propagated on the anchored chain (FC_ANCHORS); with an edited error, on the
 # single-step R-value form.
-ASTRONOMICAL_FC_NAMES = {c['name'] for c in STANDARDS['calibrations']
+ASTRONOMICAL_FC_NAMES = {c['name'] for c in _fcs_cals(STANDARDS)
                          if c.get('basis') == 'astronomical' and c.get('anchor')}
 
 
@@ -550,6 +557,7 @@ def jflux_entries(cfg):
             d.get('disk_design', ''), d.get('R'), d.get('R_sigma'),
             cfg.get('lambdaYr'), cfg.get('stdAgeMa'), cfg.get('stdAgeErrMa'), fit)
         out[(irr, str(d['disk_id']))]['monitor'] = cfg.get('monitor') or 'FCs'
+        out[(irr, str(d['disk_id']))]['monitorR'] = _flux_monitor_R(cfg)
     # Global fit through several disks: correlation between holes on
     # different disks, stored once per pair and kept both ways here.
     if fit:
@@ -588,6 +596,7 @@ def serialize_disk_flux(disk_flux):
             'fit': fx.get('fit'),
             'xcorr': serialize_xcorr(fx),
             'monitor': fx.get('monitor', 'FCs'),
+            'monitorR': fx.get('monitorR', 1.0),
         }
     return out
 
@@ -619,6 +628,7 @@ def deserialize_disk_flux(data):
             fx.get('R'), fx.get('R_sigma'), fx.get('lamFlux'), fx.get('fcFlux'),
             fx.get('fcFluxErr'), fx.get('fit'), _xcorr_from(fx.get('xcorr')))
         out[(irr, disk)]['monitor'] = fx.get('monitor') or 'FCs'
+        out[(irr, disk)]['monitorR'] = _flux_monitor_R(fx)
     return out
 
 
@@ -656,6 +666,39 @@ def flux_hole_R(fx, i):
     return None
 
 
+def _flux_monitor_R(d):
+    """R a flux file's R values were divided by: the stored monitorR (R of the
+    monitor relative to FCs, or to the standard its route ends at); for an
+    older file with a monitor other than FCs but no monitorR, the library R of
+    that monitor, which is what Flux regression used; 1 for FCs."""
+    R = d.get('monitorR')
+    if R is None:
+        mon = d.get('monitor') or 'FCs'
+        return 1.0 if mon == 'FCs' else float(monitor_keys(mon)['monitorR'])
+    try:
+        R = float(R)
+    except (TypeError, ValueError):
+        return 1.0
+    return R if R > 0 else 1.0
+
+
+def flux_hole_measured(fx, i):
+    """The monitor ratio of a hole as measured on the flux's own monitor
+    (the stored R is FCs-equivalent for a monitor other than FCs)."""
+    R = flux_hole_R(fx, i)
+    return R * float(fx.get('monitorR') or 1.0) if R else R
+
+
+def flux_hole_rstd(fx, i, cfg):
+    """The R standard a hole gives a sample on cfg's calibration: the measured
+    ratio taken as a ratio of the monitor cfg's route starts from, divided by
+    the route (cfg_monitor).  When the flux and the route name different
+    monitors, the ratio is still read as the route's monitor (see
+    monitor_mismatch_note)."""
+    R = flux_hole_measured(fx, i)
+    return R / cfg_monitor(cfg)[1] if R else R
+
+
 def flux_hole_rel(fx, i):
     """Relative 1σ of a disk-flux hole (σ_R/R, equal to σ_J/J), or None."""
     try:
@@ -675,9 +718,9 @@ def flux_hole_J(fx, i, cfg):
     Jsf = float(fx['J_sigma'][i])
     if Jf <= 0:
         return None, None
-    R = flux_hole_R(fx, i)
+    R = flux_hole_measured(fx, i)
     if R and cfg.get('lambdaYr') and cfg.get('stdAgeMa'):
-        J = cfg_ingrowth(cfg) / R
+        J = monitor_ingrowth(cfg) / R
         if J > 0:
             return J, Jsf * (J / Jf)
     return Jf, Jsf
@@ -1369,6 +1412,25 @@ def systematic_components(age_ma, cfg, include_cross=True):
     mon, R_m, s_m = cfg_monitor(cfg)
     if mon != 'FCs' and R_m > 0 and s_m > 0:
         comps.append((f'R({mon}/FCs)', dt_dlnR(age_ma, lam) * s_m / R_m))
+    route = cfg.get('route')
+    if not route:
+        # the route a cfg without one implies, so that its terms carry the same
+        # labels as those of a cfg with a route, and the two share them when
+        # combined (the legacy monitor term is the route's first step)
+        try:
+            route = route_cfg(route_from_cfg(cfg))['route']
+        except (ValueError, KeyError, TypeError):
+            route = None
+        if route and route.get('steps'):
+            comps = [c for c in comps if c[0] != f'R({mon}/FCs)']
+    if route:
+        names = _route_labels(route)
+        comps = [(names.get(lbl, lbl), v) for lbl, v in comps]
+        for st in route.get('steps') or []:
+            R, sR = float(st['R']), float(st.get('R_1s') or 0.0)
+            if R > 0 and sR > 0:
+                sign = 1.0 if st.get('num') == st.get('from') else -1.0
+                comps.append((step_label(st), sign * dt_dlnR(age_ma, lam) * sR / R))
     return comps
 
 
@@ -1555,6 +1617,8 @@ def calibration_box(cfg):
     if cls is None:
         cls = ('astronomical' if cfg_is_astronomical(cfg)
                else 'joint' if cfg_is_carter(cfg) else 'other')
+    if 'stdCov' in cfg:
+        return cls, float(cfg['stdCov'] or 0.0)
     return cls, cfg_covariance(cfg)
 
 
@@ -1582,7 +1646,7 @@ def calibration_group_key(cfg):
 # Carlo values (2010 Table 5).  Their Monte Carlo triplets (2010, EA-3) are not
 # included, so these presets go through the single-step route with the FCs age
 # and λ independent, which overstates the external error.
-RENNE_JOINT_NAMES = [c['name'] for c in STANDARDS['calibrations']
+RENNE_JOINT_NAMES = [c['name'] for c in _fcs_cals(STANDARDS)
                      if c.get('basis') == 'joint' and c.get('covariance') is None]
 
 
@@ -1941,6 +2005,27 @@ def draw_budget_pie(ax, budget, scale, sig_lbl, centre_fmt='.4f', legend_values=
 # Called from each tool's main(), so every window gets the same palette.
 # --------------------------------------------------------------------------
 
+def no_wheel_on_dropdowns(app):
+    """The mouse wheel over a closed dropdown scrolls the window instead of
+    changing the value (an open list still scrolls)."""
+    from PyQt5.QtCore import QObject, QEvent
+    from PyQt5.QtWidgets import QComboBox, QAbstractScrollArea
+
+    class _Filter(QObject):
+        def eventFilter(self, obj, ev):
+            if ev.type() == QEvent.Wheel and isinstance(obj, QComboBox):
+                w = obj.parentWidget()
+                while w is not None and not isinstance(w, QAbstractScrollArea):
+                    w = w.parentWidget()
+                if w is not None:
+                    app.sendEvent(w.viewport(), ev)
+                return True
+            return False
+
+    app._no_wheel = _Filter(app)
+    app.installEventFilter(app._no_wheel)
+
+
 def force_light(app):
     """Force a light Fusion palette so the app never follows macOS dark mode."""
     from PyQt5.QtGui import QPalette, QColor
@@ -2085,7 +2170,7 @@ def reload_standards():
     lib = _load_library()
     STANDARDS.clear()
     STANDARDS.update(lib)
-    cals = lib['calibrations']
+    cals = _fcs_cals(lib)
     LAMBDA_PRESETS[:] = [(d['name'], float(d['lambda']), float(d.get('lambda_1s') or 0.0))
                          for d in lib['decay_constants']]
     FC_PRESETS[:] = [(c['name'], float(c['age']), float(c.get('age_1s') or 0.0),
@@ -2133,9 +2218,11 @@ MONITOR_KEYS = ('monitor', 'monitorR', 'monitorRErr')
 
 
 def cfg_monitor(cfg):
-    """(monitor id, R_M/FCs, 1σ) of a cfg; ('FCs', 1, 0) when none is set."""
+    """(monitor id, R_M/FCs, 1σ) of a cfg; ('FCs', 1, 0) when none is set.
+    With a route, R is that of the monitor relative to the standard the route
+    ends at (route_product), and its error is in the route's steps."""
     mon = (cfg or {}).get('monitor') or 'FCs'
-    if mon == 'FCs':
+    if mon == 'FCs' and not (cfg or {}).get('route'):
         return 'FCs', 1.0, 0.0
     try:
         R = float(cfg.get('monitorR') or 0.0)
@@ -2193,6 +2280,281 @@ def from_fcs_r(r_fcs, cfg):
 
 
 # --------------------------------------------------------------------------
+# Calibration routes
+#
+# A route ties the monitor of an irradiation to a calibration of any standard
+# through R values from the standards library (standards.py, "Routes"):
+#
+#     M --R(M/S1)--> S1 --R(S1/S2)--> ... --> S_k, calibrated at t_k with λ
+#
+#     e^{λ t_M} − 1 = Π R(S_i/S_i+1) · (e^{λ t_k} − 1)
+#
+# J = (e^{λ t_M} − 1)/F_M and t = (1/λ) ln(1 + J F_u), F the ⁴⁰Ar*/³⁹Ar_K.
+# route_cfg turns a route into the cfg keys the rest of this module works on:
+# the calibration at the end as stdAgeMa ... (with its anchor, class and
+# covariance), the product of the steps as monitorR, and the route itself.
+# Each step is its own systematic component, ∂t/∂ln R · σ_R/R, labelled with the
+# R as printed and its source, so ages on different routes share exactly the
+# steps and calibration terms they have in common.  The published anchored
+# calibrations (Kuiper 2008, Rivera 2011, Phillips 2022) keep their published
+# FCs ages: their R(FCs/anchor) is the one implied by that age.
+# --------------------------------------------------------------------------
+
+def step_factor(step):
+    """R of step['from'] relative to step['to']."""
+    R = float(step['R'])
+    return R if step.get('num') == step.get('from') else 1.0 / R
+
+
+def step_label(step):
+    """Label of a step's systematic component: the R as printed, and its source."""
+    src = step.get('source') or 'no source'
+    return f"R({step.get('num')}/{step.get('den')}), {src}"
+
+
+def route_product(route):
+    """R of the route's monitor relative to the standard it ends at."""
+    p = 1.0
+    for st in route.get('steps') or []:
+        p *= step_factor(st)
+    return p
+
+
+def _route_lambda(route, lib):
+    lam = route.get('lambda')
+    if isinstance(lam, dict):
+        return (lam.get('name') or 'custom', float(lam['lambda']),
+                float(lam.get('lambda_1s') or 0.0))
+    d = _stdlib.find(lib, 'decay_constants', lam)
+    if d is None:
+        raise ValueError(f'decay constant "{lam}" is not in the standards library')
+    return d['name'], float(d['lambda']), float(d.get('lambda_1s') or 0.0)
+
+
+def _route_calibration(route, lib):
+    cal = route.get('calibration')
+    if isinstance(cal, dict):
+        return cal
+    c = _stdlib.find(lib, 'calibrations', cal)
+    if c is None:
+        raise ValueError(f'calibration "{cal}" is not in the standards library')
+    return c
+
+
+def _calibration_anchor(cal, lib):
+    """(t_A, σ_A, R(standard/anchor), σ_R) of an anchored astronomical
+    calibration, with the R implied by its published age at its own λ."""
+    a = cal.get('anchor')
+    if cal.get('basis') != 'astronomical' or not a:
+        return None
+    nat = _stdlib.find(lib, 'decay_constants', cal.get('decay_constant'))
+    lam = float(nat['lambda']) if nat else LAMBDA_DEFAULT
+    t_a = float(a['age'])
+    R = math.expm1(lam * float(cal['age']) * 1e6) / math.expm1(lam * t_a * 1e6)
+    return (t_a, float(a.get('age_1s') or 0.0), R, float(a.get('R_1s') or 0.0))
+
+
+def route_cfg(route, lib=None):
+    """The cfg calibration keys of a route (see "Calibration routes").
+
+    Raises ValueError when the calibration or decay constant is neither in the
+    library nor given in the route itself."""
+    lib = STANDARDS if lib is None else lib
+    cal = _route_calibration(route, lib)
+    lam_name, lam, slam = _route_lambda(route, lib)
+    basis = cal.get('basis', 'k-ar')
+    cfg = dict(stdAgeMa=float(cal['age']), stdAgeErrMa=float(cal.get('age_1s') or 0.0),
+               stdAgeErrType='external' if cal.get('sigma_includes_lambda') else 'internal',
+               lambdaYr=lam, lambdaErrYr=slam, calibClass='other')
+    anc = _calibration_anchor(cal, lib)
+    if anc is not None:
+        cfg['fcAnchor'] = list(anc)
+    if basis == 'astronomical':
+        cfg['calibClass'] = 'astronomical'
+    elif basis == 'joint' and cal.get('covariance') is not None:
+        cfg['calibClass'] = 'joint'
+        own = _stdlib.find(lib, 'decay_constants', cal.get('decay_constant'))
+        paired = own is not None and abs(float(own['lambda']) - lam) < 1e-14
+        cfg['stdCov'] = float(cal['covariance']) if paired else 0.0
+    std = cal.get('standard', 'FCs')
+    rec = {'name': route.get('name', ''), 'monitor': route.get('monitor', std),
+           'steps': copy.deepcopy(route.get('steps') or []),
+           'calibration': copy.deepcopy(cal) if isinstance(route.get('calibration'), dict)
+           else cal.get('name', 'custom'),
+           'lambda': copy.deepcopy(route['lambda']) if isinstance(route.get('lambda'), dict)
+           else lam_name,
+           'standard': std, 'basis': basis,
+           'anchor': (cal.get('anchor') or {}).get('standard') if anc is not None else None,
+           'source': _stdlib.short_ref(cal.get('reference', '')) or _short_cal(cal.get('name', ''))}
+    cfg.update(monitor=rec['monitor'], monitorR=route_product(route), monitorRErr=0.0,
+               route=rec)
+    return cfg
+
+
+def _short_cal(name):
+    return str(name).split('  ')[0]
+
+
+def _route_labels(rec):
+    """Labels of the calibration components on a route (see systematic_components)."""
+    cal = rec.get('calibration', '')
+    cal = cal.get('name', 'custom') if isinstance(cal, dict) else _short_cal(cal)
+    std = rec.get('standard', 'FCs')
+    anc = rec.get('anchor') or 'anchor'
+    age = (f'{std} astronomical age' if rec.get('basis') == 'astronomical'
+           else f'{std} age, {cal}')
+    return {'R(FCs/anchor) calibration': f"R({std}/{anc}), {rec.get('source') or cal}",
+            'Anchor tephra astronomical age': f'{anc} astronomical age',
+            'FCs standard age': age,
+            'Decay constant λ': f"λ, {_lam_name(rec.get('lambda', ''))}"}
+
+
+def _lam_name(lam):
+    return lam.get('name', 'custom') if isinstance(lam, dict) else lam
+
+
+def route_text(route_or_cfg):
+    """One line: 'TCs → FCs (R 1.0112 ± 0.001, Renne et al. (1998)) → Phillips
+    et al. (2022), FCs 28.176 ± 0.0115 Ma · λ Min et al. (2000)'."""
+    rec = route_or_cfg.get('route', route_or_cfg)
+    parts = [rec.get('monitor', '')]
+    for st in rec.get('steps') or []:
+        parts.append(f"{st['to']} (R({st['num']}/{st['den']}) = "
+                     f"{_stdlib.pm_text(float(st['R']), float(st.get('R_1s') or 0))}, "
+                     f"{st.get('source') or 'no source'})")
+    cal = rec.get('calibration')
+    cal = cal.get('name', 'custom') if isinstance(cal, dict) else _short_cal(cal)
+    lam = rec.get('lambda')
+    lam = lam.get('name', 'custom') if isinstance(lam, dict) else lam
+    return ' → '.join(parts) + f' · {cal} · λ {lam}'
+
+
+# cfg keys a route sets; set_route clears them first, so nothing of the
+# previous calibration is left behind.
+ROUTE_KEYS = ('route', 'fcAnchor', 'calibClass', 'stdCov') + MONITOR_KEYS
+CALIB_KEYS = ('stdAgeMa', 'stdAgeErrMa', 'stdAgeErrType', 'lambdaYr', 'lambdaErrYr')
+
+
+def set_route(cfg, keys):
+    """Put the route keys of route_cfg (or route_keys) into cfg, in place."""
+    for k in ROUTE_KEYS:
+        cfg.pop(k, None)
+    cfg.update(keys)
+    return cfg
+
+
+def monitor_ingrowth(cfg, lam=None):
+    """e^{λ t_M} − 1 of the cfg's monitor: J = this / F_M."""
+    return cfg_monitor(cfg)[1] * cfg_ingrowth(cfg, lam)
+
+
+def custom_route(monitor, age, age_1s, lam, lam_1s, external=False, name='custom'):
+    """A route with no steps that ends on a typed monitor age and λ, as read
+    from an older study."""
+    return {'name': name, 'monitor': monitor, 'steps': [],
+            'calibration': {'name': name, 'standard': monitor, 'age': float(age),
+                            'age_1s': float(age_1s), 'basis': 'k-ar',
+                            'sigma_includes_lambda': bool(external)},
+            'lambda': {'name': 'custom', 'lambda': float(lam), 'lambda_1s': float(lam_1s)}}
+
+
+def route_options(monitor, lib=None):
+    """[(label, route)] the Calibration dialogs offer for a monitor: its routes
+    saved in the library (the default first), then every calibration the
+    monitor can reach through the R values marked Use."""
+    lib = STANDARDS if lib is None else lib
+    out, seen = [], set()
+    saved = sorted((r for r in lib.get('routes', []) if r.get('monitor') == monitor),
+                   key=lambda r: not r.get('default'))
+    for r in saved:
+        out.append((r.get('name') or _stdlib.route_line(r), copy.deepcopy(r)))
+        seen.add((r.get('calibration'), len(r.get('steps') or [])))
+    for c in lib.get('calibrations', []):
+        std = c.get('standard', 'FCs')
+        steps = [] if std == monitor else _stdlib.shortest_route(lib, monitor, std)
+        if steps is None or (c['name'], len(steps)) in seen:
+            continue
+        path = ' → '.join([monitor] + [st['to'] for st in steps])
+        label = _short_cal(c['name']) + (f'  ({path})' if steps else '')
+        out.append((label, {'name': '', 'monitor': monitor, 'steps': steps,
+                            'calibration': c['name'], 'lambda': c.get('decay_constant')}))
+    d = _stdlib.default_route(lib, monitor)
+    if d is not None and not saved:
+        for i, (lbl, r) in enumerate(out):
+            if r.get('calibration') == d.get('calibration') and \
+                    len(r.get('steps') or []) == len(d.get('steps') or []):
+                out.insert(0, out.pop(i))
+                break
+    return out
+
+
+def sync_route(cfg, lib=None):
+    """Keep a cfg's route in step with its calibration keys after they were
+    typed: when stdAgeMa, its error or λ no longer match the route, the
+    route keeps its monitor and steps and ends on the typed values (a library
+    calibration with them, or a custom one).  In place; returns cfg."""
+    rec = cfg.get('route')
+    if not rec:
+        return cfg
+    try:
+        want = route_cfg(rec, lib)
+    except (ValueError, KeyError, TypeError):
+        return cfg
+    same = all(abs(float(cfg.get(k, want[k])) - float(want[k])) <= 1e-12 * max(1.0, abs(float(want[k])))
+               for k in ('stdAgeMa', 'stdAgeErrMa', 'lambdaYr', 'lambdaErrYr'))
+    if same and cfg.get('stdAgeErrType', want['stdAgeErrType']) == want['stdAgeErrType']:
+        return cfg
+    typed = route_from_cfg({k: cfg[k] for k in CALIB_KEYS if k in cfg}, lib)
+    new = copy.deepcopy(rec)
+    std = rec.get('standard', 'FCs')
+    cal = typed['calibration']
+    if std != 'FCs' or isinstance(cal, dict):
+        cal = {'name': 'custom', 'standard': std, 'age': float(cfg.get('stdAgeMa')),
+               'age_1s': float(cfg.get('stdAgeErrMa') or 0.0),
+               'basis': 'astronomical' if (std == 'FCs' and cfg_is_astronomical(cfg)) else 'k-ar',
+               'sigma_includes_lambda': cfg.get('stdAgeErrType', 'internal') == 'external'}
+    new['calibration'], new['lambda'] = cal, typed['lambda']
+    return set_route(cfg, route_cfg(new, lib))
+
+
+def route_from_cfg(cfg, lib=None):
+    """The route a cfg without one implies: its monitor through R(M/FCs) to
+    the FCs calibration with its age and error (a custom calibration when no
+    library entry has them), on its λ."""
+    lib = STANDARDS if lib is None else lib
+    if cfg.get('route'):
+        return copy.deepcopy(cfg['route'])
+    mon, R, sR = cfg_monitor(cfg)
+    steps = []
+    if mon != 'FCs':
+        st = {'from': mon, 'to': 'FCs', 'num': mon, 'den': 'FCs', 'R': R, 'R_1s': sR,
+              'source': ''}
+        for holder, ic, num, den, Rp, sp in _stdlib.intercalibrations(lib):
+            if {num, den} == {mon, 'FCs'}:
+                cand = _stdlib.step_from_ic(holder, ic, mon)
+                if abs(step_factor(cand) - R) <= 1e-9 * R:
+                    st = cand
+                    break
+        steps.append(st)
+    t = float(cfg.get('stdAgeMa', STD_AGE_DEFAULT))
+    e = float(cfg.get('stdAgeErrMa', STD_AGE_ERR) or 0.0)
+    cal = next((c['name'] for c in _fcs_cals(lib)
+                if abs(float(c['age']) - t) < 5e-4
+                and abs(float(c.get('age_1s') or 0.0) - e) < 5e-5), None)
+    if cal is None:
+        cal = {'name': 'custom', 'standard': 'FCs', 'age': t, 'age_1s': e,
+               'basis': 'astronomical' if cfg_is_astronomical(cfg) else 'k-ar',
+               'sigma_includes_lambda': cfg.get('stdAgeErrType', 'internal') == 'external'}
+    lam = float(cfg.get('lambdaYr', LAMBDA_DEFAULT))
+    slam = float(cfg.get('lambdaErrYr', LAMBDA_ERR) or 0.0)
+    lam_name = next((d['name'] for d in lib.get('decay_constants', [])
+                     if abs(float(d['lambda']) - lam) <= 1e-14
+                     and abs(float(d.get('lambda_1s') or 0.0) - slam) <= 1e-16), None)
+    return {'name': '', 'monitor': mon, 'steps': steps, 'calibration': cal,
+            'lambda': lam_name or {'name': 'custom', 'lambda': lam, 'lambda_1s': slam}}
+
+
+# --------------------------------------------------------------------------
 # Notes on calibrations off the usual path
 #
 # Shown under the calibration in the tools and written to the exports, so a
@@ -2240,10 +2602,10 @@ def monitor_mismatch_note(cfg, other_monitor, what='the data'):
     other = other_monitor or 'FCs'
     if other == mine:
         return ''
-    return (f'{what[0].upper() + what[1:]} used the monitor {other}, the calibration here '
-            f'says {mine}. The ages are FCs-equivalent and stay the same; the monitor term '
-            'of the external error and the meaning of a typed R standard follow the '
-            'monitor set here.')
+    return (f'{what[0].upper() + what[1:]} was measured on {other}, but the calibration here '
+            f'starts from {mine}. Its R and J values are used as {mine} values, so the ages '
+            f'are those of a {mine} monitor. If the flux monitor was {other}, choose a '
+            f'calibration for {other} in Calibration….')
 
 
 def edited_standards_note():

@@ -17,6 +17,7 @@ ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
 sys.path.insert(0, HERE)
 
+import copy
 import json
 import math
 
@@ -36,6 +37,12 @@ def _qt():
     if not _APP:
         _APP.append(QApplication.instance() or QApplication([]))
     return _APP[0]
+
+
+def _comp(comps, start):
+    """The systematic component whose label starts with start."""
+    d = dict(comps)
+    return next(v for k, v in d.items() if k.startswith(start))
 
 
 def close(a, b, tol, what):
@@ -276,7 +283,7 @@ def test_single_step_route_full_lambda():
         Q = _m.expm1(lam * t * 1e6) / _m.expm1(lam * t_std * 1e6)
         h = 1e-6
         num = (age(Q, lam * (1 + h)) - age(Q, lam * (1 - h))) / (2 * h * lam) * slam
-        got = dict(am.systematic_components(t, cfg))['Decay constant λ']
+        got = _comp(am.systematic_components(t, cfg), 'λ, ')
         _close(got, num, 1e-6, f'lambda term at {t} Ma')
         _close(got, -t * slam / lam, 1e-12, f'equals -t·σλ/λ at {t} Ma')
         print(f"  OK  {t:7.1f} Ma: λ term {got:.5f} Ma = −t·σλ/λ")
@@ -316,9 +323,9 @@ def test_single_age_tiers():
     close(s_int * 1e6, i, 1e-4, 'internal 1s (yr)')
     close(s_ext * 1e6, e, 1e-4, 'external 1s (yr)')
     got = dict(am.systematic_components(ages, CFG))
-    close(got['R(FCs/anchor) calibration'] * 1e6, comps['R_cal'], 1e-6, 'R cal comp')
-    close(got['Anchor tephra astronomical age'] * 1e6, comps['t_A1'], 1e-6, 't_A1 comp')
-    close(got['Decay constant λ'] * 1e6, comps['lam'], 1e-6, 'lambda comp')
+    close(_comp(got, 'R(FCs/') * 1e6, comps['R_cal'], 1e-6, 'R cal comp')
+    close(_comp(got, 'A1 astronomical age') * 1e6, comps['t_A1'], 1e-6, 't_A1 comp')
+    close(_comp(got, 'λ, ') * 1e6, comps['lam'], 1e-6, 'lambda comp')
     b = am.age_error_budget(0.0, s_int, s_ext, ages, CFG)
     close(sum(v for _, v in b), s_ext**2, 1e-18, 'budget sums to ext^2')
 
@@ -414,15 +421,40 @@ def test_library_entries():
     for sid in ('FCs', 'ACs', 'TCs', 'GA1550', 'MMhb-1', 'Hb3gr', 'A1'):
         assert sid in ids, sid
     for s in lib['standards']:
+        if s['id'] == 'FCs':                    # R(FCs/FCs) = 1 needs no entry
+            assert stdlib.recommended_R(s) is None and s['published_ages']
+            continue
         rec = stdlib.recommended_R(s)
         assert rec is not None and rec[0] > 0, s['id']
     # the presets used by the tools come from the library
-    assert [r[0] for r in am.FC_PRESETS] == [c['name'] for c in lib['calibrations']]
+    assert [r[0] for r in am.FC_PRESETS] == [c['name'] for c in lib['calibrations']
+                                            if c.get('standard', 'FCs') == 'FCs']
     assert am.DEFAULT_FC_NAME == 'Phillips et al. (2022)'
     # the anchors give back their published FCs ages at Min et al. (2000)
     for name, anc in am.FC_ANCHORS.items():
         age = next(a for n, a, e, x in am.FC_PRESETS if n == name)
         close(am.effective_fc_age(cfg(name)), age, 1e-9, name)
+
+
+def test_save_ignores_published_changes():
+    """An entry left as it was when the editor opened is not an edit, even if
+    the published file changed in the meantime."""
+    import copy, tempfile
+    base = stdlib.load_default()
+    lib = copy.deepcopy(base)
+    newer = copy.deepcopy(base)
+    next(x for x in newer['standards'] if x['id'] == 'Hb3gr')['locality'] = 'changed'
+    next(x for x in lib['standards'] if x['id'] == 'TCs')['notes'] = 'my note'
+    old_path, old_load = stdlib.user_path, stdlib.load_default
+    d = tempfile.mkdtemp()
+    stdlib.user_path = lambda: os.path.join(d, 'standards.json')
+    stdlib.load_default = lambda: copy.deepcopy(newer)
+    try:
+        stdlib.save(lib, base)
+        saved = json.load(open(stdlib.user_path()))
+    finally:
+        stdlib.user_path, stdlib.load_default = old_path, old_load
+    assert [x['id'] for x in saved['standards']] == ['TCs'], saved['standards']
 
 
 def test_identity_and_round_trip():
@@ -484,7 +516,7 @@ def test_lambda_kept_with_another_lambda():
         c = dict(stdAgeMa=age, stdAgeErrMa=err, stdAgeErrType='external', lambdaYr=lam,
                  lambdaErrYr=s_lam)
         assert am.calibration_box(c)[0] in ('astronomical', 'joint'), c
-        lam_term = dict(am.systematic_components(56.0, c))['Decay constant λ']
+        lam_term = _comp(am.systematic_components(56.0, c), 'λ, ')
         exp = am._rvalue_partials(56.0, age, lam)[1] * s_lam / 1e6
         close(lam_term, exp, 1e-12, f'λ term for {age}')
         assert abs(lam_term) > 0
@@ -570,12 +602,13 @@ def test_ratio_to_monitor_mode():
 
 def test_external_term():
     comps = dict(am.systematic_components(1.2, acs()))
-    close(comps['R(ACs/FCs)'], am.dt_dlnR(1.2, PH['lambdaYr']) * 0.000011 / 0.041707, 1e-15, 'R term')
-    assert 'R(ACs/FCs)' not in dict(am.systematic_components(1.2, PH))
+    close(_comp(comps, 'R(ACs/FCs)'), am.dt_dlnR(1.2, PH['lambdaYr']) * 0.000011 / 0.041707, 1e-15, 'R term')
+    assert not any(k.startswith('R(ACs/FCs)') for k in dict(am.systematic_components(1.2, PH)))
     assert 'monitor ACs' in am.external_route(acs())
     # shared between ages on the same monitor when combining
     C, labels = am.systematic_matrix([1.2, 1.3], acs())
-    assert 'R(ACs/FCs)' in labels and (C[:, labels.index('R(ACs/FCs)')] > 0).all()
+    lab = next(k for k in labels if k.startswith('R(ACs/FCs)'))
+    assert (C[:, labels.index(lab)] > 0).all()
 
 
 def test_converter_monitor():
@@ -612,7 +645,7 @@ def test_calibration_notes():
     # the usual path: nothing
     assert am.calibration_notes(PH) == []
     assert am.monitor_mismatch_note(acs(), 'ACs') == ''
-    assert 'used the monitor FCs' in am.monitor_mismatch_note(acs(), 'FCs', 'the .jflux')
+    assert 'was measured on FCs' in am.monitor_mismatch_note(acs(), 'FCs', 'the .jflux')
     assert am.edited_standards_note() == ''
 
 
@@ -736,6 +769,150 @@ def test_plateau_apply_typed_flux_to_all():
     ages = [sl['plateau']['r']['mean'] for sl in w._carousel]
     close(ages[1], ages[0], 1e-9, 'same R, same ages')
 
+    # 'Apply calibration to all aliquots' shares the calibration, never the flux
+    flux = {}
+    for i, sl in enumerate(w._carousel):
+        c = w.cfg if i == w._carousel_idx else sl['cfg']
+        c.update(rStd=5.70 + 0.01 * i, rStdErrPct=0.030 + 0.001 * i)
+        flux[i] = (c['ageFluxMode'], c['rStd'], c['rStdErrPct'], sl.get('flux_hole'))
+    leg = dict(stdAgeMa=28.201, stdAgeErrMa=0.023, stdAgeErrType='external',
+               lambdaYr=5.463e-10, lambdaErrYr=5.4e-12, **am.monitor_keys('FCs'))
+    keys = am.route_cfg(am.route_from_cfg(leg))
+    w.cfg.update({k: keys[k] for k in am.CALIB_KEYS if k in keys})
+    am.set_route(w.cfg, {k: keys[k] for k in am.ROUTE_KEYS if k in keys})
+    w._carousel_apply_calib_to_all(quiet=True)
+    for i, sl in enumerate(w._carousel):
+        if i == w._carousel_idx:
+            continue
+        c = sl['cfg']
+        assert (c['ageFluxMode'], c['rStd'], c['rStdErrPct'], sl.get('flux_hole')) == flux[i], (c, flux[i])
+        assert c['stdAgeMa'] == 28.201 and c['route'] == w.cfg['route'], c
+    print('  ok  Apply calibration to all: calibration shared, each aliquot keeps its flux')
+
+    # Save XLSX / CSV asks 'all samples or this one' before the file dialog
+    order = []
+    out = os.path.join(tempfile.mkdtemp(), 'x.xlsx')
+    def _save(*a, **k):
+        order.append('file')
+        return out, 'Excel (*.xlsx)'
+    def _exec(box):
+        order.append('ask')
+        box._pick = next(b for b in box.buttons() if b.text() == 'All samples')
+        return 0
+    pi.dfold.get_save_file_name = _save
+    old_exec, old_clicked = QMessageBox.exec_, QMessageBox.clickedButton
+    QMessageBox.exec_ = _exec
+    QMessageBox.clickedButton = lambda box: getattr(box, '_pick', None)
+    try:
+        w.export_csv()
+    finally:
+        QMessageBox.exec_, QMessageBox.clickedButton = old_exec, old_clicked
+    from openpyxl import load_workbook
+    ws = load_workbook(out)['Results']
+    n = sum(1 for r in ws.iter_rows(values_only=True) if r and r[0] == 'Sample')
+    assert order == ['ask', 'file'] and n == 3, (order, n)
+    print('  ok  Save XLSX / CSV: asked first, all three samples written')
+
+
+def test_routes():
+    print('Calibration routes:')
+    lib = stdlib.load_default()
+    import itertools
+    n = 0
+    for (name, age, err, ext), (_, lam, sl) in itertools.product(am.FC_PRESETS, am.LAMBDA_PRESETS):
+        for mon in ('FCs', 'TCs', 'ACs'):
+            leg = dict(stdAgeMa=age, stdAgeErrMa=err, stdAgeErrType='external' if ext else 'internal',
+                       lambdaYr=lam, lambdaErrYr=sl, **am.monitor_keys(mon))
+            rc = am.route_cfg(am.route_from_cfg(leg))
+            for t in (0.5, 55.0, 1090.0):
+                va = [v for _, v in am.systematic_components(t, leg)]
+                vb = [v for _, v in am.systematic_components(t, rc)]
+                assert len(va) == len(vb) and all(abs(x - y) <= 1e-12 * max(1, abs(x))
+                                                  for x, y in zip(va, vb)), (name, mon, t)
+            assert abs(am.cfg_ingrowth(leg) - am.cfg_ingrowth(rc)) <= 1e-15
+            n += 1
+    print(f'  ok  {n} calibration, λ and monitor combinations equal their old form')
+
+    # TCs → FCs → Phillips et al. (2022), by hand
+    tcs = stdlib.steps_from(lib, 'TCs')
+    assert [st['to'] for st in tcs] == ['FCs'], tcs
+    route = dict(name='TCs', monitor='TCs', steps=tcs, calibration='Phillips et al. (2022)',
+                 **{'lambda': 'Min et al. (2000)'})
+    assert not stdlib.route_problems(route, lib), stdlib.route_problems(route, lib)
+    c = am.route_cfg(route)
+    lam = 5.463e-10
+    ing = 1.0112 * am.FC_ANCHORS['Phillips et al. (2022)'][2] * math.expm1(lam * 6.943e6)
+    close(c['monitorR'] * am.cfg_ingrowth(c), ing, 1e-14, 'TCs ingrowth = R(TCs/FCs) R(FCs/A1) (e^λtA − 1)')
+    close(am.monitor_age(c), math.log1p(ing) / lam / 1e6, 1e-12, 'TCs age on the route')
+    comps = dict(am.systematic_components(55.0, c))
+    close(comps['R(TCs/FCs), Renne et al. (1998)'], am.dt_dlnR(55.0, lam) * 0.001 / 1.0112, 1e-12,
+          'step term ∂t/∂lnR · σR/R')
+    # shared with an FCs age on Phillips: A1 age, R(FCs/A1) and λ; not the TCs step
+    f = am.route_cfg(stdlib.default_route(lib, 'FCs'))
+    shared = set(dict(am.systematic_components(55.0, f))) & set(comps)
+    assert shared == {'A1 astronomical age', 'R(FCs/A1), Phillips et al. (2022)',
+                      'λ, Min et al. (2000)'}, shared
+    print('  ok  TCs → FCs → A1: ingrowth, age and terms by hand; shares A1, R(FCs/A1) and λ with FCs')
+
+    # a lab R straight from ACs to A1, and the A1 calibration at the end
+    lab = copy.deepcopy(lib)
+    acs = next(st for st in lab['standards'] if st['id'] == 'ACs')
+    acs['intercalibrations'].append(dict(R=0.17045, R_1s=0.00005, ratio='std/FCs', other='A1',
+                                         reference='Our lab (2026)', recommended=False))
+    assert not stdlib.check(lab), stdlib.check(lab)
+    st = [x for x in stdlib.steps_from(lab, 'ACs') if x['to'] == 'A1' and 'Our lab' in x['source']]
+    assert len(st) == 1 and st[0]['num'] == 'ACs'
+    direct = dict(name='ACs direct', monitor='ACs', steps=st, calibration='A1 astronomical age',
+                  **{'lambda': 'Min et al. (2000)'})
+    assert not stdlib.route_problems(direct, lab), stdlib.route_problems(direct, lab)
+    c = am.route_cfg(direct, lab)
+    close(c['monitorR'] * am.cfg_ingrowth(c), 0.17045 * math.expm1(lam * 6.943e6), 1e-14,
+          'ACs ingrowth = R(ACs/A1) (e^λtA − 1)')
+    t = 1.185
+    comps = dict(am.systematic_components(t, c))
+    Rp = math.expm1(lam * t * 1e6) / math.expm1(lam * 6.943e6)
+    ref = am.rvalue_age_external(Rp, 0.0, 6.943, 0.0025, lam, 5.4e-12)
+    close(math.hypot(comps['A1 astronomical age'], comps['λ, Min et al. (2000)']), ref['ext_ma'],
+          1e-9, 'A1 age and λ terms = R-value form on the chain')
+    assert 'R(ACs/A1), Our lab (2026)' in comps and not any('FCs' in k for k in comps), comps
+    print('  ok  ACs → A1 on a lab R: no FCs anywhere, terms equal the R-value form')
+
+    # the path builder refuses what the data do not support
+    bad = dict(direct, steps=[dict(st[0], R=0.2)])
+    assert stdlib.route_problems(bad, lab)
+    assert stdlib.route_problems(dict(direct, calibration='Phillips et al. (2022)'), lab)
+    loop = dict(name='loop', monitor='TCs', calibration='Phillips et al. (2022)',
+                steps=tcs + [dict(tcs[0], **{'from': 'FCs', 'to': 'TCs'})],
+                **{'lambda': 'Min et al. (2000)'})
+    assert stdlib.route_problems(loop, lib)
+    assert stdlib.default_route(lib, 'A1')['calibration'] == 'A1 astronomical age'
+    assert stdlib.default_route(lib, 'GA1550')['steps'][0]['to'] == 'FCs'
+    print('  ok  unsupported R, wrong end, loops refused; defaults for A1 and GA1550')
+
+    # a .jflux hole is read as a ratio of the route's monitor
+    fx = am.disk_flux_entry(['1'], [0.0027], [2.7e-6], [[1.0]], (), '', [5.7], [0.0057],
+                            5.463e-10, 28.176, 0.0115, None)
+    fx['monitor'], fx['monitorR'] = 'FCs', 1.0
+    fcs = am.route_cfg(stdlib.default_route(lib, 'FCs'))
+    tcs = am.route_cfg(stdlib.default_route(lib, 'TCs'))
+    close(am.flux_hole_rstd(fx, 0, fcs), 5.7, 1e-12, 'FCs flux on an FCs route: R as stored')
+    close(am.flux_hole_rstd(fx, 0, tcs), 5.7 / 1.0112, 1e-12, 'FCs flux on a TCs route: read as TCs')
+    close(am.flux_hole_J(fx, 0, tcs)[0], am.monitor_ingrowth(tcs) / 5.7, 1e-15, '  J = e^(λ t_TCs) − 1 / R')
+    fx['monitor'], fx['monitorR'] = 'TCs', 1.0112      # a TCs regression stores R / 1.0112
+    close(am.flux_hole_rstd(fx, 0, tcs), 5.7, 1e-12, 'TCs flux on a TCs route: as before')
+    assert am.monitor_mismatch_note(fcs, 'TCs', 'the flux') and not am.monitor_mismatch_note(tcs, 'TCs')
+    print('  ok  mismatch noted; matching monitors silent')
+
+    # FCs through the K–Ar standards and Mes4: the published FCs ages come back
+    lib = stdlib.load_default()
+    for cal, lam_name, R, age, tol in (('GA1550 K–Ar age', 'Steiger & Jäger (1977)', 3.5957, 28.02, 0.005),
+                                       ('Mes4 astronomical age', 'Min et al. (2000)', 4.1738, 28.179, 0.0006)):
+        to = stdlib.find(lib, 'calibrations', cal)['standard']
+        st = [x for x in stdlib.steps_from(lib, 'FCs') if x['to'] == to and x['R'] == R]
+        r = dict(name='', monitor='FCs', steps=st, calibration=cal, **{'lambda': lam_name})
+        assert not stdlib.route_problems(r, lib)
+        close(am.monitor_age(am.route_cfg(r, lib)), age, tol, f'FCs through {to} (printed R)')
+
 
 if __name__ == '__main__':
     test_carter_spreadsheet()
@@ -758,6 +935,7 @@ if __name__ == '__main__':
     test_rr_roundtrip()
     test_library_reproduces_published_ages()
     test_library_entries()
+    test_save_ignores_published_changes()
     test_identity_and_round_trip()
     test_monitor_own_age()
     test_factor_is_derivative()
@@ -775,4 +953,5 @@ if __name__ == '__main__':
     test_combine_flux_session_and_analytical_from_internal()
     test_converter_step_order()
     test_plateau_apply_typed_flux_to_all()
+    test_routes()
     print('ALL PASSED')

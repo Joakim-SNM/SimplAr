@@ -118,6 +118,8 @@ def test_window_and_export():
     w = window(); w.show()
     w._set_loaded_data(copy.deepcopy(synth.monitor_rows(1)), 'direct', True, 'R', 'synthetic')
     w._run_analysis('test')
+    assert w.crystal_info_lbl.text() == '45 crystals, 33 fusion, 12 step-heated (3 steps).', \
+        w.crystal_info_lbl.text()
     for label, key in w._VIEWS.items():
         w._view_label_var.set(label); w.crystal_view_var.set(key); w.update_plot()
     d = tempfile.mkdtemp()
@@ -402,11 +404,130 @@ def test_flux_regression_session_and_minimum():
     w2.load_session()
     assert [dw.disk_label_edit.text() for dw in w2.disk_widgets] == ['E', 'F']
     ok('disk labels E, F come back from the session')
+    w2.disk_widgets[1].disk_label_edit.setText('')
+    w2.disk_widgets[0].table_widget.setItem(0, 3, QTableWidgetItem('0.0027'))
+    w2.disk_widgets[0].table_widget.setItem(0, 4, QTableWidgetItem('0.0000027'))
+    t = w2.results_widget
+    t.setRowCount(2)
+    for k, dw in enumerate(w2.disk_widgets):
+        dd = dict(dw.get_disk_data(), disk_number=k + 1)
+        w2._populate_results_table_row(k, dd['all_data'][0], dd, None, None, None, None, fr.MODE_J)
+    assert [t.item(k, 1).text() for k in range(2)] == ['E', '2'], [t.item(k, 1).text() for k in range(2)]
+    ok('the results table and its export name each disk by its label (number when empty)')
+    assert t.item(0, 3).text() == '0.0027000000' and t.item(0, 4).text() == '0.0000027000', \
+        (t.item(0, 3).text(), t.item(0, 4).text())
+    import export as ex
+    from openpyxl import load_workbook
+    xp = os.path.join(tempfile.mkdtemp(), 'r.xlsx')
+    ex.write_xlsx(xp, [['FLUX REGRESSION RESULTS'], ['J'], [t.item(0, 3).text()]])
+    c = load_workbook(xp)['Results'].cell(row=3, column=1)
+    assert c.value == 0.0027 and c.number_format == '0.0000000000', (c.value, c.number_format)
+    ok('J and its error to 10 decimals, kept as written in the .xlsx')
     std = [dict(coordinates_3d=(x, y, z)) for x, y, z in ((0, 0, 0), (1, 0, 0), (0, 0, 2))]
     shown.clear()
     assert not w2._validate_regression_data([{}], std, False, '3d')
     assert 'at least 4' in shown[-1][1][1]
     ok('simple 3D with three monitors is refused')
+
+
+def test_jflux_r_mode_mean():
+    """In R mode the .jflux R is the mean of the R draws, the value the
+    results table shows (not const / mean of const/R)."""
+    fr = load(os.path.join('3_flux_regression', 'flux_regression.py'), 'flux_regression_r')
+    print('.jflux in R mode:')
+    fr.MONTE_CARLO_ITERATIONS = 2000
+    w = fr.FluxRegressionCalculator()
+    w.regression_mode = fr.MODE_R
+    dw = w.disk_widgets[0]
+    dw.disk_combo.setCurrentText('2.5mm (13 holes)')
+    dw.disk_label_edit.setText('E')
+    coords = dw.get_disk_data()['coordinates']
+    for hole in (1, 4, 7, 10, 13):
+        x, y = coords[hole - 1]
+        t = dw.table_widget
+        t.setItem(hole - 1, 3, QTableWidgetItem(repr(5.74 * (1 + 0.002 * x - 0.001 * y))))
+        t.setItem(hole - 1, 4, QTableWidgetItem('0.0015'))
+        t.cellWidget(hole - 1, 2).setChecked(True)
+    w.regression_info = {'type': 'individual', 'complex_3d': False}
+    dd = dw.get_disk_data()
+    path = os.path.join(tempfile.mkdtemp(), 'r.jflux')
+    fr.dfold.get_save_file_name = lambda *a, **k: (path, '')
+    w.export_flux_config()
+    with open(path, encoding='utf-8') as fh:
+        d = json.load(fh)['disks'][0]
+    for i, h in enumerate(dd['all_data']):
+        if d['monitor'][i]:
+            continue
+        tab = w.predict_j_value(*h['coordinates_3d'], specific_standards=dd['standard_data'],
+                                force_regression_type='2d', n_iterations=2000)[0]
+        assert abs(d['R'][i] - tab) < 1e-12, (h['hole_number'], d['R'][i], tab)
+    ok('unknowns: .jflux R equals the results-table R')
+
+
+def test_flux_monitors_calibration():
+    print('Flux monitors, Calibration…: J on a route:')
+    from PyQt5.QtWidgets import QDialog
+    w = window()
+    w.use_reml_var.set(False); w.use_nmad_var.set(False); w.use_error_filter_var.set(False)
+    rows = [r for r in synth.monitor_rows(1)['E1'] if r['uncertainty40_39'] > 0]
+    w._set_loaded_data({'E1': copy.deepcopy(rows)}, 'direct', True, 'R', 'synthetic')
+    w._run_analysis('test')
+    head, table = w._summary_rows()
+    J0 = dict(zip(head, table[0]))['J']
+    fm.CalibrationDialog.exec_ = lambda dlg: (dlg._mon_cb.setCurrentText('TCs'), QDialog.Accepted)[1]
+    w._open_calibrate()
+    head, table = w._summary_rows()
+    row = dict(zip(head, table[0]))
+    close(row['J'] / J0, 1.0112, 1e-12, 'TCs → FCs → Phillips: J × R(TCs/FCs)')
+    close(row['Reported R (FCs-equivalent)'], row['Reported R'] / 1.0112, 1e-12, 'FCs-equivalent R kept')
+    assert any(l.startswith('Calibration route: TCs') for l in w._parameter_lines())
+    assert w.route_lbl.text().startswith('TCs → FCs')
+    ok('route line and export parameter line')
+
+
+def test_flux_regression_route_chain():
+    """Flux regression fits the measured R as it is; the .jflux carries the
+    monitor; a tool reads the measured R and applies its own route."""
+    print('Flux regression: measured R, monitor label, the tools apply their route:')
+    from PyQt5.QtWidgets import QDialog
+    import standards as S
+    fr = load(os.path.join('3_flux_regression', 'flux_regression.py'), 'flux_regression_r')
+    w = fr.FluxRegressionCalculator()
+    w.mode_r_radio.click()
+    dw = w.disk_widgets[0]
+    dw.disk_combo.setCurrentText('2.5mm (13 holes)')
+    dw.disk_label_edit.setText('C')
+    meas = {1: 5.7000, 4: 5.7100, 7: 5.7200, 10: 5.7150, 13: 5.7050}    # measured on TCs
+    for h, v in meas.items():
+        dw.table_widget.setItem(h - 1, 3, QTableWidgetItem(repr(v)))
+        dw.table_widget.setItem(h - 1, 4, QTableWidgetItem(repr(v * 1e-3)))
+        dw.table_widget.cellWidget(h - 1, 2).setChecked(True)
+    fr.CalibrationDialog.exec_ = lambda dlg: (dlg._mon_cb.setCurrentText('TCs'), QDialog.Accepted)[1]
+    w._open_calibrate()
+    assert float(dw.table_widget.item(0, 3).text()) == 5.7
+    tcs = am.route_cfg(S.default_route(am.STANDARDS, 'TCs'))
+    close(w.monitor_ingrowth(), am.monitor_ingrowth(tcs), 1e-15,
+          'values untouched; J here = (e^(λ t_TCs) − 1) / R')
+    w.regression_info = {'type': '2d', 'complex_3d': False}
+    path = os.path.join(tempfile.mkdtemp(), 'c.jflux')
+    fr.dfold.get_save_file_name = lambda *a, **k: (path, '')
+    fr.MONTE_CARLO_ITERATIONS = 2000
+    np.random.seed(5)
+    w.export_flux_config()
+    cfgj = json.load(open(path, encoding='utf-8'))
+    assert cfgj['monitor'] == 'TCs' and cfgj['monitorR'] == 1.0
+    assert abs(cfgj['disks'][0]['R'][0] / 5.7 - 1) < 0.01
+    ok('.jflux: the fitted measured R and the monitor TCs')
+    fx = next(iter(am.read_jflux(path).values()))
+    i = fx['idx']['1']
+    close(am.flux_hole_measured(fx, i), cfgj['disks'][0]['R'][0], 1e-15, 'the tools read that R')
+    close(am.flux_hole_J(fx, i, tcs)[0], am.monitor_ingrowth(tcs) / fx['R'][i], 1e-15,
+          'a tool on TCs: J = (e^(λ t_TCs) − 1) / R')
+    close(am.flux_hole_J(fx, i, tcs)[0], cfgj['disks'][0]['J'][0], 1e-12,
+          '  the same J Flux regression wrote')
+    fcs = am.route_cfg(S.default_route(am.STANDARDS, 'FCs'))
+    assert am.monitor_mismatch_note(fcs, fx['monitor']) and not am.monitor_mismatch_note(tcs, 'TCs')
+    ok('a tool on FCs is warned')
 
 
 if __name__ == '__main__':
@@ -417,4 +538,7 @@ if __name__ == '__main__':
     test_flux_regression_import()
     test_flux_cross_disk()
     test_flux_regression_session_and_minimum()
+    test_jflux_r_mode_mean()
+    test_flux_monitors_calibration()
+    test_flux_regression_route_chain()
     print('ALL PASSED')

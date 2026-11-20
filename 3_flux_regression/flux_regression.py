@@ -31,12 +31,15 @@ import warnings
 # shared math/constants live one folder up, next to the launcher
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from arar_math import (
-    LAMBDA_DEFAULT, STD_AGE_DEFAULT, STD_AGE_ERR, fsig,
-    FC_PRESETS, paired_lambda, force_light, DEFAULT_FC_INDEX, DEFAULT_FC_NAME,
+    LAMBDA_DEFAULT, STD_AGE_DEFAULT, STD_AGE_ERR,
+    FC_PRESETS, paired_lambda, force_light, no_wheel_on_dropdowns, DEFAULT_FC_INDEX, DEFAULT_FC_NAME,
     fc_ingrowth, mswd_critical, mswd_classify, mono_font,
     calibration_notes, edited_standards_note,
 )
-from standards import MonitorCombo
+from standards import MonitorCombo, route_line
+from calibration_dialog import CalibrationDialog
+from arar_math import (route_cfg, route_from_cfg, route_text, monitor_ingrowth,
+                       monitor_mismatch_note, STANDARD_IDS, monitor_keys)
 import data_folders as dfold
 import export
 
@@ -1113,7 +1116,7 @@ class DiskWidget(QWidget):
 
         return {
             'disk_name': disk_name,
-            'disk_label': self.disk_label_edit.text().strip() or disk_name,
+            'disk_label': self.disk_label_edit.text().strip() or str(self.disk_number),
             'height': height,
             'coordinates': [hd['coordinates_2d'] for hd in all_data],
             'standard_data': standard_data,
@@ -1246,6 +1249,9 @@ def read_flux_monitors_export(path):
         if r and isinstance(r[0], str) and r[0].startswith('Monitor: '):
             monitor = r[0][len('Monitor: '):].split(',')[0].strip() or 'FCs'
             break
+        if r and isinstance(r[0], str) and r[0].startswith('Calibration route: '):
+            monitor = r[0][len('Calibration route: '):].split(' ')[0].strip() or 'FCs'
+            break
     if head is None:
         raise ValueError("No table with 'Category' and 'Reported R' columns. Load an "
                          "export of the Flux monitors tool made in 40/39 ratio mode.")
@@ -1259,11 +1265,13 @@ def read_flux_monitors_export(path):
         if s1 is None and get('Reported SE (2σ)') is not None:
             s1 = get('Reported SE (2σ)') / 2.0
         R = get('Reported R')
+        R_meas, s_meas = R, s1
         if 'Reported R (FCs-equivalent)' in col:
             R = get('Reported R (FCs-equivalent)')
             s1 = get('Reported SE (FCs-equivalent, 1σ)')
         out.append({'category': str(r[0]).strip(), 'R': R,
-                    'R_sigma': s1, 'J': get('J'), 'monitor': monitor})
+                    'R_sigma': s1, 'J': get('J'), 'monitor': monitor,
+                    'R_meas': R_meas, 'R_sigma_meas': s_meas})
     calib = next((r[0] for r in rows if r and isinstance(r[0], str)
                   and r[0].startswith('Calibration for J:')), '')
     return out, calib
@@ -1296,7 +1304,49 @@ class FluxRegressionCalculator(QMainWindow):
             t_fc_err = float(self.standard_age_err_edit.text())
         except Exception:
             t_fc_err = None
-        return fc_ingrowth(t_fc, lam, t_fc_err)
+        if getattr(self, '_route', None):
+            # R values are the measured ratios of the monitor: J = e^(λ t_M) − 1 / R
+            return monitor_ingrowth(route_cfg(self._route))
+        return fc_ingrowth(t_fc, lam, t_fc_err) * self.monitor_combo.keys()['monitorR']
+
+    def _cal_cfg(self):
+        if getattr(self, '_route', None):
+            return route_cfg(self._route)
+        try:
+            c = dict(stdAgeMa=float(self.standard_age_edit.text()),
+                     stdAgeErrMa=float(self.standard_age_err_edit.text()),
+                     lambdaYr=float(self.lambda_edit.text()), lambdaErrYr=0.0)
+        except ValueError:
+            c = dict(stdAgeMa=FC_AGE_DEFAULT, stdAgeErrMa=FC_AGE_ERROR_DEFAULT,
+                     lambdaYr=DECAY_CONSTANT, lambdaErrYr=0.0)
+        c.update(self.monitor_combo.keys())
+        return c
+
+    def _show_route(self):
+        r = route_from_cfg(self._cal_cfg())
+        self.route_lbl.setText(route_line(r))
+        self.route_lbl.setToolTip(route_text(r))
+
+    def _open_calibrate(self):
+        """Calibration… : the dialog shared with the other tools.  The R values
+        are not touched: the monitor is written to the .jflux for the tools to
+        check against their own calibration, and the calibration only turns
+        R into J here."""
+        dlg = CalibrationDialog(self._cal_cfg(), parent=self, age_source=False, stored=False)
+        if dlg.exec_() != QDialog.Accepted:
+            return
+        self._route = dlg.get_params()['route_keys']['route']
+        self._sync_route_fields()
+        self._show_route()
+
+    def _sync_route_fields(self):
+        """The hidden fields hold the route's end calibration (sessions, export)."""
+        c = route_cfg(self._route)
+        self.standard_age_edit.setText(f"{c['stdAgeMa']:g}")
+        self.standard_age_err_edit.setText(f"{c['stdAgeErrMa']:g}")
+        self.lambda_edit.setText(f"{c['lambdaYr']:.4e}")
+        mon = c['monitor'] if c['monitor'] in STANDARD_IDS else 'FCs'
+        self.monitor_combo.set_monitor(mon)
 
     def __init__(self):
         super().__init__()
@@ -1371,10 +1421,9 @@ class FluxRegressionCalculator(QMainWindow):
         self.fc_preset_combo.activated.connect(self._on_fc_preset)
         self.monitor_combo = MonitorCombo()
         self.monitor_combo.setToolTip(
-            'The standard measured as flux monitor. R values here are\n'
-            'FCs-equivalent (measured R / R of the monitor relative to FCs),\n'
-            'as the Flux monitors export gives them; the monitor is written\n'
-            'to the .jflux so the other tools add the uncertainty of its R.')
+            'The standard measured as flux monitor. R values here are its\n'
+            'measured ratios; the monitor is written to the .jflux, where the\n'
+            'tools check it against their own calibration.')
         constants_layout.addRow("Monitor:", self.monitor_combo)
         constants_layout.addRow("Calibration:", self.fc_preset_combo)
 
@@ -1402,11 +1451,28 @@ class FluxRegressionCalculator(QMainWindow):
         age_lambda_layout.addWidget(self.lambda_edit)
         constants_layout.addRow("Age (Ma):", age_lambda_widget)
 
-        ref_label = QLabel(
-            f"{DEFAULT_FC_NAME}: FC {STD_AGE_DEFAULT} ± {STD_AGE_ERR} Ma (1σ), "
-            "internal errors only")
-        ref_label.setStyleSheet("color: gray; font-size: 9px;")
-        constants_layout.addRow("", ref_label)
+        # the fields above are kept, hidden: Calibration… sets them
+        for w in (self.monitor_combo, self.fc_preset_combo, age_lambda_widget):
+            constants_layout.labelForField(w).setVisible(False)
+            w.setVisible(False)
+        self._route = None
+        cal_w = QWidget()
+        cal_h = QHBoxLayout(cal_w)
+        cal_h.setContentsMargins(0, 0, 0, 0)
+        b_cal = QPushButton("Calibration…")
+        b_cal.setToolTip("The monitor measured here and the calibration J is calculated on.\n"
+                         "R values are the measured ratios of that monitor and are fitted as\n"
+                         "they are. The monitor goes into the .jflux, where the tools check it\n"
+                         "against their own calibration; the calibration only gives the J here.")
+        b_cal.clicked.connect(self._open_calibrate)
+        cal_h.addWidget(b_cal)
+        cal_h.addStretch()
+        constants_layout.addRow("Calibration:", cal_w)
+        self.route_lbl = QLabel('')
+        self.route_lbl.setWordWrap(True)
+        self.route_lbl.setStyleSheet("color: gray; font-size: 9px;")
+        constants_layout.addRow("", self.route_lbl)
+        self._show_route()
 
         # Input error precision + output error precision on one row
         self.input_sigma_1_btn = QPushButton("1σ")
@@ -2081,20 +2147,12 @@ class FluxRegressionCalculator(QMainWindow):
         calibration.  A monitor keeps its measured value; the Plane columns show
         the fitted surface at every hole, and the residual compares the two.
         """
-        def _fmt(v, fmt=None):
-            if v is None:
-                return "N/A"
-            if fmt is not None:
-                return f"{v:{fmt}}"
-            # 8 significant figures, fixed-decimal notation, trailing zeros preserved
-            if v == 0:
-                return "0.00000000"
-            mag = int(math.floor(math.log10(abs(v))))
-            dp = max(0, 7 - mag)
-            return f"{v:.{dp}f}"
+        def _fmt(v):
+            """J, R and their errors: 10 decimals."""
+            return "N/A" if v is None else f"{v:.10f}"
 
         output_sigma = self.output_sigma
-        disk_label   = str(disk_data['disk_number'])
+        disk_label   = disk_data.get('disk_label') or str(disk_data['disk_number'])
         primary_key  = 'r_value' if mode == MODE_R else 'j_value'
         is_std       = hole_data['is_standard'] and hole_data[primary_key] is not None
         row_type     = ("Monitor (measured value)" if is_std
@@ -2142,14 +2200,14 @@ class FluxRegressionCalculator(QMainWindow):
         self.results_widget.setItem(row_idx, 1,  QTableWidgetItem(disk_label))
         self.results_widget.setItem(row_idx, 2,  QTableWidgetItem(str(hole_data['hole_number'])))
         self.results_widget.setItem(row_idx, 3,  QTableWidgetItem(_fmt(in_j)))
-        self.results_widget.setItem(row_idx, 4,  QTableWidgetItem(fsig(in_j_e,      6) if in_j_e is not None else 'N/A'))
+        self.results_widget.setItem(row_idx, 4,  QTableWidgetItem(_fmt(in_j_e)))
         self.results_widget.setItem(row_idx, 5,  QTableWidgetItem(_fmt(in_r)))
-        self.results_widget.setItem(row_idx, 6,  QTableWidgetItem(fsig(in_r_e,      6) if in_r_e is not None else 'N/A'))
+        self.results_widget.setItem(row_idx, 6,  QTableWidgetItem(_fmt(in_r_e)))
         self.results_widget.setItem(row_idx, 7,  QTableWidgetItem(_fmt(j_pred)))
-        self.results_widget.setItem(row_idx, 8,  QTableWidgetItem(fsig(j_error_out, 6) if j_error_out is not None else 'N/A'))
+        self.results_widget.setItem(row_idx, 8,  QTableWidgetItem(_fmt(j_error_out)))
         self.results_widget.setItem(row_idx, 9,  QTableWidgetItem(pct_j))
         self.results_widget.setItem(row_idx, 10, QTableWidgetItem(_fmt(r_pred)))
-        self.results_widget.setItem(row_idx, 11, QTableWidgetItem(fsig(r_error_out, 6) if r_error_out is not None else 'N/A'))
+        self.results_widget.setItem(row_idx, 11, QTableWidgetItem(_fmt(r_error_out)))
         self.results_widget.setItem(row_idx, 12, QTableWidgetItem(pct_r))
         self.results_widget.setItem(row_idx, 13, QTableWidgetItem(residual_str))
         self.results_widget.setItem(row_idx, 14, QTableWidgetItem(row_type))
@@ -2489,7 +2547,7 @@ class FluxRegressionCalculator(QMainWindow):
             t_fc_err = float(self.standard_age_err_edit.text())
         except Exception:
             t_fc_err = FC_AGE_ERROR_DEFAULT
-        const = fc_ingrowth(t_fc, lam, t_fc_err)
+        const = self.monitor_ingrowth()      # J = e^(λ t_M) − 1 / R of the monitor
 
         irr = self.irradiation_edit.text().strip() or "irradiation"
         n_iter = MONTE_CARLO_ITERATIONS   # same count as the main regression (15000)
@@ -2580,44 +2638,45 @@ class FluxRegressionCalculator(QMainWindow):
             if scale != 1.0:
                 vmean = draws.mean(axis=0)
                 draws = vmean + (draws - vmean) * np.where(is_mon, 1.0, scale)
-            if mode == MODE_R:                          # convert R draws -> J draws
-                draws = const / draws
+            # Mean, covariance and monitor values in the quantity that was
+            # regressed (R or J), so the mean is the one the results table
+            # shows; the other quantity follows through `const` at the end (the
+            # mean of const/R is not const/mean R).
             joint.append((label, draws))
-            Jmean = draws.mean(axis=0)
-            Jcov = np.cov(draws.T)
+            Vmean = draws.mean(axis=0)
+            Vcov = np.cov(draws.T)
             # Monitors report their measured value and σ exactly (the draws
             # carry them only to Monte Carlo precision); rescaling the rows
             # and columns keeps the correlations.
             if is_mon.any():
-                Jexact = np.array(Jmean, float)
-                Sexact = np.sqrt(np.clip(np.diag(Jcov), 0, None))
+                Vexact = np.array(Vmean, float)
+                Sexact = np.sqrt(np.clip(np.diag(Vcov), 0, None))
+                vk = ('r_value', 'r_error') if mode == MODE_R else ('j_value', 'j_error')
                 for j, h in enumerate(holes):
-                    if not is_mon[j]:
-                        continue
-                    if mode == MODE_R:
-                        Jexact[j] = const / h['r_value']
-                        Sexact[j] = Jexact[j] * h['r_error'] / h['r_value']
-                    else:
-                        Jexact[j] = h['j_value']
-                        Sexact[j] = h['j_error']
-                Sdraw = np.sqrt(np.clip(np.diag(Jcov), 0, None))
+                    if is_mon[j]:
+                        Vexact[j], Sexact[j] = h[vk[0]], h[vk[1]]
+                Sdraw = np.sqrt(np.clip(np.diag(Vcov), 0, None))
                 with np.errstate(divide='ignore', invalid='ignore'):
                     fac = np.where(is_mon & (Sdraw > 0), Sexact / Sdraw, 1.0)
-                Jcov = Jcov * np.outer(fac, fac)
-                Jmean = Jexact
-            Jsig = np.sqrt(np.clip(np.diag(Jcov), 0, None))
-            denom = np.outer(Jsig, Jsig)
+                Vcov = Vcov * np.outer(fac, fac)
+                Vmean = Vexact
+            Vsig = np.sqrt(np.clip(np.diag(Vcov), 0, None))
+            denom = np.outer(Vsig, Vsig)
             with np.errstate(divide='ignore', invalid='ignore'):
-                Jcorr = np.where(denom > 0, Jcov / denom, 0.0)
+                Jcorr = np.where(denom > 0, Vcov / denom, 0.0)
             np.fill_diagonal(Jcorr, 1.0)
-            # Each hole is also stored as R = (e^{λ t_FC} − 1)/J at this file's
-            # λ and FC age.  R does not depend on the calibration, and it is what
-            # the Plateau & isochron and Age distribution tools read; J is written
-            # alongside.  R and J are exact reciprocals through `const`, and σ_R
-            # has J's relative error.
+            # J = (e^{λ t_FC} − 1)/R at this file's λ and FC age.  R does not
+            # depend on the calibration, and it is what the Plateau & isochron
+            # and Age distribution tools read; J is written alongside.  R and J
+            # are exact reciprocals through `const` with the same relative σ,
+            # and to first order the same correlations.
             with np.errstate(divide='ignore', invalid='ignore'):
-                Rmean = np.where(Jmean > 0, const / Jmean, 0.0)
-                Rsig  = np.where(Jmean > 0, Rmean * Jsig / Jmean, 0.0)
+                other = np.where(Vmean > 0, const / Vmean, 0.0)
+                other_sig = np.where(Vmean > 0, other * Vsig / Vmean, 0.0)
+            if mode == MODE_R:
+                Rmean, Rsig, Jmean, Jsig = Vmean, Vsig, other, other_sig
+            else:
+                Jmean, Jsig, Rmean, Rsig = Vmean, Vsig, other, other_sig
             disks_out.append(dict(
                 disk_id=label,
                 disk_design=dd.get('disk_name', ''),
@@ -2662,9 +2721,12 @@ class FluxRegressionCalculator(QMainWindow):
             stdAgeErrType="external", n_iter=n_iter, disks=disks_out,
             fit_id=uuid.uuid4().hex,
         )
-        mk = self.monitor_combo.keys()
-        if mk['monitor'] != 'FCs':
-            payload.update(mk)
+        # R values are the measured ratios of the monitor (monitorR = 1: nothing
+        # was divided out); the tools read the monitor and apply their route
+        c = self._cal_cfg()
+        payload.update(monitor=c['monitor'], monitorR=1.0, R_measured=True)
+        if c.get('route'):
+            payload['route'] = c['route']
         if cross:
             payload['cross_disk_corr'] = cross
         path, _ = dfold.get_save_file_name(
@@ -3840,6 +3902,8 @@ class FluxRegressionCalculator(QMainWindow):
                     'standard_age_err': self.standard_age_err_edit.text(),
                     'lambda':           self.lambda_edit.text(),
                     'monitor':          self.monitor_combo.monitor(),
+                    'route':            getattr(self, '_route', None),
+                    'r_measured':       True,
                 },
                 'irradiation':         self.irradiation_edit.text(),
                 'input_sigma':         self.input_sigma,
@@ -3910,7 +3974,18 @@ class FluxRegressionCalculator(QMainWindow):
 
         mons = {r.get('monitor', 'FCs') for r in rows}
         if len(mons) == 1:
-            self.monitor_combo.set_monitor(mons.pop())
+            m = mons.pop()
+            if getattr(self, '_route', None):
+                note = monitor_mismatch_note(self._cal_cfg(), m, 'the export')
+                if note:
+                    QMessageBox.warning(self, "Import", note)
+            else:
+                self.monitor_combo.set_monitor(m)
+                self._show_route()
+        for r in rows:            # the measured ratio of the monitor, as it is
+            if r.get('R_meas') is not None:
+                r['R'] = r['R_meas']
+                r['R_sigma'] = r.get('R_sigma_meas')
         by_disk, skipped = {}, []
         for r in rows:
             pos = split_position_label(r['category'])
@@ -4017,6 +4092,8 @@ class FluxRegressionCalculator(QMainWindow):
             if 'lambda' in consts:
                 self.lambda_edit.setText(consts['lambda'])
             self.monitor_combo.set_monitor(consts.get('monitor', 'FCs'))
+            self._route = consts.get('route')
+            self._show_route()
             if session.get('irradiation') is not None:
                 self.irradiation_edit.setText(str(session['irradiation']))
 
@@ -4086,7 +4163,19 @@ class FluxRegressionCalculator(QMainWindow):
                 # Load coordinates for the selected design (populates the table)
                 dw.load_disk_coordinates(preserve_data=False)
 
-                # Fill in hole data
+                # Fill in hole data.  Sessions from before the values were the
+                # measured ratios hold FCs-equivalent R for a monitor other
+                # than FCs: back to the measured ratio.
+                _c = session.get('constants', {})
+                _f = (monitor_keys(_c.get('monitor'))['monitorR']
+                      if (not _c.get('r_measured') and _c.get('monitor', 'FCs') != 'FCs'
+                          and session.get('regression_mode') == MODE_R) else 1.0)
+
+                def _scaled(t):
+                    try:
+                        return f"{float(t) * _f:.12g}" if _f != 1.0 and str(t).strip() else t
+                    except ValueError:
+                        return t
                 for row, hole in enumerate(disk_data.get('holes', [])):
                     if row >= dw.table_widget.rowCount():
                         break
@@ -4098,16 +4187,16 @@ class FluxRegressionCalculator(QMainWindow):
                         checkbox.setChecked(hole.get('is_standard', False))
                     val_item = dw.table_widget.item(row, 3)
                     if val_item:
-                        val_item.setText(hole.get('value', ''))
+                        val_item.setText(_scaled(hole.get('value', '')))
                     else:
                         dw.table_widget.setItem(row, 3,
-                            QTableWidgetItem(hole.get('value', '')))
+                            QTableWidgetItem(_scaled(hole.get('value', ''))))
                     err_item = dw.table_widget.item(row, 4)
                     if err_item:
-                        err_item.setText(hole.get('error', ''))
+                        err_item.setText(_scaled(hole.get('error', '')))
                     else:
                         dw.table_widget.setItem(row, 4,
-                            QTableWidgetItem(hole.get('error', '')))
+                            QTableWidgetItem(_scaled(hole.get('error', ''))))
 
             self._update_button_states()
             self.update_interface_for_disk_count()
@@ -4161,6 +4250,7 @@ def main():
     app.setApplicationName("Flux regression")
     dfold.use_tool('flux_regression')
     force_light(app)
+    no_wheel_on_dropdowns(app)
     window = FluxRegressionCalculator()
     window.show()
     sys.exit(app.exec_())

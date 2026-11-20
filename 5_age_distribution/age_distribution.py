@@ -26,6 +26,7 @@ Layout of this file, top to bottom:
 import sys
 import os
 import json
+import copy
 import math
 
 import numpy as np
@@ -65,9 +66,9 @@ from arar_math import (
     external_sigma_array, calibration_class, age_error_budget,
     internal_sigma_array, systematic_matrix, cfg_ingrowth,
     external_route, calibration_group_key,
-    full_systematics_warning, calibration_warning, force_light,
+    full_systematics_warning, calibration_warning, force_light, no_wheel_on_dropdowns,
     cfg_J, scale_sem, position_ident, combine, read_jflux,
-    deserialize_disk_flux, merge_disk_flux, flux_hole_R, flux_hole_rel,
+    deserialize_disk_flux, merge_disk_flux, flux_hole_R, flux_hole_rel, flux_hole_rstd,
     flux_pair_corr, serialize_xcorr,
     draw_budget_pie, file_err_div,
     METHOD_WM, METHOD_GLS, method_key,
@@ -75,7 +76,10 @@ from arar_math import (
     calibration_notes, monitor_mismatch_note,
 )
 from flux_dialog import FluxAssignDialog, FluxHost
-from standards import MonitorCombo, monitor_text
+from standards import MonitorCombo, monitor_text, route_line
+from calibration_dialog import CalibrationDialog
+from arar_math import (route_cfg, route_from_cfg, route_text, set_route, ROUTE_KEYS,
+                       CALIB_KEYS)
 import export
 import data_folders as dfold
 
@@ -340,7 +344,8 @@ def _pos_info(d):
 
 
 _J_CFG_KEYS = ('ageFluxMode', 'jVal', 'jErrPct', 'rStd', 'rStdErrPct', 'rStdErrMode',
-               'stdAgeMa', 'stdAgeErrMa', 'stdAgeErrType', 'lambdaYr', 'lambdaErrYr') + MONITOR_KEYS
+               'stdAgeMa', 'stdAgeErrMa', 'stdAgeErrType', 'lambdaYr', 'lambdaErrYr',
+               'fullSystematics') + tuple(am.ROUTE_KEYS)
 
 
 def _parse_steps(steps, ef):
@@ -431,6 +436,81 @@ def parse_arar(path):
                 irradiation=cfg_src.get('irradiation') or cfg_src.get('irrad'),
                 flux_hole=data.get('flux_hole'),
                 constants=dict(cfg_src.get('constants') or {}))
+
+
+def _sample_from_dict(sd):
+    """A Sample from its entry in an .arprob session."""
+    s = Sample(sd.get('name', 'Sample'), sd.get('color', '#1f77b4'))
+    s.raw_name = sd.get('raw_name')
+    s.enabled = sd.get('enabled', True)
+    s.is_plateau = sd.get('is_plateau', False)
+    s.input_mode = sd.get('input_mode', 'age')
+    s.reject = sd.get('reject', 'nmad')
+    s.nmad_thresh = sd.get('nmad_thresh', 2.5)
+    s.in_sigma = sd.get('in_sigma', 1)
+    s._from_file = sd.get('from_file', False)
+    s.disk_id = sd.get('disk_id')
+    s.hole_id = sd.get('hole_id')
+    s.irradiation = sd.get('irradiation')
+    ov = sd.get('flux_override')
+    s._flux_override = tuple(ov) if ov else None
+    s.j_cfg = {**_default_j_cfg(), **sd.get('j_cfg', {})}
+    s.ages = np.array(sd.get('ages', []), float)
+    s.unc_2s = np.array(sd.get('unc_2s', []), float)
+    s.r_vals = np.array(sd.get('r_vals', []), float)
+    s.r_uncs = np.array(sd.get('r_uncs', []), float)
+    s.kca_vals = np.array(sd.get('kca_vals', []), float)
+    s.kca_errs = np.array(sd.get('kca_errs', []), float)
+    s.ar40_pct = np.array(sd.get('ar40_pct', []), float)
+    s.labels   = sd.get('labels', [])
+    s.run_ids  = sd.get('run_ids', [])
+    s.metas    = sd.get('metas', [])
+    s.constants = sd.get('constants', {}) or {}
+    man = sd.get('manual', [])
+    s.manual = np.array(man if len(man) == len(s.ages)
+                        else ['auto'] * len(s.ages), dtype=object)
+    if sd.get('pt_pos') and sd.get('pt_jfrac'):
+        s.pt_pos = [str(p) for p in sd['pt_pos']]
+        s.pt_jfrac = np.array([np.nan if v is None else v
+                               for v in sd['pt_jfrac']], float)
+    # Sessions saved while an assigned hole's J sat on top of the merged
+    # aliquots' file-J scaling: age them again from the measured R.
+    _ov = s._flux_override
+    if (_ov and (str(_ov[0]), str(_ov[1])) != ('NONE', 'NONE')
+            and s.has_R() and s.use_measured_R()):
+        s.recompute()
+    le = sd.get('loaded_excluded', [])
+    s._loaded_excluded = np.array(le, bool) if len(le) == len(s.ages) \
+        else np.zeros(len(s.ages), bool)
+    s.compute_auto()
+    return s
+
+
+def _arprob_doc(sd):
+    """A saved .arprob sample as a parse_arar-like dict, to merge it into
+    another sample.  Ages, R and their σ are stored at 1σ; R goes with it
+    only for a sample that ages from R."""
+    n = len(sd.get('ages', []))
+    rv, ru = sd.get('r_vals', []) or [], sd.get('r_uncs', []) or []
+    use_r = sd.get('input_mode') == 'ratio' and len(rv) == n
+    d = dict(name=sd.get('name', 'Sample'), raw_name=sd.get('raw_name'),
+             ages=list(sd.get('ages', [])), unc=list(sd.get('unc_2s', [])),
+             r_vals=list(rv) if use_r else [],
+             r_uncs=(list(ru) if len(ru) == n else [0.0] * n) if use_r else [],
+             manual=(list(sd['manual']) if len(sd.get('manual') or []) == n
+                     else ['auto'] * n),
+             j_cfg={**_default_j_cfg(), **(sd.get('j_cfg') or {})},
+             irradiation=sd.get('irradiation'), disk_id=sd.get('disk_id'),
+             hole_id=sd.get('hole_id'),
+             constants=sd.get('constants') or {})
+    for k in ('kca_vals', 'kca_errs', 'ar40_pct', 'labels', 'run_ids', 'metas'):
+        v = sd.get(k) or []
+        if len(v) == n:
+            d[k] = list(v)
+    if sd.get('pt_pos') and sd.get('pt_jfrac') and len(sd['pt_pos']) == n:
+        d['pt_pos'] = [str(x) for x in sd['pt_pos']]
+        d['pt_jfrac'] = [np.nan if v is None else v for v in sd['pt_jfrac']]
+    return d
 
 
 def read_stack_disk_flux(path):
@@ -574,7 +654,7 @@ def parse_ararstack_aliquots(path):
         # computed from R with the real R_std / FCs / λ (never R_std = 70).
         jc = _default_j_cfg()
         for k in ('rStd', 'rStdErrPct', 'rStdErrMode', 'stdAgeMa',
-                  'stdAgeErrMa', 'stdAgeErrType', 'lambdaYr', 'lambdaErrYr'):
+                  'stdAgeErrMa', 'stdAgeErrType', 'lambdaYr', 'lambdaErrYr') + tuple(am.ROUTE_KEYS):
             if cfg.get(k) is not None:
                 jc[k] = cfg[k]
         jc['ageFluxMode'] = 'ratio_R_std'
@@ -1161,7 +1241,7 @@ class SamplePanel(QFrame):
             self.jval.setToolTip(f'Measured ⁴⁰Ar*/³⁹Ar of the monitor ({mon}), as set in the '
                                  'calibration bar.')
             self.lbl_jpct.setText('±R%:')
-            self.jval.setText(f"{from_fcs_r(cfg.get('rStd', 70.0), cfg):.8g}")
+            self.jval.setText(f"{from_fcs_r(cfg.get('rStd', 70.0), cfg):.11g}")
             self.jpct.setText(f"{cfg.get('rStdErrPct', 0.10):.4g}")
             jr_on = True
         elif mode == 'ratio_R_FCs':
@@ -1838,7 +1918,7 @@ class ProbabilityWindow(QMainWindow):
             ' Full external (Min et al., 2000): the uncertainty of the two partial\n'
             '          ⁴⁰K decay constants (about 1.2% of the age, 1σ) in place of the λ term,\n'
             '          for an independent test of the ⁴⁰K clock.')
-        self.cal_external.activated.connect(self._on_calib_field)
+        self.cal_external.activated.connect(self._on_external)
         cal1.addWidget(self.cal_external)
         # stdAgeErrType is not a user control; it comes from the preset
         # (astronomical/Carter = 'external'); λ handling is automatic (R-value).
@@ -1854,8 +1934,29 @@ class ProbabilityWindow(QMainWindow):
         cal.addStretch()
         for w in (self.cal_tfc, self.cal_tfce, self.cal_lam, self.cal_lame):
             w.editingFinished.connect(self._on_calib_field)
-        right.addLayout(cal1)
-        right.addLayout(cal2)
+        # the preset fields are kept (sessions and the default sample read
+        # them) but hidden: the calibration is set with Calibration…
+        _old = QWidget()
+        _ol = QVBoxLayout(_old)
+        _ol.setContentsMargins(0, 0, 0, 0)
+        _ol.addLayout(cal1)
+        _ol.addLayout(cal2)
+        _old.setVisible(False)
+        right.addWidget(_old)
+        cal1.removeWidget(self.cal_external)
+        bar = QHBoxLayout()
+        self.route_lbl = QLabel('')
+        self.route_lbl.setWordWrap(True)
+        self.route_lbl.setStyleSheet('color:#555; font-size:10px;')
+        b_cal = QPushButton('Calibration…')
+        b_cal.setToolTip('Monitor and calibration of the samples. Under Advanced: typed values, '
+                         'a route built in Standards, and which samples it goes to.')
+        b_cal.clicked.connect(self._open_calibrate)
+        bar.addWidget(b_cal)
+        self.cal_external.setVisible(False)      # set in Calibration… (Advanced)
+        bar.addStretch()
+        right.addLayout(bar)
+        right.addWidget(self.route_lbl)
         self.mon_info = QLabel('')
         self.mon_info.setStyleSheet('color:#555; font-size:10px;')
         self.mon_info.setVisible(False)
@@ -1995,6 +2096,90 @@ class ProbabilityWindow(QMainWindow):
             p.refresh_info()
         self.redraw()
 
+    def _on_external(self, *_):
+        full = self.cal_external.currentIndex() == 1
+        for s in self.samples:
+            s.j_cfg['fullSystematics'] = full
+            if s.has_R() and s.input_mode == 'ratio':
+                s.recompute()
+        for p in self.panels:
+            p.refresh_info()
+        self._show_routes()
+        self.redraw()
+
+    def _open_calibrate(self):
+        """Calibration… : the shared dialog, applied to the ticked samples."""
+        if not self.samples:
+            return
+        lines = [(s.name, True, route_text(route_from_cfg(s.j_cfg))) for s in self.samples]
+        dlg = CalibrationDialog(self.samples[0].j_cfg, parent=self, age_source=False,
+                                stored=False, samples=lines if len(lines) > 1 else None,
+                                full_external=self.cal_external.currentIndex() == 1)
+        if dlg.exec_() != QDialog.Accepted:
+            return
+        p = dlg.get_params()
+        targets = p['targets'] or [True] * len(self.samples)
+        rkeys = p['route_keys']
+        cal = dict(stdAgeMa=p['fc2_ma'], stdAgeErrMa=p['fc2_err_ma'],
+                   stdAgeErrType='external' if p['fc2_external'] else 'internal',
+                   lambdaYr=p['lam2'], lambdaErrYr=p['lam2_err'])
+        notes = []
+        for s, on in zip(self.samples, targets):
+            if not on:
+                # the others keep theirs, spelled out as a route, so shared
+                # terms carry the same names when pooled
+                set_route(s.j_cfg, route_cfg(route_from_cfg(s.j_cfg)))
+                continue
+            prod_old = cfg_monitor(s.j_cfg)[1]
+            s.j_cfg.update(cal)
+            set_route(s.j_cfg, rkeys)
+            if s.j_cfg.get('rStd'):
+                s.j_cfg['rStd'] = s.j_cfg['rStd'] * prod_old / cfg_monitor(s.j_cfg)[1]
+            if s.j_cfg.get('ageFluxMode') in ('ratio_J', 'ratio_R_std'):
+                _sync_j_rstd(s.j_cfg, 'R')
+            if s.has_R() and s.input_mode == 'ratio':
+                s.recompute()
+            m = self._flux_match(s)
+            if m is not None:
+                n = monitor_mismatch_note(s.j_cfg, self._disk_flux[m[0]].get('monitor', 'FCs'),
+                                          f'the disk flux of {s.name}')
+                if n:
+                    notes.append(n)
+        if notes:
+            QMessageBox.warning(self, 'Calibration', '\n\n'.join(notes))
+        self._apply_flux_to_samples()
+        if bool(p.get('full_external')) != (self.cal_external.currentIndex() == 1):
+            self.cal_external.setCurrentIndex(1 if p.get('full_external') else 0)
+            self._on_external()
+        self._sync_calib_bar()
+        for pnl in self.panels:
+            pnl._update_jvis()
+            pnl.sync_data_box()
+            pnl.refresh_info()
+        self.redraw()
+
+    def _show_routes(self):
+        """The calibration line: one route, or each sample's when they differ,
+        with a note when samples end on different calibrations."""
+        if not hasattr(self, 'route_lbl') or not self.samples:
+            return
+        rs = [(s.name, route_from_cfg(s.j_cfg)) for s in self.samples]
+        lines = [route_line(r) for _, r in rs]
+        full = ' · full external' if self.cal_external.currentIndex() == 1 else ''
+        if len(set(lines)) == 1:
+            self.route_lbl.setText(lines[0] + full)
+            self.route_lbl.setToolTip(route_text(rs[0][1]))
+        else:
+            self.route_lbl.setText(f'{len(set(lines))} calibrations (hover for each sample){full}')
+            self.route_lbl.setToolTip('\n'.join(f'{n}: {l}' for (n, _), l in zip(rs, lines)))
+        ends = {(str(r.get('calibration')), str(r.get('lambda'))) for _, r in rs}
+        note = ('The samples end on different calibrations; a pooled age mixes them. '
+                'Calibration… can put them on one.' if len(ends) > 1 else '')
+        txt = '\n'.join(t for t in [note] + list(getattr(self, '_calib_notes', []) or []) if t)
+        self.mon_info.setWordWrap(True)
+        self.mon_info.setText(txt)
+        self.mon_info.setVisible(bool(txt))
+
     def _sync_calib_bar(self):
         """Reflect the samples' calibration in the bar (after loads).
 
@@ -2024,6 +2209,7 @@ class ProbabilityWindow(QMainWindow):
         self.cal_lame.setCursorPosition(0)
         self.calib_sel.setCurrentIndex(
             self._calib_bar_match() if uniform else len(FC_PRESETS))
+        self._show_routes()
 
     def add_sample(self, sample=None):
         if sample is None:
@@ -2032,7 +2218,11 @@ class ProbabilityWindow(QMainWindow):
                          _PALETTE[len(self.samples) % len(_PALETTE)])
             sample = Sample(name=f'Sample {len(self.samples)+1}', color=color)
             vals = self._calib_bar_values()
-            if vals:
+            if self.samples:            # the calibration of the first sample
+                c0 = self.samples[0].j_cfg
+                sample.j_cfg.update({k: copy.deepcopy(c0[k]) for k in
+                                     CALIB_KEYS + ROUTE_KEYS + ('fullSystematics',) if k in c0})
+            elif vals:
                 idx = self._calib_bar_match()
                 vals['calibClass'] = (calibration_class(FC_PRESETS[idx][0])
                                       if idx < len(FC_PRESETS) else 'other')
@@ -2057,9 +2247,40 @@ class ProbabilityWindow(QMainWindow):
     # --- file ops -----------------------------------------------------------
     def load_into(self, sample):
         paths, _ = dfold.get_open_file_names(
-            self, 'Load .arar / .ararpt / .ararstack', '',
-            'Ar-Ar (*.arar *.ararpt *.ararstack);;All (*)')
+            self, 'Load .arar / .ararpt / .ararstack / .arprob', '',
+            'Ar-Ar (*.arar *.ararpt *.ararstack *.arprob);;All (*)')
         if not paths:
+            return
+        # One Age distribution session: like a stack, its samples load as
+        # separate samples or as points of this one.
+        if len(paths) == 1 and paths[0].lower().endswith('.arprob'):
+            try:
+                sds, flux = self._read_arprob(paths[0])
+            except Exception as e:
+                QMessageBox.warning(self, 'Load', f'{os.path.basename(paths[0])}: {e}')
+                return
+            merge_disk_flux(self._disk_flux, flux)
+            if not sds:
+                QMessageBox.information(self, 'Load',
+                                        f'{os.path.basename(paths[0])} holds no samples.')
+                return
+            if len(sds) > 1:
+                ans = QMessageBox.question(
+                    self, 'Load session',
+                    f'{os.path.basename(paths[0])} holds {len(sds)} samples.\n\n'
+                    'Load each as a separate sample?\n\n'
+                    'Yes: one sample each, as saved (calibration, exclusions, '
+                    'ticked or not).\n\n'
+                    'No: all their points in this sample, with their R values put '
+                    'on the first sample\'s J (each keeps its own J error).',
+                    QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
+                    QMessageBox.Yes)
+                if ans == QMessageBox.Cancel:
+                    return
+                if ans == QMessageBox.No:
+                    self._load_docs(sample, [_arprob_doc(sd) for sd in sds])
+                    return
+            self._load_saved_samples(sample, sds)
             return
         # One stack with several aliquots: offer one sample per aliquot, so each
         # keeps its own calibration and the pool combines them.
@@ -2111,6 +2332,10 @@ class ProbabilityWindow(QMainWindow):
                     self._merge_stack_flux(p)
                     if d is not None:
                         docs.append(d)
+                elif p.lower().endswith('.arprob'):
+                    sds, flux = self._read_arprob(p)
+                    merge_disk_flux(self._disk_flux, flux)
+                    docs += [_arprob_doc(sd) for sd in sds if sd.get('ages')]
                 else:
                     d = parse_arar(p)
                     if d is not None:
@@ -2120,6 +2345,37 @@ class ProbabilityWindow(QMainWindow):
         if not docs:
             return
         self._load_docs(sample, docs)
+
+    @staticmethod
+    def _read_arprob(path):
+        """(saved sample dicts with points, disk flux) of an .arprob session."""
+        with open(path, encoding='utf-8') as f:
+            data = json.load(f)
+        if not isinstance(data, dict) or 'samples' not in data:
+            raise ValueError('not an Age distribution session')
+        sds = [sd for sd in data.get('samples', []) if sd.get('ages')]
+        return sds, deserialize_disk_flux(data.get('disk_flux', []))
+
+    def _load_saved_samples(self, sample, sds):
+        """The samples of an .arprob session: the first fills `sample` (which
+        keeps its colour), the rest are added after it, each as saved."""
+        used = {s.color for s in self.samples if s is not sample}
+        for k, sd in enumerate(sds):
+            new = _sample_from_dict(sd)
+            if k == 0:
+                color = sample.color
+                sample.__dict__.update(new.__dict__)
+                sample.color = color
+                self._rebuild_panel(sample)
+            else:
+                if new.color in used:
+                    new.color = next((c for c in _PALETTE if c not in used),
+                                     _PALETTE[len(self.samples) % len(_PALETTE)])
+                self.add_sample(new)
+            used.add(sample.color if k == 0 else new.color)
+        if self._disk_flux:
+            self._apply_flux_to_samples()
+        self.redraw()
 
     def _load_aliquots_as_samples(self, sample, als):
         """One sample per stack aliquot: the first fills `sample`, the rest are
@@ -2699,7 +2955,7 @@ class ProbabilityWindow(QMainWindow):
             # computed from R with the sample's current λ / FC.  Changing the
             # calibration, or applying a flux from another calibration, then
             # re-derives the age instead of jumping it.
-            r_std = flux_hole_R(fx, i)
+            r_std = flux_hole_rstd(fx, i, s.j_cfg)
             if r_std is not None and r_std > 0:
                 s.j_cfg['ageFluxMode'] = 'ratio_R_std'
                 s.j_cfg['rStd'] = r_std
@@ -3974,49 +4230,7 @@ class ProbabilityWindow(QMainWindow):
         self._preferred_flux = tuple(pf) if pf else None
 
         for sd in data.get('samples', []):
-            s = Sample(sd.get('name', 'Sample'), sd.get('color', '#1f77b4'))
-            s.raw_name = sd.get('raw_name')
-            s.enabled = sd.get('enabled', True)
-            s.is_plateau = sd.get('is_plateau', False)
-            s.input_mode = sd.get('input_mode', 'age')
-            s.reject = sd.get('reject', 'nmad')
-            s.nmad_thresh = sd.get('nmad_thresh', 2.5)
-            s.in_sigma = sd.get('in_sigma', 1)
-            s._from_file = sd.get('from_file', False)
-            s.disk_id = sd.get('disk_id')
-            s.hole_id = sd.get('hole_id')
-            s.irradiation = sd.get('irradiation')
-            ov = sd.get('flux_override')
-            s._flux_override = tuple(ov) if ov else None
-            s.j_cfg = {**_default_j_cfg(), **sd.get('j_cfg', {})}
-            s.ages = np.array(sd.get('ages', []), float)
-            s.unc_2s = np.array(sd.get('unc_2s', []), float)
-            s.r_vals = np.array(sd.get('r_vals', []), float)
-            s.r_uncs = np.array(sd.get('r_uncs', []), float)
-            s.kca_vals = np.array(sd.get('kca_vals', []), float)
-            s.kca_errs = np.array(sd.get('kca_errs', []), float)
-            s.ar40_pct = np.array(sd.get('ar40_pct', []), float)
-            s.labels   = sd.get('labels', [])
-            s.run_ids  = sd.get('run_ids', [])
-            s.metas    = sd.get('metas', [])
-            s.constants = sd.get('constants', {}) or {}
-            man = sd.get('manual', [])
-            s.manual = np.array(man if len(man) == len(s.ages)
-                                else ['auto'] * len(s.ages), dtype=object)
-            if sd.get('pt_pos') and sd.get('pt_jfrac'):
-                s.pt_pos = [str(p) for p in sd['pt_pos']]
-                s.pt_jfrac = np.array([np.nan if v is None else v
-                                       for v in sd['pt_jfrac']], float)
-            # Sessions saved while an assigned hole's J sat on top of the merged
-            # aliquots' file-J scaling: age them again from the measured R.
-            _ov = s._flux_override
-            if (_ov and (str(_ov[0]), str(_ov[1])) != ('NONE', 'NONE')
-                    and s.has_R() and s.use_measured_R()):
-                s.recompute()
-            le = sd.get('loaded_excluded', [])
-            s._loaded_excluded = np.array(le, bool) if len(le) == len(s.ages) \
-                else np.zeros(len(s.ages), bool)
-            s.compute_auto()
+            s = _sample_from_dict(sd)
             self.add_sample(s)
         # A sample on a hole of the loaded disk flux takes that hole's J, as in
         # the flux dialog (the J saved with it can be an older one).
@@ -4507,6 +4721,7 @@ def main():
     app.setApplicationName("Age distribution")
     dfold.use_tool('age_distribution')
     force_light(app)
+    no_wheel_on_dropdowns(app)
     win = ProbabilityWindow()
     win.show()
     sys.exit(app.exec_())
