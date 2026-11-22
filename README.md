@@ -1,9 +1,7 @@
 # SimplAr
 
-Desktop tools for ⁴⁰Ar/³⁹Ar geochronology, from the laboratory's data export to
-plateau, isochron and combined ages. Every age carries three uncertainty tiers:
-analytical; internal (plus J); external (plus the monitor age and decay constant).
-Shared J and calibration errors are treated as correlated.
+For the weary ⁴⁰Ar/³⁹Ar geochronologist who simply wants to extract some nice ages and mess around with various calibrations. If you have data from a mass spectrometer, run it past SimplAr. Create plateaus, isochrons, PDPs, mixture modelling, stack aliquots, combine experiments (maybe some incremental heating and fusion ages?), calibrate your standards through astronomical or joint determination pathways. Create J-vales in 2D or 3D and use the flux covariance for your ages. From reducing you flux monitor data to a final image and dataset export, this fully independent software lets you take data from any export and process it.
+  Made to be simple, easy to use, and fast with all the best functions functions from the legacy programs. 
 
 ## The tools
 
@@ -26,7 +24,7 @@ In the order they are normally used:
 
 The launcher's **Standards** window holds the monitors, Fish Canyon calibrations and
 decay constants that all tools use, with their sources. The published values ship
-with SimplAr; your edits are kept separately and can be reset.
+with SimplAr.
 
 The launcher's **About** window describes the methods and equations in full, with
 references.
