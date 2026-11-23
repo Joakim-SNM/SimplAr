@@ -571,7 +571,7 @@ def test_flux_regression_views():
         assert pw.figure.axes[0].name == '3d'
         pw.show_page(1)
         assert len([a for a in pw.figure.axes if a.get_title()]) == 3
-        pw.figure.savefig(f'/tmp/views_{int(complex_3d)}.png')
+        pw.figure.canvas.draw()
     ok('simple and complex 3D: the stack, and one map per disk')
     # selected cells are cleared with Delete; hole numbers and coordinates stay
     from PyQt5.QtGui import QKeyEvent
