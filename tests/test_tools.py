@@ -68,7 +68,7 @@ def test_launcher_and_about():
         assert os.path.isfile(os.path.join(ROOT, *rel)), rel
     ok(f'{len(L.TOOLS)} tool scripts where the launcher looks for them')
     html = L.build_about_html(ROOT)
-    assert 'Recalculator and age combiner; standards' in html and '<img src=' in html
+    assert 'Standards, routes and calibrations' in html and '<img src=' in html
     L.AboutDialog(w)
     ok('About document builds, equations rendered to the cache folder')
     assert DATA in w.data_lbl.text()
@@ -453,6 +453,18 @@ def test_combiner_loads_files():
     for d in tab.items:
         assert head.count(d['label'] + ':') == 1, (d['label'], head)
     ok('recalculated ages listed per sample before the combined age')
+    # without a .jflux the combiner groups J errors by disk, like the stack
+    tab.disk_flux.clear(); tab.overrides.clear(); tab.manual.clear()
+    rows = tab.filled_rows()[:3]
+    for r, pos in zip(rows, ('D/1', 'D/2', 'E/1')):
+        tab.table.setItem(r, rcm.C_POS, QTableWidgetItem(pos))
+    for r in tab.filled_rows()[3:]:
+        tab.table.setItem(r, rcm.C_POS, QTableWidgetItem(''))
+    tab.recalc()
+    rho = tab.result['rho']
+    idx = [next(i for i, d in enumerate(tab.items) if d['row'] == r) for r in rows]
+    assert rho[idx[0], idx[1]] == 1.0 and rho[idx[0], idx[2]] == 0.0, rho
+    ok('combiner without a .jflux: same disk shares J, another disk does not')
 
 
 def test_stack_vs_probability():

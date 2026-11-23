@@ -53,7 +53,7 @@ import export
 import standards as stdlib
 from flux_dialog import FluxAssignDialog, FluxHost
 from calibration_dialog import CalibrationDialog
-from arar_math import route_cfg, route_text, cfg_monitor
+from arar_math import route_cfg, route_text, cfg_monitor, position_ident
 
 
 # ---------------------------------------------------------------------------
@@ -853,8 +853,9 @@ POSITION_GUIDE = (
     '• With a .jflux: type disk/hole (e.g. E_outer/10) or just the hole (10). '
     'J correlation… then matches the row to that hole, which gives its J error and '
     'its correlation with the other holes. A hole picked in J correlation… replaces it.\n\n'
-    '• Without a .jflux: the text is a label. Rows with the same label share one J error '
-    '(fully correlated); different labels are independent.\n\n'
+    '• Without a .jflux: rows on the same disk share one J error (fully correlated), as in '
+    'the Plateau & isochron stack and Age distribution. Without a disk, rows with the same '
+    'text share it. Rows on different disks are independent.\n\n'
     '• Empty: the J error is independent, unless rows have the same manual J or R and '
     'error in J correlation….\n\n'
     'Load files… fills it in from the file.')
@@ -900,9 +901,9 @@ class _RecalcFluxHost(FluxHost):
                'from the .jflux and, where ± internal is empty, the J error of that hole. '
                'Without a .jflux, type the J or the R standard of the position and its 1σ '
                'under Manual: where ± internal is empty, its relative error gives the J term. '
-               'A hole wins over a manual value. Ages without a hole are correlated when their '
-               'Position labels are the same, or, without a label, when their manual J or R '
-               'and its error are the same.')
+               'A hole wins over a manual value. Ages without a hole are correlated when they '
+               'are on the same disk (or have the same Position label when no disk is given), '
+               'or, without a Position, when their manual J or R and its error are the same.')
 
     def __init__(self, tab):
         self.tab = tab
@@ -1041,8 +1042,8 @@ class CombineTab(QWidget):
         split.setSizes([330, 260])
         v.addWidget(split, 1)
         v.addWidget(_note('Each row is recalculated from the calibration it was published on to the '
-                          'one above, then the ages are combined. Ages with the same Position label '
-                          '(e.g. disk/hole) share their J error; the calibration terms are shared '
+                          'one above, then the ages are combined. Without a .jflux, ages on the same '
+                          'disk in Position share their J error. The calibration terms are shared '
                           'by all ages, and the R of a monitor by every age on that monitor.'))
 
         self.method.currentIndexChanged.connect(self.recalc)
@@ -1283,7 +1284,9 @@ class CombineTab(QWidget):
                 C[i, labels.index(lbl)] += val
         pts = []
         for d in self.items:
-            pos = self.table.text(d['row'], C_POS)
+            # the same rule as the Plateau & isochron stack and Age distribution:
+            # the disk decides, else the hole or label
+            pos = position_ident(*self.disk_hole(d['row']))
             man = self.manual.get(d['row'])
             ident = (pos if pos else
                      ('manual', man[0], round(man[1], 12), round(man[2], 12)) if man else

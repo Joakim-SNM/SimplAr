@@ -1627,21 +1627,26 @@ class FluxRegressionCalculator(QMainWindow):
 
         # Regression calculation buttons
         regression_controls = QHBoxLayout()
+        # One plane through several disks is not offered: a planar fit is made
+        # to each disk on its own (calculate_individual_btn).  The button is kept,
+        # hidden, for the code that enables and disables the buttons together.
         self.calculate_2d_btn = QPushButton("Calculate Planar Regression")
         self.calculate_2d_btn.clicked.connect(lambda: self.calculate_regression('2d'))
+        self.calculate_2d_btn.setVisible(False)
+        self.calculate_individual_btn = QPushButton("Calculate Planar Regression")
+        self.calculate_individual_btn.setToolTip('A plane fitted to the monitors of each disk on its own.')
+        self.calculate_individual_btn.clicked.connect(self.calculate_individual_disk_regressions)
         self.calculate_3d_btn = QPushButton("Calculate 3D Regression")
         self.calculate_3d_btn.clicked.connect(lambda: self.calculate_regression('3d'))
         self.calculate_complex_3d_btn = QPushButton("Calculate Complex 3D")
         self.calculate_complex_3d_btn.clicked.connect(lambda: self.calculate_regression('3d', complex_3d=True))
 
-        regression_controls.addWidget(self.calculate_2d_btn)
+        regression_controls.addWidget(self.calculate_individual_btn)
         regression_controls.addWidget(self.calculate_3d_btn)
         regression_controls.addWidget(self.calculate_complex_3d_btn)
         calc_layout.addLayout(regression_controls)
 
         advanced_controls = QHBoxLayout()
-        self.calculate_individual_btn = QPushButton("Individual Disk Regressions")
-        self.calculate_individual_btn.clicked.connect(self.calculate_individual_disk_regressions)
         self.compare_methods_btn = QPushButton("Compare Methods")
         self.compare_methods_btn.clicked.connect(self.compare_regression_methods)
         self.compare_methods_btn.setEnabled(False)
@@ -1649,7 +1654,6 @@ class FluxRegressionCalculator(QMainWindow):
         self.export_btn.clicked.connect(self.export_results)
         self.export_btn.setEnabled(False)
 
-        advanced_controls.addWidget(self.calculate_individual_btn)
         advanced_controls.addWidget(self.compare_methods_btn)
         advanced_controls.addWidget(self.export_btn)
         calc_layout.addLayout(advanced_controls)
@@ -1867,12 +1871,6 @@ class FluxRegressionCalculator(QMainWindow):
         self.calculate_3d_btn.setEnabled(has_multiple_disks)
         self.calculate_complex_3d_btn.setEnabled(has_multiple_disks)
 
-        # Update button text
-        if has_multiple_disks:
-            self.calculate_2d_btn.setText("Calculate 2D Regression")
-        else:
-            self.calculate_2d_btn.setText("Calculate Planar Regression")
-
         # Show/hide height controls
         for disk_widget in self.disk_widgets:
             if hasattr(disk_widget, 'height_widget'):
@@ -1996,8 +1994,7 @@ class FluxRegressionCalculator(QMainWindow):
             QMessageBox.warning(self, "Error",
                                 "3D regression needs monitors on at least two disk heights, "
                                 "but all monitors are at the same height.\n\n"
-                                "Set each disk's height, or use the planar or "
-                                "individual-disk regression.")
+                                "Set each disk's height, or use the planar regression.")
             return False
 
         return True
@@ -2301,7 +2298,7 @@ class FluxRegressionCalculator(QMainWindow):
                                        dd['standard_data'], '2d', False)
                 for dd in processed_disks)
             QMessageBox.information(self, "Success",
-                                  f"Individual regressions calculated for {len(processed_disks)} disk(s).\n"
+                                  f"Planar regressions calculated for {len(processed_disks)} disk(s).\n"
                                   f"Each disk fitted on its own, {MONTE_CARLO_ITERATIONS:,} iterations.\n\n"
                                   + fit_lines)
 
@@ -2864,7 +2861,7 @@ class FluxRegressionCalculator(QMainWindow):
             reg_info = getattr(self, 'regression_info', {})
             regression_type = reg_info.get('type', 'unknown').upper()
             if regression_type == 'INDIVIDUAL':
-                regression_type = "Individual Disk Regressions (Monte Carlo)"
+                regression_type = "Planar, each disk on its own (Monte Carlo)"
             elif reg_info.get('complex_3d'):
                 regression_type += " Complex"
 
