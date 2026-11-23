@@ -530,6 +530,64 @@ def test_flux_regression_route_chain():
     ok('a tool on FCs is warned')
 
 
+def test_flux_regression_views():
+    """The planar result shows its planes and a map per disk; the 3D results show
+    the stack and a map per disk, the complex one with its saddle."""
+    print('Flux regression views:')
+    fr = load(os.path.join('3_flux_regression', 'flux_regression.py'), 'flux_regression_v')
+    fr.MONTE_CARLO_ITERATIONS = 150
+    fr.MonteCarloThread.start = fr.MonteCarloThread.run
+    fr.IndividualDiskMonteCarloThread.start = fr.IndividualDiskMonteCarloThread.run
+    w = fr.FluxRegressionCalculator()
+    w.add_disk(); w.add_disk()
+    J0 = 2.7e-3
+    for dw, lab, h in zip(w.disk_widgets, 'CDE', (0.0, 4.0, 8.0)):
+        dw.disk_combo.setCurrentText('2.5mm (13 holes)')
+        dw.disk_label_edit.setText(lab)
+        dw.height_spinbox.setValue(h)
+        coords = dw.get_disk_data()['coordinates']
+        for hole in (1, 3, 5, 7, 9, 11):
+            x, y = coords[hole - 1]
+            t = dw.table_widget
+            t.setItem(hole - 1, 0, QTableWidgetItem(f'{lab}{hole}'))
+            t.setItem(hole - 1, 3, QTableWidgetItem(repr(J0 * (1 + 0.01 * x - 0.004 * y
+                                                                  + 0.0006 * h + 0.008 * x * y))))
+            t.setItem(hole - 1, 4, QTableWidgetItem(repr(J0 * 1e-3)))
+            t.cellWidget(hole - 1, 2).setChecked(True)
+    pw = w.plot_widget
+
+    def pages():
+        return [b.text() for b in pw._page_btns if b.isVisibleTo(pw)]
+
+    w.calculate_individual_disk_regressions()
+    assert pages() == ['Planes', 'By disk'], pages()
+    pw.show_page(1)
+    assert len([a for a in pw.figure.axes if a.get_title()]) == 3     # one map per disk
+    ok('planar: its planes, and one map per disk')
+
+    for complex_3d in (False, True):
+        w.calculate_regression('3d', complex_3d=complex_3d)
+        assert pages() == ['Stack', 'By disk'], pages()
+        assert pw.figure.axes[0].name == '3d'
+        pw.show_page(1)
+        assert len([a for a in pw.figure.axes if a.get_title()]) == 3
+        pw.figure.savefig(f'/tmp/views_{int(complex_3d)}.png')
+    ok('simple and complex 3D: the stack, and one map per disk')
+    # selected cells are cleared with Delete; hole numbers and coordinates stay
+    from PyQt5.QtGui import QKeyEvent
+    from PyQt5.QtCore import QEvent, Qt as _Qt
+    dw = w.disk_widgets[0]; t = dw.table_widget
+    t.clearSelection()
+    for r in (0, 2):
+        for c in (1, 3, 4, 5):
+            t.item(r, c).setSelected(True)
+    dw.handle_key_press(QKeyEvent(QEvent.KeyPress, _Qt.Key_Delete, _Qt.NoModifier))
+    assert t.item(0, 3).text() == '' and t.item(2, 4).text() == ''
+    assert t.item(0, 1).text() == '1' and t.item(0, 5).text().startswith('(')
+    ok('Delete clears the selected values, not the hole numbers or coordinates')
+    w.close()
+
+
 if __name__ == '__main__':
     test_reml_vs_metafor()
     test_weighted_mean_and_j()
@@ -541,4 +599,5 @@ if __name__ == '__main__':
     test_jflux_r_mode_mean()
     test_flux_monitors_calibration()
     test_flux_regression_route_chain()
+    test_flux_regression_views()
     print('ALL PASSED')

@@ -300,6 +300,7 @@ class SimplePlotWidget(QWidget):
         super().__init__()
         self.figure = Figure(figsize=(16, 14))
         self.canvas = FigureCanvas(self.figure)
+        self._pages = []            # (button text, draw function) of the current result
         self._setup_toolbar_and_navigation()
         self._setup_layout()
 
@@ -312,9 +313,37 @@ class SimplePlotWidget(QWidget):
     def _setup_layout(self):
         """Setup widget layout."""
         layout = QVBoxLayout()
-        layout.addWidget(self.toolbar)
+        top = QHBoxLayout()
+        top.addWidget(self.toolbar, 1)
+        self._page_btns = []
+        for k in range(2):
+            b = QPushButton()
+            b.setCheckable(True)
+            b.setVisible(False)
+            b.clicked.connect(lambda _=False, k=k: self.show_page(k))
+            top.addWidget(b)
+            self._page_btns.append(b)
+        layout.addLayout(top)
         layout.addWidget(self.canvas)
         self.setLayout(layout)
+
+    def set_pages(self, pages):
+        """pages: [(button text, draw function)].  Shows the first page; with more
+        than one, buttons above the plot switch between them."""
+        self._pages = pages
+        for k, b in enumerate(self._page_btns):
+            b.setVisible(len(pages) > 1 and k < len(pages))
+            if k < len(pages):
+                b.setText(pages[k][0])
+        self.show_page(0)
+
+    def show_page(self, k):
+        if not self._pages:
+            return
+        for j, b in enumerate(self._page_btns):
+            b.setChecked(j == k)
+        self._pages[k][1]()
+        self.canvas.draw_idle()
 
     def _on_scroll(self, event):
         """Handle mouse wheel zoom events."""
@@ -371,6 +400,7 @@ class SimplePlotWidget(QWidget):
     def plot_individual_disk_regressions(self, all_disk_data, mode=MODE_J):
         """Plot individual planar regressions for each disk with error bars."""
         self.figure.clear()
+        self._note_text = self._below_note = None
         ax = self.figure.add_subplot(111, projection='3d')
         legend_handles, legend_labels = [], []
         all_vals = []
@@ -395,6 +425,158 @@ class SimplePlotWidget(QWidget):
         # Plot points and setup visualization
         self._plot_3d_points(ax, all_disk_data, all_j_values, all_uncertainties)
         self._setup_3d_visualization(ax, all_j_values, all_uncertainties)
+
+    # ── Views by disk: (A) the stack, (B) one map per disk ─────────────────
+    # ``disks`` is a list of dicts: label, z (height, mm), f (vectorised
+    # f(x, y) -> predicted value on that disk), holes [(x, y)], monitors
+    # [(x, y, measured)].  The same list serves every regression model.
+
+    def _note(self, text=None, fontsize=9):
+        """A note above the plot, wrapped to the current width of the figure and
+        wrapped again when the plot is resized."""
+        import textwrap
+        if text is None:                        # resize: rewrap the last note
+            if not getattr(self, '_note_text', None) or self.figure._suptitle is None:
+                return
+            text, fontsize = self._note_text
+        self._note_text = (text, fontsize)
+        if not getattr(self, '_note_hooked', False):
+            self.canvas.mpl_connect('resize_event', lambda _e: self._note())
+            self._note_hooked = True
+        width_px = self.figure.get_figwidth() * self.figure.dpi
+        n = max(40, int(0.95 * width_px / (0.6 * fontsize * self.figure.dpi / 72)))
+        wrapped = '\n'.join(textwrap.fill(t, n) for t in text.split('\n'))
+        self.figure.suptitle(wrapped, fontsize=fontsize)
+        # the plots start below the note, however many lines it takes
+        lines = wrapped.count('\n') + 1
+        top = 1.0 - (lines * fontsize * 1.4 + 16) / (self.figure.get_figheight() * 72)
+        if getattr(self, '_below_note', None):
+            self._below_note(top)
+
+    @staticmethod
+    def _disk_grid(d, n=61):
+        h = np.asarray(d['holes'], float)
+        cx, cy = h.mean(axis=0)
+        r = np.hypot(h[:, 0] - cx, h[:, 1] - cy).max()
+        r = r * 1.12 if r > 0 else 1.0
+        g = np.linspace(-r, r, n)
+        X, Y = np.meshgrid(cx + g, cy + g)
+        inside = (X - cx)**2 + (Y - cy)**2 <= r**2
+        V = np.asarray(d['f'](X, Y), float) * np.ones_like(X)
+        return X, Y, V, inside, (cx, cy, r)
+
+    def draw_stack(self, disks, mode=MODE_J):
+        """(A) Each disk drawn at its height in the stack, bent up and down by
+        its predicted value (exaggerated) and coloured by it."""
+        from matplotlib import cm, colors
+        self.figure.clear()
+        self._note_text = None
+        # the axes fill the figure below the note; the colour bar sits in a strip
+        # at the bottom
+        ax = self.figure.add_axes([0.0, 0.13, 1.0, 0.77], projection='3d')
+        self._below_note = lambda top: ax.set_position([0.0, 0.13, 1.0, top - 0.13])
+        q = 'R' if mode == MODE_R else 'J'
+        zs = [float(d['z']) for d in disks]
+        by_order = len(set(zs)) < len(zs)
+        if by_order:
+            zs = list(range(len(disks)))
+        lev = sorted(set(zs))
+        spacing = min(np.diff(lev)) if len(lev) > 1 else 1.0
+        grids = [self._disk_grid(d) for d in disks]
+        means = [V[ins].mean() for _, _, V, ins, _ in grids]
+        maxdev = max(np.abs(V[ins] - m).max() for (_, _, V, ins, _), m in zip(grids, means)) or 1.0
+        bend = 0.4 * spacing / maxdev
+        allv = np.concatenate([V[ins] for _, _, V, ins, _ in grids])
+        norm = colors.Normalize(allv.min(), allv.max())
+        cmap = cm.viridis
+        for d, z, (X, Y, V, ins, _), m in zip(disks, zs, grids, means):
+            ax.plot_surface(X, Y, np.where(ins, z + bend * (V - m), np.nan),
+                            facecolors=cmap(norm(V)), rstride=2, cstride=2, linewidth=0,
+                            antialiased=True, shade=False, alpha=0.9)
+            if d['monitors']:
+                mx, my, mv = np.asarray(d['monitors'], float).T
+                ax.scatter(mx, my, z + bend * (mv - m), color='k', s=16, depthshade=False)
+        ax.set_zticks(lev)
+        ax.set_zticklabels([d['label'] for _, d in sorted(zip(zs, disks), key=lambda t: t[0])]
+                           if by_order else [f'{z:g}' for z in lev])
+        from matplotlib.ticker import MaxNLocator
+        ax.xaxis.set_major_locator(MaxNLocator(3)); ax.yaxis.set_major_locator(MaxNLocator(3))
+        ax.set_xlabel('x (cm)'); ax.set_ylabel('y (cm)')
+        ax.set_zlabel('disk' if by_order else 'height in stack (mm)', labelpad=8)
+        ax.view_init(elev=18, azim=-60)
+        sm = cm.ScalarMappable(norm=norm, cmap=cmap)
+        try:
+            ax.set_box_aspect(None, zoom=1.15)
+        except TypeError:                       # matplotlib < 3.7
+            pass
+        cax = self.figure.add_axes([0.3, 0.075, 0.4, 0.018])
+        cb = self.figure.colorbar(sm, cax=cax, orientation='horizontal')
+        cb.set_label(f'predicted {q}')
+        unit = 'of the disk spacing' if by_order else 'mm'
+        self._note(f'Predicted {q} over each disk, drawn at the disk\'s height. Black dots: '
+                   f'monitors.\nThe bend is exaggerated: the largest deviation from a disk\'s '
+                   f'mean (±{maxdev:.3g}) is drawn as ±{0.4 * spacing:.2g} {unit}.')
+
+    def draw_disk_maps(self, disks, mode=MODE_J):
+        """(B) One map per disk of the predicted value minus that disk's mean, on
+        one colour scale, with the monitors coloured by their residual."""
+        from matplotlib import cm, colors
+        self.figure.clear()
+        self._note_text = None
+        q = 'R' if mode == MODE_R else 'J'
+        n = len(disks)
+        ncol = min(n, 3)
+        nrow = int(np.ceil(n / ncol))
+        grids = [self._disk_grid(d) for d in disks]
+        means = [V[ins].mean() for _, _, V, ins, _ in grids]
+        m = max(np.abs(V[ins] - mu).max() for (_, _, V, ins, _), mu in zip(grids, means)) or 1.0
+        dnorm = colors.TwoSlopeNorm(0, -m, m)
+        res = [np.asarray(d['monitors'], float) for d in disks]
+        resid = [(r[:, 2] - d['f'](r[:, 0], r[:, 1])) if len(r) else np.zeros(0)
+                 for r, d in zip(res, disks)]
+        rmax = max([np.abs(x).max() for x in resid if len(x)] or [1.0]) or 1.0
+        lev = np.linspace(-m, m, 17)
+        self.figure.subplots_adjust(left=0.01, right=0.99, top=0.88, bottom=0.16,
+                                    wspace=0.04, hspace=0.3)
+        # the titles of the maps sit inside the top margin, so leave room for them
+        self._below_note = lambda top: self.figure.subplots_adjust(
+            top=top - 50 / (self.figure.get_figheight() * 72))
+        for k, (d, (X, Y, V, ins, (cx, cy, r)), mu, rs, rr) in enumerate(
+                zip(disks, grids, means, res, resid)):
+            ax = self.figure.add_subplot(nrow, ncol, k + 1)
+            D = np.where(ins, V - mu, np.nan)
+            ax.contourf(X, Y, D, levels=lev, cmap='PuOr_r', norm=dnorm)
+            ax.contour(X, Y, D, levels=lev, colors='w', linewidths=0.5)
+            ax.add_patch(plt.Circle((cx, cy), r, fill=False, color='0.3', lw=1))
+            # direction of steepest increase at the centre
+            e = r * 1e-3
+            gx = (d['f'](cx + e, cy) - d['f'](cx - e, cy)) / (2 * e)
+            gy = (d['f'](cx, cy + e) - d['f'](cx, cy - e)) / (2 * e)
+            if np.hypot(gx, gy) * r > 0.05 * m:
+                s = 0.55 * r / np.hypot(gx, gy)
+                ax.annotate('', xy=(cx + gx * s, cy + gy * s), xytext=(cx, cy),
+                            arrowprops=dict(arrowstyle='->', color='k', lw=1.6))
+            h = np.asarray(d['holes'], float)
+            ax.scatter(h[:, 0], h[:, 1], s=10, color='0.45', marker='s', zorder=2)
+            if len(rs):
+                ax.scatter(rs[:, 0], rs[:, 1], c=rr, cmap='bwr', vmin=-rmax, vmax=rmax,
+                           s=60, edgecolor='k', zorder=3)
+            ax.set_xlim(cx - r * 1.05, cx + r * 1.05); ax.set_ylim(cy - r * 1.05, cy + r * 1.05)
+            ax.set_aspect('equal'); ax.axis('off')
+            ax.set_title(f"{d['label']}   z = {float(d['z']):g} mm\nmean {q} {mu:.6g}", fontsize=9)
+        for x0, nrm, cmp, lab in ((0.07, dnorm, 'PuOr_r', f'predicted {q} minus the disk mean'),
+                                  (0.57, colors.Normalize(-rmax, rmax), 'bwr',
+                                   f'monitor residual (measured minus predicted)')):
+            cax = self.figure.add_axes([x0, 0.075, 0.36, 0.018])
+            cb = self.figure.colorbar(cm.ScalarMappable(norm=nrm, cmap=cmp), cax=cax,
+                                      orientation='horizontal')
+            cb.set_label(lab, fontsize=8)
+            lim = nrm.vmax
+            cb.set_ticks([-lim, 0, lim])
+            cb.ax.set_xticklabels([f'{-lim:.2g}', '0', f'{lim:.2g}'], fontsize=8)
+        self._note('One map per disk, on one colour scale. Straight contours show a plane, '
+                   'curved contours a saddle. The arrow points up the slope at the centre. '
+                   'Circles are monitors, grey squares the other holes.')
 
     def _should_plot_disk(self, disk_data):
         """Check if disk should be included in plot."""
@@ -819,7 +1001,7 @@ class SimplePlotWidget(QWidget):
             ax.set_zlim([v_min - z_padding, v_max + z_padding])
             ax.view_init(elev=15, azim=30)
 
-        plt.subplots_adjust(left=0.05, right=0.95, top=0.95, bottom=0.05)
+        self.figure.subplots_adjust(left=0.0, right=1.0, top=0.91, bottom=0.0)
         self.canvas.draw()
 
 # ── Disk configuration widget ────────────────────────────────────────────────
@@ -920,6 +1102,7 @@ class DiskWidget(QWidget):
 
         header = self.table_widget.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.table_widget.setSelectionMode(QTableWidget.ExtendedSelection)
         self.table_widget.keyPressEvent = self.handle_key_press
 
     def _set_data_table_headers(self):
@@ -939,11 +1122,18 @@ class DiskWidget(QWidget):
         ])
 
     def handle_key_press(self, event):
-        """Handle keyboard events, particularly Ctrl+V for paste."""
+        """Ctrl+V pastes; Delete or Backspace clears the selected cells."""
+        t = self.table_widget
         if event.key() == Qt.Key_V and event.modifiers() == Qt.ControlModifier:
             self.paste_data()
+        elif (event.key() in (Qt.Key_Delete, Qt.Key_Backspace)
+              and t.state() != QTableWidget.EditingState):
+            for it in t.selectedItems():
+                # the hole number, coordinates and height are not cleared
+                if it.column() != 1 and it.flags() & Qt.ItemIsEditable:
+                    it.setText('')
         else:
-            QTableWidget.keyPressEvent(self.table_widget, event)
+            QTableWidget.keyPressEvent(t, event)
 
     def paste_data(self):
         """Paste clipboard data into the table."""
@@ -2051,7 +2241,10 @@ class FluxRegressionCalculator(QMainWindow):
             if regression_type == '2d':
                 self.plot_widget.plot_2d_regression(processed_disk_data, mode=self.regression_mode)
             else:
-                self.plot_widget.plot_3d_regression(processed_disk_data)
+                disks = self._surface_disks(processed_disk_data, mean_coeffs, complex_3d)
+                pw, mode = self.plot_widget, self.regression_mode
+                pw.set_pages([('Stack', lambda: pw.draw_stack(disks, mode)),
+                              ('By disk', lambda: pw.draw_disk_maps(disks, mode))])
 
             self._show_regression_success_message(regression_type, complex_3d, processed_disk_data)
 
@@ -2059,6 +2252,32 @@ class FluxRegressionCalculator(QMainWindow):
             QMessageBox.critical(self, "Error", f"Post-processing failed: {str(e)}")
             self.progress_bar.setVisible(False)
             self.enable_all_buttons()
+
+    def _surface_disks(self, disk_data_list, coeffs=None, complex_3d=False):
+        """The disks of a result for the views by disk.  coeffs: the 3D fit
+        (x, y, z, 1[, xz, yz, xy, xyz]); None for planes fitted per disk."""
+        key = 'r_value' if getattr(self, 'regression_mode', MODE_J) == MODE_R else 'j_value'
+        out = []
+        for dd in disk_data_list:
+            z = float(dd.get('height') or 0.0)
+            if coeffs is None:
+                c = dd.get('individual_plane_coeffs')
+                if c is None:
+                    continue
+                f = (lambda x, y, c=c: c[0] * x + c[1] * y + c[2])
+            elif complex_3d:
+                c = coeffs
+                f = (lambda x, y, c=c, z=z: c[0] * x + c[1] * y + c[2] * z + c[3]
+                     + c[4] * x * z + c[5] * y * z + c[6] * x * y + c[7] * x * y * z)
+            else:
+                c = coeffs
+                f = (lambda x, y, c=c, z=z: c[0] * x + c[1] * y + c[2] * z + c[3])
+            holes = [tuple(h['coordinates_2d']) for h in dd['all_data']]
+            mons = [(h['coordinates_2d'][0], h['coordinates_2d'][1], h[key])
+                    for h in dd['all_data'] if h.get('is_standard') and h.get(key) is not None]
+            out.append(dict(label=dd.get('disk_label') or str(dd.get('disk_number', '')),
+                            z=z, f=f, holes=holes, monitors=mons))
+        return out
 
     def _process_regression_results(self, all_enabled_disk_data):
         """Process regression results and populate results table."""
@@ -2291,7 +2510,10 @@ class FluxRegressionCalculator(QMainWindow):
 
             self.plot_widget.output_sigma    = self.output_sigma
             self.plot_widget.regression_mode = self.regression_mode
-            self.plot_widget.plot_individual_disk_regressions(processed_disks, mode=self.regression_mode)
+            disks = self._surface_disks(processed_disks)
+            pw, mode = self.plot_widget, self.regression_mode
+            pw.set_pages([('Planes', lambda: pw.plot_individual_disk_regressions(processed_disks, mode=mode)),
+                          ('By disk', lambda: pw.draw_disk_maps(disks, mode))])
 
             fit_lines = "\n".join(
                 self._lack_of_fit_text(dd.get('disk_label') or f"Disk {dd.get('disk_number', '?')}",

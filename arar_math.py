@@ -2006,14 +2006,15 @@ def draw_budget_pie(ax, budget, scale, sig_lbl, centre_fmt='.4f', legend_values=
 # --------------------------------------------------------------------------
 
 def no_wheel_on_dropdowns(app):
-    """The mouse wheel over a closed dropdown scrolls the window instead of
-    changing the value (an open list still scrolls)."""
+    """The mouse wheel over a closed dropdown or a number field (spin box)
+    scrolls the window instead of changing the value (an open list still
+    scrolls)."""
     from PyQt5.QtCore import QObject, QEvent
-    from PyQt5.QtWidgets import QComboBox, QAbstractScrollArea
+    from PyQt5.QtWidgets import QComboBox, QAbstractSpinBox, QAbstractScrollArea
 
     class _Filter(QObject):
         def eventFilter(self, obj, ev):
-            if ev.type() == QEvent.Wheel and isinstance(obj, QComboBox):
+            if ev.type() == QEvent.Wheel and isinstance(obj, (QComboBox, QAbstractSpinBox)):
                 w = obj.parentWidget()
                 while w is not None and not isinstance(w, QAbstractScrollArea):
                     w = w.parentWidget()

@@ -871,6 +871,12 @@ def build_about_html(base_dir):
     </ul>
     <p>Use the simplest model the monitors support, and a more complex one only if it
     predicts left-out monitors better (see Choosing a model below).</p>
+    <p>After a fit, <b>By disk</b> shows one map per disk of the predicted value minus the
+    disk's mean, on one colour scale, with the monitors coloured by their residual.
+    Straight contours show a plane and curved contours a saddle, and the arrow shows
+    which way the value increases at the centre. For the 3D models, <b>Stack</b> draws each
+    disk at its height in the stack, bent by its predicted value. The bend is
+    exaggerated so the shape can be seen.</p>
 
     <h3>Monte Carlo uncertainty</h3>
     <p>Each iteration moves the monitor positions at random, adds Gaussian noise to

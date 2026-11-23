@@ -138,8 +138,19 @@ def test_no_wheel_on_dropdowns():
     app.sendEvent(cb, ev)
     assert cb.currentIndex() == 0
     assert area.verticalScrollBar().value() > 0
-    area.close()
     ok('the value stays; the page scrolls instead')
+    from PyQt5.QtWidgets import QDoubleSpinBox
+    sb = QDoubleSpinBox(); sb.setValue(2.0)
+    lay.insertWidget(0, sb)
+    area.verticalScrollBar().setValue(0)
+    app.processEvents()
+    for target in (sb, sb.lineEdit()):
+        ev = QWheelEvent(QPointF(5, 5), QPointF(target.mapToGlobal(QPoint(5, 5))), QPoint(0, 0),
+                         QPoint(0, -120), Qt.NoButton, Qt.NoModifier, Qt.NoScrollPhase, False)
+        app.sendEvent(target, ev)
+    assert sb.value() == 2.0 and area.verticalScrollBar().value() > 0
+    area.close()
+    ok('a number field keeps its value too')
 
 
 def test_standards_window():
