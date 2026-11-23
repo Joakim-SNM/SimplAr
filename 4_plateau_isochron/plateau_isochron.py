@@ -1385,18 +1385,20 @@ def _steps_to_disk(steps):
 
 
 def _fo_rr(s, cfg):
-    """Step export cells [ratio_str, err_str]: R_unk/R_std and its error, in
-    R mode and on Imported ages with the file's own R standard; blank
-    otherwise.  Shared by the single and the stack CSV export."""
+    """Step export cells [ratio, ±1σ Ana, ±1σ Int]: R_unk/R_std with its
+    analytical error (the step's ⁴⁰Ar*/³⁹Ar_K error) and its internal error
+    (⊕ the R standard error), in R mode and on Imported ages with the file's
+    own R standard; blank otherwise.  Shared by the single and the stack CSV
+    export."""
     if cfg.get('ageFluxMode', 'imported') not in ('ratio_R_std', 'imported'):
-        return ['', '']
+        return ['', '', '']
     r = s.get('r4039') or 0.0
     rStd = cfg.get('rStd') or 0.0
     if (cfg.get('ageFluxMode', 'imported') == 'imported'
             and rStd == _SESSION_CFG_DEFAULTS['rStd']):
-        return ['', '']   # placeholder R_std, not the file's
+        return ['', '', '']   # placeholder R_std, not the file's
     if r <= 0 or rStd <= 0:
-        return ['', '']
+        return ['', '', '']
     ratio = r / rStd
     sr = s.get('err_r4039') or 0.0
     rStdErrVal = cfg.get('rStdErrPct', 0.0) or 0.0
@@ -1404,8 +1406,20 @@ def _fo_rr(s, cfg):
         srStd_frac = rStdErrVal / 100.0
     else:
         srStd_frac = rStdErrVal / rStd
+    err_ana = ratio * sr / r
     err = ratio * math.sqrt((sr / r) ** 2 + srStd_frac ** 2)
-    return [ff(ratio, 8), ff(err, 8)]
+    return [ff(ratio, 8), ff(err_ana, 8), ff(err, 8)]
+
+
+def _step_int_sigmas(steps, cfg):
+    """±1σ internal (Ma) of each step: its analytical error ⊕ the monitor / J
+    precision, the same internal tier as the plateau age (find_plateau)."""
+    lam = cfg.get('lambdaYr', LAMBDA_DEFAULT)
+    if cfg.get('ageFluxMode', 'imported') != 'imported':
+        return [float(x) for x in internal_sigma_array(
+            [s['age'] for s in steps], [s['err1s'] for s in steps], cfg)]
+    _J, rel = _aged_J(cfg, steps)
+    return [math.hypot(s['err1s'], dt_dlnR(s['age'], lam) * rel) for s in steps]
 
 
 def _flux_override_from_disk(v):
@@ -8402,13 +8416,14 @@ class PlateauWindow(QMainWindow):
         w.writerow([f'STEP DATA, {plat_title}  [Age source: {_mode_lbl}]'])
         w.writerow(['RunID', 'Label', 'Power', 'Run date/time',
                     'Days since irradiation', *export.FLUX_HEADERS,
-                    'Age (Ma)', '±1σ Ana (Ma)',
+                    'Age (Ma)', '±1σ Ana (Ma)', '±1σ Int (Ma)',
                     '%39Ar', 'K/Ca', '±1σ', '%40Ar*',
                     '40Ar*/39ArK', '±1σ',
-                    'R_unk/R_std', '±1σ',
+                    'R_unk/R_std', '±1σ Ana', '±1σ Int',
                     '39Ar(k)/36Ar', '±1σ', '40Ar/36Ar', '±1σ', 'RI(norm)',
                     '39Ar(k)/40Ar', '±1σ', '36Ar/40Ar', '±1σ', 'RI(inv)',
                     'In plateau', 'Status'])
+        _s_int = _step_int_sigmas(self.steps_c, _cfg_e)
         for i, s in enumerate(self.steps_c):
             cak = s['caK']
             if cak and cak > 0:
@@ -8426,6 +8441,7 @@ class PlateauWindow(QMainWindow):
                                  show_r=_show_r_standard(_cfg_e)),
                 f"{s['age']:.8f}",
                 f"{s['err1s']:.8f}",
+                f"{_s_int[i]:.8f}",
                 f"{s['pct39Ar']:.3f}",
                 kca_str,
                 kca_e_str,
@@ -10321,13 +10337,14 @@ class PlateauWindow(QMainWindow):
                     w.writerow([f'STEP DATA, {title}  [Age source: {_mode_lbl_s}]'])
                     w.writerow(['RunID', 'Label', 'Power', 'Run date/time',
                                 'Days since irradiation', *export.FLUX_HEADERS,
-                                'Age (Ma)', '±1σ Ana (Ma)',
+                                'Age (Ma)', '±1σ Ana (Ma)', '±1σ Int (Ma)',
                                 '%39Ar', 'K/Ca', '±1σ', '%40Ar*',
                                 '40Ar*/39ArK', '±1σ',
-                                'R_unk/R_std', '±1σ',
+                                'R_unk/R_std', '±1σ Ana', '±1σ Int',
                                 '39Ar(k)/36Ar', '±1σ', '40Ar/36Ar', '±1σ', 'RI(norm)',
                                 '39Ar(k)/40Ar', '±1σ', '36Ar/40Ar', '±1σ', 'RI(inv)',
                                 'In plateau', 'Status'])
+                    _s_int = _step_int_sigmas(sess.get('steps_c', []), eff_cfg_s)
                     for i, s in enumerate(sess.get('steps_c', [])):
                         cak = s['caK']
                         if cak and cak > 0:
@@ -10343,7 +10360,7 @@ class PlateauWindow(QMainWindow):
                             *export.flux_cells(eff_cfg_s, *(_jc_s or (s.get('j_val'), s.get('j_err'))),
                                              show_r=_show_r_standard(eff_cfg_s),
                                              r_val=_rv_s, r_err=_re_s),
-                            f"{s['age']:.8f}", f"{s['err1s']:.8f}",
+                            f"{s['age']:.8f}", f"{s['err1s']:.8f}", f"{_s_int[i]:.8f}",
                             f"{s['pct39Ar']:.3f}",
                             kca_str, kca_e_str,
                             f"{s['pct40']:.1f}",

@@ -4443,17 +4443,17 @@ class ProbabilityWindow(QMainWindow):
     _POINT_HEADER = ['Sample', 'RunID', 'Run', 'Run date/time',
                      'Days since irradiation', *export.FLUX_HEADERS,
                      'Age (Ma)',
-                     '±1σ Ana (Ma)', '±1σ Int (Ma)', '±1σ Ext (Ma)',
+                     '±1σ Ana (Ma)', '±1σ Int (Ma)',
                      '40Ar*/39ArK', '±1σ',
                      'K/Ca', '±1σ', '%40Ar*',
                      'R_unk/R_std',
                      '±1σ Ana', '±1σ Int',
-                     '±1σ Ext',
                      'Status']
 
     def _point_rows(self, s):
         """The POINT DATA rows of one sample, one per analysis in run order
-        (the columns of _POINT_HEADER)."""
+        (the columns of _POINT_HEADER).  Analytical and internal only: the
+        external tier belongs to the final (sample, pooled, component) ages."""
         rows = []
         m = s.mask()
         auto = s.auto_mask if len(s.auto_mask) == len(s.ages) else m
@@ -4469,7 +4469,6 @@ class ProbabilityWindow(QMainWindow):
         _ages_all = np.asarray(s.ages, float)
         _sana_all = s.sig1()
         _sint_all = s.sig_int(_ages_all, _sana_all, np.arange(len(s.ages)))
-        _sext_all = external_sigma_array(_ages_all, _sint_all, s.j_cfg)
         for i in range(len(s.ages)):
             man = s.manual[i] if i < len(s.manual) else 'auto'
             if man == 'in':
@@ -4481,7 +4480,6 @@ class ProbabilityWindow(QMainWindow):
             age_i = s.ages[i]
             sig1_ana = _sana_all[i]
             sig1_int = _sint_all[i]
-            sig1_ext = _sext_all[i]
             # ratio_R_FCs stores R_unk/R_FCs in r_vals, not 40Ar*/39ArK
             rv = ff(s.r_vals[i], 8) if has_r and mode != 'ratio_R_FCs' else ''
             ru = ff(s.r_uncs[i], 8) if has_r and mode != 'ratio_R_FCs' else ''
@@ -4502,7 +4500,6 @@ class ProbabilityWindow(QMainWindow):
                 dr_dt = lam * (1.0 + em1 * ratio) * 1e6 / em1
                 rrat_ana = ff(sig1_ana * dr_dt, 8)
                 rrat_int = ff(sig1_int * dr_dt, 8)
-                rrat_ext = ff(sig1_ext * dr_dt, 8)
             elif has_r and r_std and r_std > 0:
                 ratio = s.r_vals[i] / r_std
                 _m0 = s.metas[i] if len(s.metas) == len(s.ages) else {}
@@ -4518,9 +4515,8 @@ class ProbabilityWindow(QMainWindow):
                 dr_dt = lam * (1.0 + em1 * ratio) * 1e6 / em1
                 rrat_ana = ff(sig1_ana * dr_dt, 8)
                 rrat_int = ff(sig1_int * dr_dt, 8)
-                rrat_ext = ff(sig1_ext * dr_dt, 8)
             else:
-                rrat = rrat_ana = rrat_int = rrat_ext = ''
+                rrat = rrat_ana = rrat_int = ''
             rid = s.run_ids[i]  if has_rid else ''
             _mt = (s.metas[i] if len(s.metas) == len(s.ages)
                    else export.step_meta({}))
@@ -4539,10 +4535,10 @@ class ProbabilityWindow(QMainWindow):
             rows.append([s.name, rid, i + 1, _mt.get('run_dt', ''),
                          export.fmt_days(_mt), *_flx,
                          f'{age_i:.8f}',
-                         f'{sig1_ana:.8f}', f'{sig1_int:.8f}', f'{sig1_ext:.8f}',
+                         f'{sig1_ana:.8f}', f'{sig1_int:.8f}',
                          rv, ru,
                          kca_str, kca_e_str, ar40_str,
-                         rrat, rrat_ana, rrat_int, rrat_ext,
+                         rrat, rrat_ana, rrat_int,
                          status])
         return rows
 
