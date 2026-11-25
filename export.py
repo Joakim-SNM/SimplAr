@@ -19,9 +19,10 @@ Files converted before raw signals were stored have blank cells here.
 Figure export
 -------------
 One dialog, used by every tool that draws a figure: pick which panels go in,
-how tall each one is, the page size, the text size, where the legend sits, and
-whatever extra switches the host tool declares (Ca/K vs K/Ca, isochron layout,
-...).  A live preview shows exactly what will be written to disk.
+how tall each one is, the page size, the text size, where the legend sits,
+panel letters, and whatever extra switches the host tool declares (Ca/K vs
+K/Ca, isochron layout, ...).  A live preview shows exactly what will be written
+to disk, and a legend can be dragged in it to any place, also outside the plot.
 
 A host wires itself in with three things:
 
@@ -48,14 +49,14 @@ import math
 import os
 import re
 
-from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtCore import Qt, QTimer, QEvent, QRectF
 from PyQt5.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
     QDoubleSpinBox, QGridLayout, QGroupBox, QHBoxLayout,
     QInputDialog, QLabel, QLineEdit, QMessageBox, QProgressDialog, QPushButton,
     QScrollArea, QSpinBox, QTabWidget, QVBoxLayout, QWidget,
 )
-from PyQt5.QtGui import QImage, QPixmap
+from PyQt5.QtGui import QColor, QImage, QPainter, QPen, QPixmap
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
 import matplotlib
@@ -873,6 +874,13 @@ def flux_cells(cfg, j_val=None, j_err=None, show_r=None, r_val=None, r_err=None)
 CM = 1.0 / 2.54          # cm → inch
 CM_PER_IN = 2.54
 
+LETTER_MODES = [
+    ('off',  'None'),
+    ('tl',   'Inside, top left'),
+    ('tr',   'Inside, top right'),
+    ('out',  'Outside, top left'),
+]
+
 LEGEND_MODES = [
     ('auto',     'As drawn'),
     ('inside',   'Inside, upper right'),
@@ -888,14 +896,19 @@ LEGEND_MODES = [
 DEFAULT_SPEC = dict(
     width_cm=17.0,
     height_cm=19.0,
-    dpi=300,
+    dpi=1200,           # the highest the dialog offers
+    dpi_v=2,            # marks specs saved since 1200 dpi became the default
     fmt='pdf',
     font_scale=1.0,
     line_scale=1.0,
     marker_scale=1.0,
     legend='auto',
     legend_cols=1,
+    legend_scale=1.0,   # legend text size, on top of font_scale
+    legend_xy={},       # legends dragged in the preview: {axes index: [x, y]},
+    p2_legend_xy={},    # their upper-left corner in axes fractions, per page
     transparent=False,
+    letters='off',      # panel letters A, B, ... (LETTER_MODES)
     p2_width_cm=None,   # second page (e.g. the isochron): its own size,
     p2_height_cm=None,  # None = same as page 1
     p2_font_scale=None,     # ... and its own text / line / marker scaling
@@ -903,6 +916,7 @@ DEFAULT_SPEC = dict(
     p2_marker_scale=None,
     p2_legend=None,
     p2_legend_cols=None,
+    p2_legend_scale=None,
     panels=[],          # [{'id': str, 'on': bool, 'weight': float}, ...]
     options={},         # host-declared switches, by option id
 )
@@ -929,6 +943,8 @@ class Option:
     kind 'bool'   -> checkbox,      default True/False
     kind 'choice' -> combo box,     values = [(value, label), ...]
     kind 'float'  -> spin box,      lo/hi/step
+    kind 'int'    -> whole-number spin box, lo/hi; placeholder is shown in
+                     place of the lowest value (e.g. 0 = 'All')
     kind 'text'   -> line edit,     free text (titles, axis limits, names)
     group: the box it appears in ('Contents' by default); groups are shown in
     the order the options declare them.
@@ -1066,6 +1082,8 @@ def _merge(spec, panels, options):
             continue
         if k in out:
             out[k] = v
+    if spec and 'dpi_v' not in spec and spec.get('dpi') == 300:
+        out['dpi'] = DEFAULT_SPEC['dpi']   # the old default, not a choice
     stored = {p.get('id'): p for p in (spec or {}).get('panels', [])}
     for p in out['panels']:
         s = stored.get(p['id'])
@@ -1258,6 +1276,10 @@ def place_legend(ax, spec, **kw):
         if ttl.get_text():
             opts.setdefault('title', ttl.get_text())
             opts.setdefault('title_fontsize', ttl.get_fontsize())
+            opts.setdefault('title_fontproperties', ttl.get_fontproperties())
+            opts.pop('title_fontsize')      # the font properties carry the size
+            if hasattr(leg, 'get_alignment'):
+                opts.setdefault('alignment', leg.get_alignment())
         leg.remove()
     opts.update(kw)
     new = ax.legend(handles=handles, labels=labels, **opts)
@@ -1294,6 +1316,84 @@ def pad_names(names, size, gap=2.0, prop=None):
         h = int(round((d - k * sp) / hs)) if hs > 0 else 0
         out.append(n + ' ' * k + '\u200a' * h)
     return out
+
+
+def _legends(fig):
+    """(axes index, axes, legend) of every axes legend in the figure."""
+    return [(i, ax, ax.get_legend()) for i, ax in enumerate(fig.axes)
+            if ax.get_legend() is not None]
+
+
+def panel_axes(fig):
+    """The panels of the figure, top to bottom and left to right: visible axes
+    with their frame drawn, leaving out twins (same place as a panel), insets
+    (inside a panel) and colour bars."""
+    boxes = []
+    for ax in fig.axes:
+        if not ax.get_visible() or not ax.axison:
+            continue
+        b = ax.get_position()
+        if b.width < 0.06 or b.height < 0.04:
+            continue
+        boxes.append((ax, b))
+    out = []
+    for i, (ax, b) in enumerate(boxes):
+        for j, (_o, ob) in enumerate(boxes):
+            if j != i and (ob.x0 <= b.x0 + 1e-6 and b.x1 <= ob.x1 + 1e-6
+                           and ob.y0 <= b.y0 + 1e-6 and b.y1 <= ob.y1 + 1e-6) and (
+                    ob.width * ob.height > b.width * b.height + 1e-9 or j < i):
+                break                       # an inset, or a twin of an earlier panel
+        else:
+            out.append((ax, b))
+    out.sort(key=lambda ab: (-round(ab[1].y1 / 0.03), ab[1].x0))
+    return [ax for ax, _ in out]
+
+
+def add_letters(fig, spec, page=0):
+    """Panel letters A, B, ... where the spec puts them (only with two or
+    more panels)."""
+    mode = spec.get('letters', 'off')
+    panels = panel_axes(fig) if mode in ('tl', 'tr', 'out') else []
+    if len(panels) < 2:
+        return
+    size = 13 * float(page_spec(spec, page).get('font_scale') or 1.0)
+    for j, ax in enumerate(panels):
+        kw = dict(fontsize=size, fontweight='bold', zorder=25, clip_on=False)
+        if mode == 'out':
+            ax.annotate(chr(65 + j), xy=(0, 1), xycoords='axes fraction',
+                        xytext=(-4, 3), textcoords='offset points',
+                        ha='right', va='bottom', **kw)
+        else:
+            x, ha = (0.015, 'left') if mode == 'tl' else (0.985, 'right')
+            ax.text(x, 0.97, chr(65 + j), transform=ax.transAxes, ha=ha, va='top', **kw)
+
+
+def finish_figure(fig, spec, page=0):
+    """What the dialog adds to every figure a host has drawn: the panel
+    letters, the legend text size and the legends dragged in the preview,
+    then settle_legends().  Runs once per figure, just before it is drawn for
+    the preview or saved."""
+    if not getattr(fig, '_figexp_done', False):
+        fig._figexp_done = True
+        add_letters(fig, spec, page)
+        f = float(page_spec(spec, page).get('legend_scale') or 1.0)
+        xy = spec.get('p2_legend_xy' if page == 1 else 'legend_xy') or {}
+        for i, ax, lg in _legends(fig):
+            if f != 1.0:
+                for t in [*lg.get_texts(), lg.get_title()]:
+                    t.set_fontsize(t.get_fontsize() * f)
+                # padding, spacing and handle length are in units of this
+                lg._fontsize = lg._fontsize * f
+            p = xy.get(str(i))
+            if p is not None:
+                try:
+                    lg.set_loc('upper left')
+                except AttributeError:          # matplotlib < 3.8
+                    lg._loc = 2
+                lg.set_bbox_to_anchor((float(p[0]), float(p[1])), transform=ax.transAxes)
+                lg.borderaxespad = 0            # the corner exactly where it was dropped
+                lg._figexp_mode = 'moved'       # settle_legends leaves it there
+    settle_legends(fig)
 
 
 def settle_legends(fig):
@@ -1364,7 +1464,8 @@ def figsize(spec, page=0):
 
 
 # settings page 2 can override; None in the spec means "same as page 1"
-_P2_KEYS = ('font_scale', 'line_scale', 'marker_scale', 'legend', 'legend_cols')
+_P2_KEYS = ('font_scale', 'line_scale', 'marker_scale', 'legend', 'legend_cols',
+            'legend_scale')
 
 
 def page_spec(spec, page):
@@ -1386,11 +1487,11 @@ def page_spec(spec, page):
 EDITABLE_TEXT = {'pdf.fonttype': 42, 'ps.fonttype': 42}
 
 
-def save_figure(fig, path, spec):
+def save_figure(fig, path, spec, page=0):
     """Write *fig* using the spec's dpi / transparency."""
-    settle_legends(fig)
+    finish_figure(fig, spec, page)
     with matplotlib.rc_context(EDITABLE_TEXT):
-        fig.savefig(path, dpi=int(spec.get('dpi', 300)),
+        fig.savefig(path, dpi=int(spec.get('dpi', 1200)),
                     facecolor='none' if spec.get('transparent') else 'white',
                     edgecolor='none', transparent=bool(spec.get('transparent')),
                     bbox_inches='tight', pad_inches=0.05)
@@ -1399,6 +1500,20 @@ def save_figure(fig, path, spec):
 # --------------------------------------------------------------------------
 # The dialog
 # --------------------------------------------------------------------------
+
+def _on_checkerboard(img, n=8):
+    """A transparent preview image on a grey checkerboard, so the transparent
+    parts show."""
+    out = QImage(img.size(), QImage.Format_ARGB32)
+    out.fill(QColor('#ffffff'))
+    p = QPainter(out)
+    for y in range(0, img.height(), n):
+        for x in range((y // n) % 2 * n, img.width(), 2 * n):
+            p.fillRect(x, y, n, n, QColor('#dddddd'))
+    p.drawImage(0, 0, img)
+    p.end()
+    return out
+
 
 class FigureExportDialog(QDialog):
     """Layout + preview + save, shared by all the tools.
@@ -1537,6 +1652,11 @@ class FigureExportDialog(QDialog):
         self.preview.setAlignment(Qt.AlignCenter)
         self.preview.setMinimumSize(520, 520)
         self.preview.setStyleSheet('background:#f4f4f4; border:1px solid #ddd;')
+        self.preview.setToolTip('Drag a legend to move it, also outside the plot.\n'
+                                'Choose a Legend placement to put it back.')
+        self.preview.setMouseTracking(True)
+        self.preview.installEventFilter(self)
+        self._pv, self._drag = None, None
         right.addWidget(self.preview, 1)
 
         self.note = QLabel('')
@@ -1554,6 +1674,9 @@ class FigureExportDialog(QDialog):
         for b in (b_load, b_save, b_del):
             pres.addWidget(b)
         b_load.clicked.connect(self._load_preset)
+        b_load.setToolTip('Apply the chosen preset again, e.g. after changing '
+                          'settings')
+        self.preset_sel.activated.connect(lambda _i: self._load_preset())
         b_save.clicked.connect(self._save_preset)
         b_del.clicked.connect(self._delete_preset)
         right.addLayout(pres)
@@ -1661,34 +1784,49 @@ class FigureExportDialog(QDialog):
         self.cb_leg = QComboBox()
         for v, lbl in LEGEND_MODES:
             self.cb_leg.addItem(lbl, v)
+        self.cb_let = QComboBox()
+        for v, lbl in LETTER_MODES:
+            self.cb_let.addItem(lbl, v)
+        self.cb_let.setToolTip('A, B, C, ... on the panels, top to bottom and left to right.')
         self.sp_legcol = QSpinBox(); self.sp_legcol.setRange(1, 6)
+        self.sp_legsz = QDoubleSpinBox(); self.sp_legsz.setRange(0.3, 3.0)
+        self.sp_legsz.setSingleStep(0.05); self.sp_legsz.setDecimals(2)
+        self.sp_legsz.setToolTip('Multiplies the legend text only, on top of Text ×.')
 
         for _w in (self.sp_w, self.sp_h, self.sp_dpi, self.sp_font,
-                   self.sp_line, self.sp_mark, self.sp_legcol):
+                   self.sp_line, self.sp_mark, self.sp_legcol, self.sp_legsz):
             _w.setFixedWidth(96)
-        for _w in (self.cb_fmt, self.cb_leg):
+        for _w in (self.cb_fmt, self.cb_leg, self.cb_let):
             _w.setFixedWidth(150)
         self.chk_transparent.setText('Transparent')
+        self.chk_transparent.setToolTip(
+            'No white background: the figure and plot areas are see-through in the\n'
+            'file (legend boxes stay white). A PDF viewer still shows white paper;\n'
+            'it shows on a coloured slide or poster, or in Illustrator/Inkscape.\n'
+            'The preview shows the see-through parts as a grey checkerboard.')
         self.lbl_page = QLabel('Size of:')
         self.lbl_page_val = QLabel('page 1')
         rows = [('Width', self.sp_w, 'Height', self.sp_h),
                 ('Resolution', self.sp_dpi, 'Format', self.cb_fmt),
                 ('Text ×', self.sp_font, 'Lines ×', self.sp_line),
                 ('Markers ×', self.sp_mark, 'Legend cols', self.sp_legcol),
-                ('Legend', self.cb_leg, '', self.chk_transparent)]
+                ('Legend', self.cb_leg, 'Legend text ×', self.sp_legsz),
+                ('Panel letters', self.cb_let, '', self.chk_transparent)]
         for r, (l1, w1, l2, w2) in enumerate(rows):
             grid.addWidget(QLabel(l1 + ':' if l1 else ''), r, 0)
             grid.addWidget(w1, r, 1)
             grid.addWidget(QLabel(l2 + ':' if l2 else ''), r, 2)
-            grid.addWidget(w2, r, 3)
+            if w2 is not None:
+                grid.addWidget(w2, r, 3)
         grid.setColumnStretch(1, 1)
         grid.setColumnStretch(3, 1)
 
         for w in (self.sp_w, self.sp_h, self.sp_font, self.sp_line,
-                  self.sp_mark, self.sp_legcol, self.sp_dpi):
+                  self.sp_mark, self.sp_legcol, self.sp_legsz, self.sp_dpi):
             w.valueChanged.connect(self._ui_to_spec)
         self.cb_fmt.currentIndexChanged.connect(self._ui_to_spec)
         self.cb_leg.currentIndexChanged.connect(self._ui_to_spec)
+        self.cb_let.currentIndexChanged.connect(self._ui_to_spec)
         self.chk_transparent.stateChanged.connect(self._ui_to_spec)
         self._page_group_title()
         return g
@@ -1728,6 +1866,13 @@ class FigureExportDialog(QDialog):
                         w.setPlaceholderText(o.placeholder)
                     w.textChanged.connect(self._ui_to_spec)
                     lbl = QLabel(o.label + ':')
+                elif o.kind == 'int':
+                    w = QSpinBox()
+                    w.setRange(int(o.lo), int(o.hi))
+                    if o.placeholder:
+                        w.setSpecialValueText(o.placeholder)
+                    w.valueChanged.connect(self._ui_to_spec)
+                    lbl = QLabel(o.label + ':')
                 else:
                     w = QDoubleSpinBox()
                     w.setRange(o.lo, o.hi)
@@ -1740,7 +1885,7 @@ class FigureExportDialog(QDialog):
                         lbl.setToolTip(o.tip)
                 if o.width:
                     w.setFixedWidth(o.width)
-                elif o.kind in ('float', 'text') and not o.wide:
+                elif o.kind in ('float', 'int', 'text') and not o.wide:
                     w.setFixedWidth(96)
                 # explicitly wide fields, and combos with long entries, get a
                 # row to themselves; everything else pairs up two per row
@@ -1785,6 +1930,7 @@ class FigureExportDialog(QDialog):
         i = self.cb_fmt.findData(s['fmt'])
         self.cb_fmt.setCurrentIndex(max(0, i))
         self.chk_transparent.setChecked(bool(s.get('transparent')))
+        self.cb_let.setCurrentIndex(max(0, self.cb_let.findData(s.get('letters', 'off'))))
         ps = page_spec(s, self._page)
         self.sp_font.setValue(ps['font_scale'])
         self.sp_line.setValue(ps['line_scale'])
@@ -1792,6 +1938,7 @@ class FigureExportDialog(QDialog):
         i = self.cb_leg.findData(ps.get('legend', 'auto'))
         self.cb_leg.setCurrentIndex(max(0, i))
         self.sp_legcol.setValue(int(ps.get('legend_cols', 1)))
+        self.sp_legsz.setValue(float(ps.get('legend_scale') or 1.0))
         self._rebuild_panel_rows()
         for o in self._options_decl:
             w = self._opt_widgets[o.id][0]
@@ -1803,6 +1950,8 @@ class FigureExportDialog(QDialog):
                 w.setCurrentIndex(max(0, j))
             elif o.kind == 'text':
                 w.setText('' if v is None else str(v))
+            elif o.kind == 'int':
+                w.setValue(int(v) if str(v).isdigit() else int(o.lo))
             else:
                 w.setValue(float(v))
         self._building = False
@@ -1821,12 +1970,16 @@ class FigureExportDialog(QDialog):
         s['dpi'] = self.sp_dpi.value()
         s['fmt'] = self.cb_fmt.currentData()
         s['transparent'] = self.chk_transparent.isChecked()
+        s['letters'] = self.cb_let.currentData()
         pre = 'p2_' if self._page == 1 else ''
         s[pre + 'font_scale'] = self.sp_font.value()
         s[pre + 'line_scale'] = self.sp_line.value()
         s[pre + 'marker_scale'] = self.sp_mark.value()
+        if page_spec(s, self._page).get('legend', 'auto') != self.cb_leg.currentData():
+            s[pre + 'legend_xy'] = {}        # a placement chosen: undo the dragging
         s[pre + 'legend'] = self.cb_leg.currentData()
         s[pre + 'legend_cols'] = self.sp_legcol.value()
+        s[pre + 'legend_scale'] = self.sp_legsz.value()
         for p in s['panels']:
             row = self._panel_rows.get(p['id'])
             if row:
@@ -1928,6 +2081,7 @@ class FigureExportDialog(QDialog):
         self.sp_mark.setValue(ps['marker_scale'])
         self.cb_leg.setCurrentIndex(max(0, self.cb_leg.findData(ps.get('legend', 'auto'))))
         self.sp_legcol.setValue(int(ps.get('legend_cols', 1)))
+        self.sp_legsz.setValue(float(ps.get('legend_scale') or 1.0))
         self._building = False
         self._page_group_title()
         self._queue()
@@ -1979,13 +2133,16 @@ class FigureExportDialog(QDialog):
         # go through the same save path as the export, so the preview shows the
         # real margins (bbox_inches='tight') rather than the raw canvas
         FigureCanvasAgg(fig)
-        settle_legends(fig)
+        finish_figure(fig, self.spec, 1 if second else 0)
         if ok:
             self.note.setText(self._size_note(fig, w_in, h_in) + extra_note)
         buf = io.BytesIO()
-        fig.savefig(buf, format='png', dpi=dpi, facecolor='white',
-                    bbox_inches='tight', pad_inches=0.05)
+        tr = bool(self.spec.get('transparent'))
+        fig.savefig(buf, format='png', dpi=dpi, facecolor='none' if tr else 'white',
+                    transparent=tr, bbox_inches='tight', pad_inches=0.05)
         img = QImage.fromData(buf.getvalue(), 'PNG')
+        if tr:
+            img = _on_checkerboard(img)
         pm = QPixmap.fromImage(img)
         # the tight bounding box can come out larger than the space we have;
         # scale it down so the whole page is always visible
@@ -1993,6 +2150,82 @@ class FigureExportDialog(QDialog):
             pm = pm.scaled(box.width(), box.height(),
                            Qt.KeepAspectRatio, Qt.SmoothTransformation)
         self.preview.setPixmap(pm)
+        self._preview_map(fig, dpi, pm, img.width())
+
+    # ── dragging a legend in the preview ─────────────────────────────────
+    def _preview_map(self, fig, dpi, pm, w_img):
+        """Where the legends of the preview are on the label, to drag them."""
+        self._pv = None
+        try:
+            r = fig.canvas.get_renderer()
+            tb = fig.get_tightbbox(r).padded(0.05)
+            k = pm.width() / max(w_img, 1)
+            ox = (self.preview.width() - pm.width()) / 2
+            oy = (self.preview.height() - pm.height()) / 2
+
+            def to_label(xd, yd):          # display px -> label px
+                return (ox + (xd / dpi - tb.x0) * dpi * k,
+                        oy + (tb.y1 - yd / dpi) * dpi * k)
+            legs = []
+            for i, ax, lg in _legends(fig):
+                bb = lg.get_window_extent(r)
+                x0, y0 = to_label(bb.x0, bb.y1)
+                x1, y1 = to_label(bb.x1, bb.y0)
+                legs.append((i, ax, bb, QRectF(x0, y0, x1 - x0, y1 - y0)))
+            self._pv = dict(k=k, pm=pm, legs=legs)
+        except Exception:
+            self._pv = None
+
+    def _leg_at(self, pos):
+        for leg in reversed((self._pv or {}).get('legs', [])):
+            if leg[3].contains(pos.x(), pos.y()):
+                return leg
+        return None
+
+    def eventFilter(self, obj, ev):
+        if obj is not getattr(self, 'preview', None) or self._pv is None:
+            return super().eventFilter(obj, ev)
+        t = ev.type()
+        if t == QEvent.MouseButtonPress and ev.button() == Qt.LeftButton:
+            leg = self._leg_at(ev.pos())
+            if leg is not None:
+                self._drag = (leg, ev.pos())
+                self.preview.setCursor(Qt.ClosedHandCursor)
+                return True
+        elif t == QEvent.MouseMove:
+            if self._drag is not None:
+                (_i, _ax, _bb, rect), p0 = self._drag
+                pm = QPixmap(self._pv['pm'])
+                qp = QPainter(pm)
+                ox = (self.preview.width() - pm.width()) / 2
+                oy = (self.preview.height() - pm.height()) / 2
+                qp.setPen(QPen(QColor('#2a6fdb'), 1.5, Qt.DashLine))
+                qp.drawRect(rect.translated(ev.pos().x() - p0.x() - ox,
+                                            ev.pos().y() - p0.y() - oy))
+                qp.end()
+                self.preview.setPixmap(pm)
+                return True
+            if self._leg_at(ev.pos()) is not None:
+                self.preview.setCursor(Qt.OpenHandCursor)
+            else:
+                self.preview.unsetCursor()
+        elif t == QEvent.MouseButtonRelease and self._drag is not None:
+            (i, ax, bb, _rect), p0 = self._drag
+            self._drag = None
+            self.preview.unsetCursor()
+            dx, dy = ev.pos().x() - p0.x(), ev.pos().y() - p0.y()
+            if abs(dx) + abs(dy) < 3:
+                self.preview.setPixmap(self._pv['pm'])
+                return True
+            k = self._pv['k']
+            x, y = ax.transAxes.inverted().transform((bb.x0 + dx / k, bb.y1 - dy / k))
+            key = 'p2_legend_xy' if self._page == 1 else 'legend_xy'
+            xy = dict(self.spec.get(key) or {})
+            xy[str(i)] = [round(float(x), 4), round(float(y), 4)]
+            self.spec[key] = xy
+            self._queue()
+            return True
+        return super().eventFilter(obj, ev)
 
     def _size_note(self, fig, w_in, h_in):
         """Page, plot-area and file size for the note under the preview.
@@ -2000,7 +2233,7 @@ class FigureExportDialog(QDialog):
         The plot area (the frame of the panels) depends on the settings only;
         the file is cropped to the drawing, so a legend outside the plot or a
         long label makes the file larger without shrinking the plot."""
-        dpi = int(self.spec.get('dpi', 300))
+        dpi = int(self.spec.get('dpi', 1200))
         pw, ph = page_size_cm(self.spec, self._page)
         txt = f'page {pw:.1f} × {ph:.1f} cm'
         try:
@@ -2033,6 +2266,9 @@ class FigureExportDialog(QDialog):
         """List the shared presets; one saved from another figure type is
         marked with that type."""
         self.preset_sel.clear()
+        # blank first entry: the dialog opens on the last-used settings, which
+        # need not be any preset; choosing a preset applies it at once
+        self.preset_sel.addItem('', '')
         for name, pres in sorted(self._presets().items()):
             kind = pres.get('kind', self._pkey)
             shown = (name if kind == self._key
@@ -2172,11 +2408,12 @@ class FigureExportDialog(QDialog):
             if want_page and fig2 is not None and fmt == 'pdf':
                 from matplotlib.backends.backend_pdf import PdfPages
                 with matplotlib.rc_context(EDITABLE_TEXT), PdfPages(path) as pdf:
-                    for f in (fig, fig2):
-                        settle_legends(f)
-                        pdf.savefig(f, dpi=int(self.spec.get('dpi', 300)),
-                                    facecolor='white', bbox_inches='tight',
-                                    pad_inches=0.05)
+                    tr = bool(self.spec.get('transparent'))
+                    for pg, f in enumerate((fig, fig2)):
+                        finish_figure(f, self.spec, pg)
+                        pdf.savefig(f, dpi=int(self.spec.get('dpi', 1200)),
+                                    facecolor='none' if tr else 'white', transparent=tr,
+                                    bbox_inches='tight', pad_inches=0.05)
                 written.append(path + '   (2 pages)')
             else:
                 if want_page and fmt != 'pdf':
@@ -2189,7 +2426,7 @@ class FigureExportDialog(QDialog):
             if want_file and fig2 is not None and not (want_page and fmt == 'pdf'):
                 base, ext = os.path.splitext(path)
                 p2 = f'{base}_{self._extra_suffix}{ext}'
-                save_figure(fig2, p2, self.spec)
+                save_figure(fig2, p2, self.spec, page=1)
                 written.append(p2)
         except Exception as e:
             QMessageBox.critical(self, 'Export error', str(e))

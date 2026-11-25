@@ -125,8 +125,126 @@ def test_dialog_and_presets():
                          w._export_panels(), w._export_options())
     assert back['font_scale'] == 1.4
     assert [p['id'] for p in back['panels']][:2] == ['cak', 'p40']
+    # choosing a preset in the list applies it; the list opens blank
+    from PyQt5.QtWidgets import QInputDialog
+    get_text = QInputDialog.getText
+    try:
+        for name, fs in (('small', 0.8), ('big', 1.6)):
+            dlg.sp_font.setValue(fs); app.processEvents()
+            QInputDialog.getText = staticmethod(lambda *a, n=name, **k: (n, True))
+            dlg._save_preset()
+    finally:
+        QInputDialog.getText = get_text
+    dlg._refresh_presets()
+    assert dlg.preset_sel.itemData(0) == '' and dlg.preset_sel.currentIndex() == 0
+    for name, fs in (('small', 0.8), ('big', 1.6), ('small', 0.8)):
+        i = dlg.preset_sel.findData(name)
+        dlg.preset_sel.setCurrentIndex(i); dlg.preset_sel.activated.emit(i)
+        assert dlg.spec['font_scale'] == fs and dlg.sp_font.value() == fs, (name, dlg.spec['font_scale'])
     store = export._load_store(); store.pop('_selftest', None); export._save_store(store)
-    print('  ok  preview, edits, ordering and presets')
+    # 1200 dpi by default; old settings at the old default 300 move up, a choice stays
+    P, O = w._export_panels(), w._export_options()
+    assert export.default_spec(P, O)['dpi'] == 1200
+    assert export._merge({'dpi': 300}, P, O)['dpi'] == 1200
+    assert export._merge({'dpi': 300, 'dpi_v': 2}, P, O)['dpi'] == 300
+    assert export._merge({'dpi': 600}, P, O)['dpi'] == 600
+    print('  ok  preview, edits, ordering and presets; choosing a preset applies it; 1200 dpi')
+
+
+
+def test_legend_controls():
+    print('Dialog: dragging a legend, legend text size, transparent background')
+    from PyQt5.QtCore import QEvent, QPoint, Qt
+    from PyQt5.QtGui import QMouseEvent
+    import tempfile
+    from matplotlib.figure import Figure
+    from matplotlib.image import imread
+    pp = load('5_age_distribution/age_distribution.py', 'pp')
+    R, sR, _F, _sF = load_ratios()
+    w = pp.ProbabilityWindow()
+    for sm in list(w.samples):
+        w.remove_sample(sm)
+    s = w.add_sample(); s.name = 'A'; s.input_mode = 'ratio'; s.reject = 'none'
+    s.j_cfg.update(CFG_R)
+    s.r_vals = np.array(R); s.r_uncs = np.array(sR); s.recompute()
+    dlg = export.FigureExportDialog(w, '_selftest', w._export_panels(),
+                                    w._export_options(), w._export_render)
+    dlg.show(); app.processEvents()
+    dlg._refresh_preview()
+    assert dlg._pv and dlg._pv['legs'], 'the preview knows where its legends are'
+    i, _ax, bb0, r0 = dlg._pv['legs'][0]
+    k0 = dlg._pv['k']
+    p0 = QPoint(int(r0.center().x()), int(r0.center().y()))
+    p1 = p0 + QPoint(-40, 30)
+
+    def send(t, p, b=Qt.LeftButton):
+        app.sendEvent(dlg.preview, QMouseEvent(t, p, b, b, Qt.NoModifier))
+    send(QEvent.MouseButtonPress, p0)
+    send(QEvent.MouseMove, p1, Qt.NoButton)
+    send(QEvent.MouseButtonRelease, p1)
+    assert str(i) in dlg.spec['legend_xy']
+    dlg._refresh_preview()
+    # it moved with the mouse (in figure units: the crop of the preview may change)
+    _i, _ax, bb1, r1 = next(L for L in dlg._pv['legs'] if L[0] == i)
+    dx, dy = (bb1.x0 - bb0.x0) * k0, (bb0.y1 - bb1.y1) * k0
+    assert abs(dx + 40) < 2 and abs(dy - 30) < 2, (dx, dy)
+    # dragged past the frame: the legend goes outside the plot
+    send(QEvent.MouseButtonPress, p1)
+    send(QEvent.MouseButtonRelease, p1 + QPoint(-int(r1.right()) - 60, 0))
+    x, _y = dlg.spec['legend_xy'][str(i)]
+    assert x < 0, x
+    # a placement chosen in the list undoes the dragging
+    dlg.cb_leg.setCurrentIndex(dlg.cb_leg.findData('inside-lr')); app.processEvents()
+    assert dlg.spec['legend_xy'] == {}
+    # legend text size, on its own
+    sizes = []
+    for f in (1.0, 1.5):
+        dlg.sp_legsz.setValue(f); app.processEvents()
+        fig = Figure(figsize=export.figsize(dlg.spec), facecolor='white')
+        w._export_render(fig, dlg.spec)
+        export.FigureCanvasAgg(fig)
+        export.finish_figure(fig, dlg.spec)
+        lg = export._legends(fig)[0][2]
+        sizes.append((lg.get_texts()[0].get_fontsize(), fig.axes[0].xaxis.label.get_fontsize()))
+    assert abs(sizes[1][0] / sizes[0][0] - 1.5) < 1e-6 and sizes[1][1] == sizes[0][1]
+    # transparent: see-through file, checkerboard in the preview
+    dlg.chk_transparent.setChecked(True); app.processEvents()
+    with tempfile.TemporaryDirectory() as d:
+        fig = Figure(figsize=export.figsize(dlg.spec), facecolor='white')
+        w._export_render(fig, dlg.spec)
+        export.save_figure(fig, os.path.join(d, 't.png'), dict(dlg.spec, dpi=60))
+        assert imread(os.path.join(d, 't.png'))[2, 2, 3] == 0, 'corner is see-through'
+    dlg._refresh_preview()
+    im = dlg.preview.pixmap().toImage()
+    assert im.pixelColor(im.width() - 3, 2).alpha() == 255
+    dlg.close()
+    store = export._load_store(); store.pop('_selftest', None); export._save_store(store)
+    print('  ok  legend dragged (also outside the plot) and put back; legend text ×; transparent')
+
+
+
+def test_panel_letters():
+    print('Panel letters on every multi-panel figure')
+    from matplotlib.figure import Figure
+    pl = load('4_plateau_isochron/plateau_isochron.py', 'pl')
+    w = pl.PlateauWindow(); load_demo(w)
+    spec = export.default_spec(w._export_panels(), w._export_options())
+    for p in spec['panels']:
+        p['on'] = True
+    for mode in ('tl', 'tr', 'out', 'off'):
+        spec['letters'] = mode
+        fig = Figure(figsize=export.figsize(spec), facecolor='white')
+        w._export_render(fig, spec)
+        export.FigureCanvasAgg(fig)
+        export.finish_figure(fig, spec)
+        pan = export.panel_axes(fig)
+        got = [t.get_text() for a in pan for t in a.texts if len(t.get_text()) == 1
+               and t.get_fontweight() == 'bold']
+        want = [chr(65 + j) for j in range(len(pan))] if mode != 'off' else []
+        assert len(pan) >= 2 and got == want, (mode, got, len(pan))
+        tops = [a.get_position().y1 for a in pan]
+        assert tops == sorted(tops, reverse=True), 'A at the top'
+    print(f'  ok  plateau: {len(pan)} panels lettered top to bottom, in each place; off')
 
 
 def _synthetic_window(pl):
@@ -264,7 +382,7 @@ def test_isochron_variants():
 
 
 def test_isochron_spread():
-    print('Isochron spread: how much of the radiogenic range the steps cover')
+    print('Isochron spread: spreading factor S (Jourdan et al. 2009)')
     import math
     pl = load('4_plateau_isochron/plateau_isochron.py', 'pl4')
 
@@ -302,25 +420,43 @@ def test_isochron_spread():
 
     import re
 
-    def numbers(line):
-        rng = re.search(r'(\d+)\u2013(\d+)%', line)
-        lev = re.search(r'lever ([0-9.]+)', line)
-        return (int(rng.group(1)), int(rng.group(2)),
-                float(lev.group(1)) if lev else None)
+    def S_of(line):
+        m = re.search(r'Spreading factor S = (\d+)%', line)
+        assert m, line
+        return int(m.group(1))
 
     wide = window([0.05, 0.2, 0.4, 0.6, 0.8, 0.95, 0.98, 0.99])
     narrow = window([0.96, 0.97, 0.975, 0.98, 0.985, 0.99, 0.992, 0.995])
-    lo_w, hi_w, lev_w = numbers(measure(wide)[0])
-    lo_n, hi_n, lev_n = numbers(measure(narrow)[0])
-    assert (lo_w, hi_w) == (5, 99), (lo_w, hi_w)
-    assert (lo_n, hi_n) == (96, 100), (lo_n, hi_n)
-    assert lev_w > 0.9 and lev_n < 0.1, (lev_w, lev_n)
-    print(f'  ok  wide data: {lo_w}\u2013{hi_w}% \u2074\u2070Ar*, lever {lev_w:.2f}  ·  '
-          f'clustered: {lo_n}\u2013{hi_n}%, lever {lev_n:.2f}')
+    # on the inverse axis x = f / R, x-intercept = 1 / R, so S = f_max - f_min
+    S_w, S_n = S_of(measure(wide)[0]), S_of(measure(narrow)[0])
+    assert S_w == 94, S_w
+    assert S_n <= 4, S_n
+    print(f'  ok  wide data: S = {S_w}%  ·  clustered: S = {S_n}%')
+    # a normal isochron of the same steps gives the same S
+    R = 1000.0
+    f = np.array([0.05, 0.5, 0.99])
+    x39_36 = (f / R) / ((1 - f) / pl.ATM_40_36)
+    y40_36 = pl.ATM_40_36 + R * x39_36
+    inv = pl.IsochronCanvas.spread_stats(f / R, (1 - f) / pl.ATM_40_36,
+                                         {'slope': -R / pl.ATM_40_36,
+                                          'intercept': 1 / pl.ATM_40_36})
+    nor = pl.IsochronCanvas.spread_stats(x39_36, y40_36,
+                                         {'slope': R, 'intercept': pl.ATM_40_36},
+                                         inverse=False)
+    assert abs(inv['S'] - 94.0) < 1e-6 and abs(nor['S'] - inv['S']) < 1e-6, (inv, nor)
+    print('  ok  normal and inverse isochron give the same S')
     # with the statistics box off the line moves to the corner label
     line, _fig = measure(narrow, iso_stats=False)
-    assert 'MSWD' not in line and 'Spread' in line
+    assert 'MSWD' not in line and 'Spreading factor' in line
     print('  ok  spread still shown when the statistics box is off')
+
+    def age_line(**opts):
+        _l, fig = measure(wide, **opts)
+        return [ln for t in fig.axes[0].texts for ln in t.get_text().split('\n')
+                if ln.startswith('Age =')][0]
+    on, off = age_line(), age_line(iso_pct=False)
+    assert re.search(r'2σ, [0-9.]+%', on) and '%' not in off, (on, off)
+    print('  ok  the relative error in the age line can be switched off')
 
 
 def test_page_switcher_and_range():
@@ -436,6 +572,8 @@ if __name__ == '__main__':
     test_probability()
     test_isochron_batch()
     test_dialog_and_presets()
+    test_legend_controls()
+    test_panel_letters()
     test_isochron_variants()
     test_isochron_spread()
     test_page_switcher_and_range()

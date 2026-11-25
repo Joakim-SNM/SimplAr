@@ -823,6 +823,57 @@ def test_age_distribution_data_box():
     win.append_into(s2)
     assert s2.has_R() and s2.input_mode == 'ratio', (len(s2.r_vals), s2.input_mode)
     ok('Append into an empty sample keeps the R values')
+    from PyQt5.QtGui import QColor
+    ad.QColorDialog.getColor = staticmethod(lambda *a, **k: QColor('#123456'))
+    p._pick_color()
+    assert p.s.color == '#123456' and '#123456' in p.sw.styleSheet(), p.s.color
+    assert [ad.QColorDialog.customColor((k % 8) * 2 + k // 8).name() for k in range(10)] == ad._PALETTE
+    ok('clicking the swatch sets the sample colour')
+
+
+def test_age_distribution_normalised():
+    """Normalised: every curve peaks at 100 %; the export can give each
+    sample its own panel, with the pooled curve in each."""
+    print('Age distribution, Normalised and one panel per sample:')
+    ad = load('5_age_distribution/age_distribution.py', 'ad_norm')
+    from matplotlib.figure import Figure
+    import export
+    win = ad.ProbabilityWindow()
+    p1 = win.panels[0]
+    p1.data.setPlainText('\n'.join(f'{55 + 0.02 * k}\t0.01' for k in range(-6, 7)))
+    p1._apply_paste()
+    win.add_sample()
+    p2 = win.panels[1]
+    p2.data.setPlainText('\n'.join(f'{55 + 0.05 * k}\t0.3' for k in range(-4, 5)))
+    p2._apply_paste()
+    win.pool_on = True
+    win.ymode_sel.setCurrentIndex(3)
+    spec = export.default_spec(win._export_panels(), win._export_options())
+    for split, n_ax in ((False, 1), (True, 2)):
+        spec['options']['split'] = split
+        fig = Figure(figsize=(6, 6))
+        win._export_render(fig, spec)
+        assert len(fig.axes) == n_ax, len(fig.axes)
+        for a in fig.axes:
+            tops = [max(l.get_ydata()) for l in a.get_lines() if len(l.get_ydata()) > 50]
+            assert tops and all(abs(t - 100) < 1e-6 for t in tops), tops
+    ok('every curve peaks at 100 %; one panel per sample with the pooled curve')
+    # both samples in one panel; a legend below the stack is one legend
+    spec['options'].update(split=True, panel_0='1', panel_1='1')
+    spec['legend'] = 'below'
+    fig = Figure(figsize=(6, 6))
+    win._export_render(fig, spec)
+    assert len(fig.axes) == 1, len(fig.axes)
+    spec['options'].update(panel_1='2')
+    fig = Figure(figsize=(6, 6))
+    win._export_render(fig, spec)
+    legs = [a.get_legend() for a in fig.axes if a.get_legend() is not None]
+    labels = [t.get_text() for t in legs[0].get_texts()]
+    assert len(fig.axes) == 2 and len(legs) == 1 and legs[0].axes is fig.axes[-1], legs
+    assert sum(l.lstrip().startswith('Pooled') for l in labels) == 1, labels
+    assert labels[-1].lstrip().startswith('Pooled'), labels
+    assert 'n=22/22' in labels[-1], labels[-1]          # included / all analyses
+    ok('samples share a panel when asked; a legend below the stack is drawn once')
 
 
 def test_plateau_calibration_dialog():
@@ -1097,6 +1148,7 @@ if __name__ == '__main__':
     test_flux_on_disk_vs_external()
     test_gui_paths()
     test_age_distribution_data_box()
+    test_age_distribution_normalised()
     test_plateau_calibration_dialog()
     test_age_distribution_calibration()
     test_route_survives_files()

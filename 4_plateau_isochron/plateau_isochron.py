@@ -49,7 +49,7 @@ from PyQt5.QtWidgets import (
     QTableWidgetItem, QHeaderView, QAbstractItemView, QTabWidget,
     QGridLayout,
     QFrame, QDoubleSpinBox, QSpinBox, QComboBox,
-    QCheckBox, QButtonGroup, QRadioButton, QGroupBox, QDialog, QDialogButtonBox,
+    QCheckBox, QButtonGroup, QRadioButton, QDialog, QDialogButtonBox,
     QMessageBox, QAction, QSizePolicy, QScrollArea,
     QTreeWidget, QTreeWidgetItem, QTextEdit, QStackedWidget,
 )
@@ -86,12 +86,10 @@ from arar_math import (
 )
 from flux_dialog import FluxAssignDialog, FluxHost
 from calibration_dialog import CalibrationDialog
-from standards import MonitorCombo, monitor_text, route_line
-from arar_math import (route_cfg, route_from_cfg, route_text, route_options, custom_route,
-                       monitor_ingrowth, monitor_age, ROUTE_KEYS, set_route, STANDARD_IDS,
-                       reload_standards, sync_route, STANDARDS, flux_hole_rstd)
-from arar_math import (MONITOR_KEYS, to_fcs_r, from_fcs_r, cfg_monitor, calibration_notes,
-                       monitor_mismatch_note)
+from standards import route_line
+from arar_math import (route_from_cfg, route_text, monitor_ingrowth, ROUTE_KEYS, set_route,
+                       sync_route, flux_hole_rstd, to_fcs_r, from_fcs_r, cfg_monitor,
+                       calibration_notes, monitor_mismatch_note)
 import export
 import data_folders as dfold
 
@@ -2057,11 +2055,6 @@ class PlateauCanvas(FigureCanvas):
                 ha='right', va='bottom', fontsize=8, color='#666',
                 transform=ax.transAxes, clip_on=True, zorder=5)
 
-    # ── Export helper ─────────────────────────────────────────────────────────
-    def save(self, path):
-        dpi = 300 if path.lower().endswith('.png') else 150
-        self.fig.savefig(path, dpi=dpi, bbox_inches='tight',
-                         facecolor='white', edgecolor='none')
 
 
 # --------------------------------------------------------------------------
@@ -2433,47 +2426,41 @@ class IsochronCanvas(FigureCanvas):
 
     @staticmethod
     def spread_stats(xs, ys, fit, inverse=True):
-        """How far the regressed points spread along the mixing line.
+        """Spreading factor S of Jourdan et al. (2009), in per cent.
 
-        A measure of coverage, not of scatter: how much of the atmospheric →
-        radiogenic range the steps cover, which sets how well the intercept
-        (the trapped ratio) is constrained.  Steps that are
-        all ~100% radiogenic sit in one corner and the intercept is an
-        extrapolation; steps spanning a wide range of ⁴⁰Ar* pin both ends.
-
-        Returned: the radiogenic yield of each point implied by the diagram
-        itself (inverse: 1 − y·⁴⁰Ar/³⁶Ar_atm; normal: 1 − ⁴⁰Ar/³⁶Ar_atm/y) as
-        min/max in per cent, and, for the inverse diagram, the covered fraction
-        of the atmosphere-to-radiogenic lever, x_range / x_intercept.  None
-        when there is nothing to measure.
+        The share of the isochron between its two intercepts that the
+        regressed steps cover: 0% when they sit on one point, 100% when they
+        reach both the atmospheric (y) and the radiogenic (x) intercept.  A
+        measure of coverage, not of scatter; a low S makes the trapped
+        ⁴⁰Ar/³⁶Ar an extrapolation.  Measured on the inverse ³⁹Ar/⁴⁰Ar axis
+        as (max − min) / x-intercept; points of a normal isochron are taken
+        to that axis first (³⁹Ar/⁴⁰Ar = x/y, x-intercept = 1/slope).  Like
+        Jourdan et al. (2009), it assumes the steps are spread fairly evenly.
+        None when there is nothing to measure.
         """
         xs = np.asarray(xs, float)
         ys = np.asarray(ys, float)
-        if xs.size < 2:
+        if xs.size < 2 or not fit or not fit.get('slope'):
             return None
         with np.errstate(divide='ignore', invalid='ignore'):
-            rad = (1.0 - ys * ATM_40_36) if inverse else (1.0 - ATM_40_36 / ys)
-        rad = rad[np.isfinite(rad)]
-        out = {'rad_min': float(np.min(rad)) * 100.0 if rad.size else None,
-               'rad_max': float(np.max(rad)) * 100.0 if rad.size else None,
-               'lever': None}
-        if inverse and fit and fit.get('slope'):
-            # x-intercept of the fit = the fully radiogenic end member
-            x_int = -fit['intercept'] / fit['slope'] if fit['slope'] else None
-            if x_int and x_int > 0:
-                out['lever'] = float((xs.max() - xs.min()) / x_int)
-        return out
+            if inverse:      # x = ³⁹Ar/⁴⁰Ar, y = ³⁶Ar/⁴⁰Ar
+                x39_40 = xs
+                x_int = -fit['intercept'] / fit['slope']
+            else:            # x = ³⁹Ar/³⁶Ar, y = ⁴⁰Ar/³⁶Ar; slope = ⁴⁰Ar*/³⁹Ar
+                x39_40 = xs / ys
+                x_int = 1.0 / fit['slope']
+        x39_40 = x39_40[np.isfinite(x39_40)]
+        if x39_40.size < 2 or not np.isfinite(x_int) or x_int <= 0:
+            return None
+        S = float((x39_40.max() - x39_40.min()) / x_int)
+        return {'S': 100.0 * min(max(S, 0.0), 1.0)}
 
     @staticmethod
     def spread_text(sp):
-        """One line describing the spread, or '' when it cannot be measured."""
-        if not sp or sp.get('rad_min') is None:
+        """One line with the spreading factor, or '' when it cannot be measured."""
+        if not sp or sp.get('S') is None:
             return ''
-        txt = (f"Spread: \u2074\u2070Ar* {sp['rad_min']:.0f}\u2013"
-               f"{sp['rad_max']:.0f}%")
-        if sp.get('lever') is not None:
-            txt += f",  lever {sp['lever']:.2f}"
-        return txt
+        return f"Spreading factor S = {sp['S']:.0f}%"
 
     def _draw_init_label(self, ax, init_ratio, init_2s, inverse=True,
                          extra_lines=()):
@@ -2691,7 +2678,8 @@ class IsochronCanvas(FigureCanvas):
                 _v, _tag, _ = self._tier_text(age_2s_ana, age_2s_int, age_2s_ext,
                                               age_ma, '  ')
                 pct = (_v / age_ma * 100.0) if age_ma > 0 else 0.0
-                lines.append(f'Age = {age_ma:.2f} ± {_v:.2f} Ma (2σ, {pct:.1f}%{_tag})')
+                _pt = f', {pct:.1f}%' if getattr(self, '_show_pct', True) else ''
+                lines.append(f'Age = {age_ma:.2f} ± {_v:.2f} Ma (2σ{_pt}{_tag})')
             if init_ratio is not None and not getattr(self, '_show_init_label', False):
                 lines.append(
                     f'⁴⁰Ar/³⁶Ar₀ = {init_ratio:.1f} ± {init_ratio_2s:.1f} (2σ)')
@@ -2992,7 +2980,9 @@ class IsochronCanvas(FigureCanvas):
                         _v2, _tag2, _ = self._tier_text(age2_sig_ana, age2_sig_int,
                                                         age2_sig_ext, age2_ma, _gap)
                         pct2 = (_v2 / age2_ma * 100.0) if age2_ma > 0 else 0.0
-                        lines2.append(f'Age = {age2_ma:.2f} ± {_v2:.2f} Ma (2σ, {pct2:.1f}%{_tag2})')
+                        lines2.append(f'Age = {age2_ma:.2f} ± {_v2:.2f} Ma (2σ'
+                                      + (f', {pct2:.1f}%' if getattr(self, '_show_pct', True) else '')
+                                      + f'{_tag2})')
                     if init2_ratio is not None and not getattr(self, '_show_init_label', False):
                         lines2.append(f'⁴⁰Ar/³⁶Ar₀ = {init2_ratio:.1f} ± {init2_ratio_2s:.1f} (2σ)')
                     lines2.append(
@@ -3130,10 +3120,6 @@ class OverlayCanvas(FigureCanvas):
         if not getattr(self, '_offscreen', False):
             self.draw_idle()
 
-    def save(self, path):
-        dpi = 300 if path.lower().endswith('.png') else 150
-        self.fig.savefig(path, dpi=dpi, bbox_inches='tight',
-                         facecolor='white', edgecolor='none')
 
 
 class _StackFluxHost(FluxHost):
@@ -4894,17 +4880,13 @@ class PlateauWindow(QMainWindow):
             # included, the disk-flux hole overlay not), as the panel shows them.
             eff0        = self._stored_cfg_for(0)
             old_lam     = eff0.get('lambdaYr',    LAMBDA_DEFAULT)
-            old_lam_err = eff0.get('lambdaErrYr', LAMBDA_ERR)
             old_fc      = eff0.get('stdAgeMa',    STD_AGE_DEFAULT)
-            old_fc_err  = eff0.get('stdAgeErrMa', STD_AGE_ERR)
         else:
             if not self.raw_steps:
                 QMessageBox.information(self, "Calibration", "No steps loaded.")
                 return
             old_lam     = self.cfg.get('lambdaYr',    LAMBDA_DEFAULT)
-            old_lam_err = self.cfg.get('lambdaErrYr', LAMBDA_ERR)
             old_fc      = self.cfg.get('stdAgeMa',    STD_AGE_DEFAULT)
-            old_fc_err  = self.cfg.get('stdAgeErrMa', STD_AGE_ERR)
 
         # "Revert to original" is available whenever we have a saved snapshot.
         can_revert = (self._stack_mode
@@ -7326,6 +7308,10 @@ class PlateauWindow(QMainWindow):
                           depends=('iso_stats', True),
                           tip='Untick to show only the chosen error in the age '
                               'line, tagged int., ana. or ext.'),
+            export.Option('iso_pct', 'Relative error (%) in the age line', 'bool',
+                          True, group=G, page=page, depends=('iso_stats', True),
+                          tip='The age error as a percentage of the age, e.g. '
+                              '(2σ, 0.1%).'),
             export.Option('iso_labels', 'Step labels', 'bool', True, group=G,
                           page=page),
             export.Option('iso_intercept', 'Intercept marker', 'bool', True,
@@ -7342,12 +7328,13 @@ class PlateauWindow(QMainWindow):
                           tip='Dashed line at the atmospheric \u2074\u2070Ar/'
                               '\u00b3\u2076Ar of Lee et al. (2006), 298.56; an '
                               'intercept on it means no excess argon.'),
-            export.Option('iso_spread', 'Spread of the points', 'bool', False,
+            export.Option('iso_spread', 'Spreading factor (S)', 'bool', False,
                           group=G, page=page,
-                          tip='How much of the atmospheric-to-radiogenic range '
-                              'the steps cover. A wide spread pins the trapped '
-                              'ratio; a narrow one makes the intercept an '
-                              'extrapolation.'),
+                          tip='Spreading factor S of Jourdan et al. (2009): the '
+                              'share of the isochron between its two intercepts '
+                              'that the steps cover (0\u2013100%). A wide spread '
+                              'pins the trapped ratio; a narrow one makes the '
+                              'intercept an extrapolation.'),
         ]
         for grp, pre, xl, yl in ((GI, 'iso_inv', '\u00b3\u2079Ar/\u2074\u2070Ar', '\u00b3\u2076Ar/\u2074\u2070Ar'),
                                  (GN, 'iso_nor', '\u00b3\u2079Ar/\u00b3\u2076Ar', '\u2074\u2070Ar/\u00b3\u2076Ar')):
@@ -7497,6 +7484,7 @@ class PlateauWindow(QMainWindow):
         canvas._show_step_labels = bool(opts.get('iso_labels', True))
         canvas._err_tier = opts.get('iso_err_tier', 'int')
         canvas._err_line = bool(opts.get('iso_err_line', True))
+        canvas._show_pct = bool(opts.get('iso_pct', True))
         # always show the y-intercept: it carries the initial ⁴⁰Ar/³⁶Ar
         canvas._iso_zoom = 'intercept'
         canvas._compact = bool(compact)          # inset styling
@@ -7539,6 +7527,7 @@ class PlateauWindow(QMainWindow):
             canvas._stats_stacked = False
             canvas._err_tier = 'int'
             canvas._err_line = True
+            canvas._show_pct = True
             canvas._show_step_labels = True
             canvas._legend_names = None
 
@@ -8057,10 +8046,11 @@ class PlateauWindow(QMainWindow):
                     fig = Figure(figsize=export.figsize(s2), facecolor='white')
                     self._export_render(fig, s2)
                     if pdf is not None:
-                        export.settle_legends(fig)
-                        pdf.savefig(fig, dpi=int(s2.get('dpi', 300)),
-                                    facecolor='white', bbox_inches='tight',
-                                    pad_inches=0.05)
+                        export.finish_figure(fig, s2)
+                        tr = bool(s2.get('transparent'))
+                        pdf.savefig(fig, dpi=int(s2.get('dpi', 1200)),
+                                    facecolor='none' if tr else 'white', transparent=tr,
+                                    bbox_inches='tight', pad_inches=0.05)
                         pages += 1
                     else:
                         base = re.sub(r'[^\w.+-]+', '_', title).strip('_') \

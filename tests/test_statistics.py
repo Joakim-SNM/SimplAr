@@ -285,9 +285,45 @@ def test_window():
     w._mix_export_render(fig, spec)
     ys = [a.get_position().y0 for a in fig.axes]
     assert ys == sorted(ys, reverse=True), 'stacked: top to bottom'
+    # the number of components in the legend heading, whatever the heading
+    k = st['fit']['k']
+    for head in ('model', 'name_n', 'name', 'off'):
+        for on in (True, False):
+            spec['options'].update(legend_title=head, legend_k=on)
+            fig = Figure(figsize=export.figsize(spec), facecolor='white')
+            w._mix_export_render(fig, spec)
+            leg = fig.axes[0].get_legend()
+            ttl = leg.get_title().get_text() if leg and leg.get_title().get_visible() else ''
+            assert (f'{k} components' in ttl.lower()) == on, (head, on, ttl)
+    spec['options'].update(legend_title='name_n', legend_k=False)
+    fig = Figure(figsize=export.figsize(spec), facecolor='white')
+    w._mix_export_render(fig, spec)
+    assert fig.axes[0].get_legend().get_title().get_text() == f"Sample A  ({st['fit']['n']} analyses)"
+    # every sample stacked, each with its own model and legend
+    spec2 = export.default_spec(w._mix_export_panels(), w._mix_export_options())
+    spec2['options'].update(stack=True, legend_title='name_n', mixk_1='1')
+    spec2['letters'] = 'tr'
+    fig = Figure(figsize=export.figsize(spec2), facecolor='white')
+    w._mix_export_render(fig, spec2)
+    export.FigureCanvasAgg(fig)
+    export.finish_figure(fig, spec2)
+    assert len(fig.axes) == 2, len(fig.axes)
+    heads = [a.get_legend().get_title().get_text() for a in fig.axes]
+    assert heads[0].startswith('Sample A') and heads[1] == 'Other sample: 1 component  (10 analyses)', heads
+    assert fig.axes[0].get_xlim() == fig.axes[1].get_xlim()
+    assert [t.get_text() for a in fig.axes for t in a.texts] == ['A', 'B']
+    # only C1 listed: one line for it, one for the rest
+    spec['options'].update(legend_title='model', legend_k=True, legend_max=1)
+    fig = Figure(figsize=export.figsize(spec), facecolor='white')
+    w._mix_export_render(fig, spec)
+    labs = [t.get_text() for t in fig.axes[0].get_legend().get_texts()]
+    k = st['fit']['k']
+    assert len(labs) == 2 and labs[0].startswith('C1'), labs
+    assert labs[1].startswith(f'+{k - 1} '), labs   # 'other' or 'outside'
+    spec['options']['legend_max'] = 0
     QDialog.exec_ = lambda self: 0
     w.export_figure()
-    print('  ok  figure export: window layout and stacked layout; dialog opens')
+    print('  ok  figure export: window layout and stacked layout; components in legend; dialog opens')
     with tempfile.TemporaryDirectory() as d:
         QFileDialog.getSaveFileName = staticmethod(lambda *a, **k: (os.path.join(d, 'x.csv'), ''))
         w.export_csv()

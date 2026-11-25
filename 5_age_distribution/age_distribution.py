@@ -12,7 +12,10 @@ for many ⁴⁰Ar/³⁹Ar ages.
     samples on one calibration share the FCs age and λ terms;
   * ages without J information are plotted and combined as they are;
   * a Mixture view that fits a discrete mixture or a minimum age model to the
-    analyses of one sample (Galbraith & Laslett 1993; Galbraith et al. 1999).
+    analyses of one sample (Galbraith & Laslett 1993; Galbraith et al. 1999);
+    its figure export can also stack every sample, each with its own model;
+  * figure export with the samples in separate panels, and a normalised
+    y axis that brings every sample's peak to 100 %.
 
 Layout of this file, top to bottom:
   J configuration defaults, statistics, plot helpers
@@ -36,7 +39,7 @@ from PyQt5.QtWidgets import (
     QLabel, QLineEdit, QPushButton, QComboBox, QCheckBox, QTextEdit, QFrame,
     QScrollArea, QMessageBox, QSizePolicy, QSpinBox,
     QListWidget, QListWidgetItem,
-    QDialog, QStackedWidget,
+    QDialog, QStackedWidget, QColorDialog,
 )
 from PyQt5.QtCore import Qt  # noqa: F401
 
@@ -72,7 +75,7 @@ from arar_math import (
     flux_pair_corr, serialize_xcorr,
     draw_budget_pie, file_err_div,
     METHOD_WM, METHOD_GLS, method_key,
-    mono_font, MONITOR_KEYS, to_fcs_r, from_fcs_r, cfg_monitor,
+    mono_font, to_fcs_r, from_fcs_r, cfg_monitor,
     calibration_notes, monitor_mismatch_note,
 )
 from flux_dialog import FluxAssignDialog, FluxHost
@@ -1019,10 +1022,13 @@ class SamplePanel(QFrame):
 
         # header row: colour swatch, enable, name, remove
         hdr = QHBoxLayout()
-        sw = QLabel('  ')
-        sw.setFixedWidth(14)
-        sw.setStyleSheet(f'background:{self.s.color}; border-radius:3px;')
-        hdr.addWidget(sw)
+        self.sw = QPushButton()
+        self.sw.setFixedSize(16, 16)
+        self.sw.setCursor(Qt.PointingHandCursor)
+        self.sw.setToolTip('Click to change the colour')
+        self.sw.clicked.connect(self._pick_color)
+        self._show_color()
+        hdr.addWidget(self.sw)
         self.cb = QCheckBox()
         self.cb.setChecked(self.s.enabled)
         self.cb.toggled.connect(self._on_enable)
@@ -1178,6 +1184,25 @@ class SamplePanel(QFrame):
         self.refresh_info()
 
     # --- callbacks ---------------------------------------------------------
+    def _show_color(self):
+        self.sw.setStyleSheet(f'QPushButton {{ background:{self.s.color}; '
+                              'border:1px solid #999; border-radius:3px; }')
+
+    def _pick_color(self):
+        from PyQt5.QtGui import QColor
+        # the default sample colours as custom colours, in the order new
+        # samples get them; Qt fills the custom grid column by column
+        for k, col in enumerate(_PALETTE):
+            QColorDialog.setCustomColor((k % 8) * 2 + k // 8, QColor(col))
+        c = QColorDialog.getColor(QColor(self.s.color), self, 'Sample colour',
+                                  QColorDialog.DontUseNativeDialog)
+        if not c.isValid():
+            return
+        self.s.color = c.name()
+        self._show_color()
+        self.populate_runlist()
+        self.app.redraw()
+
     def _on_enable(self, on):
         self.s.enabled = on
         self.app.redraw()
@@ -1703,7 +1728,7 @@ class ProbabilityWindow(QMainWindow):
         self.x_hi = None
         self.ylim_mode = 'auto'
         self.y_max = None
-        self.y_mode = 'rank'          # 'rank' | 'relative' | 'probability'
+        self.y_mode = 'rank'          # 'rank' | 'relative' | 'probability' | 'normalised'
         self._ylim_saved = {}         # per-mode storage: {mode: (ylim_mode, y_max)}
         self.mix_on = False           # Mixture view shown in place of the plot
         self._mix_cache = {}          # (data, scale, model) -> fit(s)
@@ -1761,7 +1786,7 @@ class ProbabilityWindow(QMainWindow):
         axrow.addSpacing(10)
         axrow.addWidget(QLabel('Y axis:'))
         self.ymode_sel = QComboBox()
-        self.ymode_sel.addItems(['Rank', 'Relative prob.', 'Probability'])
+        self.ymode_sel.addItems(['Rank', 'Relative prob.', 'Probability', 'Normalised'])
         self.ymode_sel.setCurrentIndex(0)
         self.ymode_sel.setMaximumWidth(150)
         self.ymode_sel.setToolTip(
@@ -1770,7 +1795,10 @@ class ProbabilityWindow(QMainWindow):
             'Relative prob.: the summed-Gaussian curves scaled so the tallest peak = 1, '
             'with the analyses as a rug along the base, for comparing shapes.\n'
             'Probability: each curve peaks at the p-value of its MSWD × 100 '
-            '(p = 0.88 peaks at 88, p = 0.05 hardly rises).')
+            '(p = 0.88 peaks at 88, p = 0.05 hardly rises).\n'
+            'Normalised: every curve, the pooled one included, peaks at 100 %, with '
+            'the analyses of each sample spread by rank from 0 to 100 %, so data '
+            'sets of different size and precision can be compared.')
         self.ymode_sel.currentIndexChanged.connect(self._on_ymode)
         axrow.addWidget(self.ymode_sel)
         axrow.addStretch()
@@ -2829,8 +2857,8 @@ class ProbabilityWindow(QMainWindow):
     def _on_ymode(self, _):
         """Switch Y-axis presentation. Drawing only, statistics are unchanged."""
         self._ylim_saved[self.y_mode] = (self.ylim_mode, self.y_max)
-        self.y_mode = {0: 'rank', 1: 'relative', 2: 'probability'}.get(
-            self.ymode_sel.currentIndex(), 'rank')
+        self.y_mode = {0: 'rank', 1: 'relative', 2: 'probability',
+                       3: 'normalised'}.get(self.ymode_sel.currentIndex(), 'rank')
         self.ylim_mode, self.y_max = self._ylim_saved.get(self.y_mode, ('auto', None))
         if self.y_max is not None:
             self.y_max_ed.setText(f'{self.y_max:.3f}')
@@ -3189,7 +3217,8 @@ class ProbabilityWindow(QMainWindow):
             self.ax.set_xlabel('Age (Ma)')
             self.ax.set_ylabel(
                 'Relative probability' if self.y_mode == 'relative' else
-                'Probability (%)' if self.y_mode == 'probability' else 'Rank')
+                'Probability (%)' if self.y_mode == 'probability' else
+                'Normalised probability (%)' if self.y_mode == 'normalised' else 'Rank')
             self.ax.text(0.5, 0.5, 'No data.\nPaste, Load or Import on the right.',
                          transform=self.ax.transAxes, ha='center', va='center',
                          color='#888', style='italic')
@@ -3218,9 +3247,15 @@ class ProbabilityWindow(QMainWindow):
         # density_mode: 'relative' only: global-max normalisation + baseline rug.
         # prob_mode:    curve peaks at p × 100; points rank-normalised to curve height.
         # rank_mode:    curve peaks at n_in; points at integer rank (1…n) for max spread.
+        # norm_mode:    as prob_mode, but every curve (the pooled one too) peaks
+        #               at 100 % instead of at p × 100
         density_mode = (self.y_mode == 'relative')
-        prob_mode    = (self.y_mode == 'probability')
+        norm_mode    = (self.y_mode == 'normalised')
+        prob_mode    = (self.y_mode == 'probability') or norm_mode
         rank_mode    = (self.y_mode == 'rank')
+        # export, panels by sample: draw only this panel's samples (the pool
+        # still uses all of them)
+        _only = getattr(self, '_only_sample', None)
 
         Gmax = 1.0
         if density_mode:
@@ -3257,11 +3292,13 @@ class ProbabilityWindow(QMainWindow):
             for s in act:
                 ri = s.wm()
                 if ri:
-                    _y_auto_max = max(_y_auto_max, ri['prob'] * 100)
+                    _y_auto_max = max(_y_auto_max,
+                                      100.0 if norm_mode else ri['prob'] * 100)
             if pooling:
                 _pre_pr = self.pool()
                 if _pre_pr:
-                    _y_auto_max = max(_y_auto_max, _pre_pr['prob'] * 100)
+                    _y_auto_max = max(_y_auto_max,
+                                      100.0 if norm_mode else _pre_pr['prob'] * 100)
             _y_auto_max = max(_y_auto_max, 1.0)
         elif rank_mode:
             _rank_y_max = max((len(s.ages) for s in act), default=1)
@@ -3280,11 +3317,13 @@ class ProbabilityWindow(QMainWindow):
             _names.append('Pooled')
         _padded = dict(zip(_names, export.pad_names(_names, 8 * _ps, gap=0)))
         for k, (s, rk) in enumerate(zip(act, ranks)):
+            if _only is not None and not any(s is o for o in _only):
+                continue
             m = s.mask()
             n_in = int(m.sum())
             sig = s.sig1()
             r_info = s.wm()
-            p_val = r_info['prob'] if r_info else 0.0
+            p_val = 1.0 if norm_mode else (r_info['prob'] if r_info else 0.0)
             _fmt = 's' if s.is_plateau else 'o'      # plateau steps drawn as squares
             # The density curve is a picture of the raw analyses, so it is drawn
             # from the points and is identical whether or not the sample is a
@@ -3390,7 +3429,7 @@ class ProbabilityWindow(QMainWindow):
                     _l2.append(f"MSWD={r['mswd']:.2f}"
                                f"  p={r.get('prob', float('nan')):.2f}")
                 if not pooling and self._ex('legend_n'):
-                    _l2.append(f"n={int(s.mask().sum())}")
+                    _l2.append(f"n={int(s.mask().sum())}/{len(s.ages)}")
                 if len(act) == 1 and 'overdispersion' in r:
                     _l2.append(f"ω={r['overdispersion']*ds:{_af}}")
                 if _l2:
@@ -3424,7 +3463,7 @@ class ProbabilityWindow(QMainWindow):
                     scaled = env / Gmax if env.max() > 0 else None
                 elif prob_mode:
                     pdf = summed_gaussian_pdf(inc_ages, inc_sig, axis)
-                    pool_p = pr['prob'] if pr else 0.0
+                    pool_p = 1.0 if norm_mode else (pr['prob'] if pr else 0.0)
                     scaled = pdf / pdf.max() * pool_p * 100 if pdf.max() > 0 else None
                 else:
                     # rank: curve peaks at total included n
@@ -3467,7 +3506,10 @@ class ProbabilityWindow(QMainWindow):
                     _plab += (_pa + "\n"
                               f"MSWD={pr['mswd']:.2f}"
                               f"  p={pr.get('prob', float('nan')):.2f}"
-                              + (f"  n={pr['n']}" if self._ex('legend_n') else "")
+                              + (f"  n={pr['n']}/"
+                                 + str(sum(1 if sm.is_plateau else len(sm.ages)
+                                           for sm in act))
+                                 if self._ex('legend_n') else "")
                               + (f"  ω={pr['overdispersion']*ds:{_af}}"
                                  if 'overdispersion' in pr else ""))
                 legend.append(Line2D([0], [0], color=_POOL_COLOR, lw=2.2 * _ps_line,
@@ -3476,7 +3518,8 @@ class ProbabilityWindow(QMainWindow):
 
         self.ax.set_xlabel('Age (Ma)', fontsize=11 * _ps)
         if prob_mode:
-            self.ax.set_ylabel('Probability (%)', fontsize=11 * _ps)
+            self.ax.set_ylabel('Normalised probability (%)' if norm_mode else
+                               'Probability (%)', fontsize=11 * _ps)
             if self.ylim_mode == 'manual' and self.y_max:
                 self.ax.set_ylim(0, self.y_max)
             else:
@@ -3699,15 +3742,20 @@ class ProbabilityWindow(QMainWindow):
         self.mix_canvas.draw_idle()
         self.report.setPlainText('\n'.join(self._mixture_report()))
 
-    def _mix_title(self, mode='model'):
+    def _mix_title(self, mode='model', with_k=True, s=None, fit=None):
         st = self._mix_state
-        s, fit = st['sample'], st['fit']
-        if mode == 'name':
-            return s.name
-        if mode == 'off':
-            return None
+        s, fit = s or st['sample'], fit or st['fit']
         what = (f"{fit['k']} component{'s' if fit['k'] > 1 else ''}"
                 if fit['model'] == 'fmm' else 'minimum age model')
+        if mode == 'name':
+            return f'{s.name}: {what}' if with_k else s.name
+        if mode == 'name_n':
+            n = f"({fit['n']} analyses)"
+            return f'{s.name}: {what}  {n}' if with_k else f'{s.name}  {n}'
+        if mode == 'off':
+            return what[0].upper() + what[1:] if with_k else None
+        if not with_k:
+            return f"{s.name}  ({fit['n']} analyses, {st['space']})"
         return f"{s.name}: {what}  ({fit['n']} analyses, {st['space']})"
 
     def _mixture_report(self):
@@ -3808,18 +3856,101 @@ class ProbabilityWindow(QMainWindow):
                           tip='What follows each component in the legend, at the 1σ/2σ '
                               'level and decimals set in the window.'),
             export.Option('legend_n', 'Proportion and n in legend', 'bool', True),
+            export.Option('legend_max', 'Components in legend', 'int', default=0,
+                          lo=0, hi=10, placeholder='All',
+                          tip='Lists only the first components in the plot (youngest '
+                              'first), each with its colour; the others are summed up in '
+                              'one line. All lists every component.'),
             export.Option('legend_title', 'Legend heading', 'choice', group='Names',
                           values=[('model', 'Sample, model and number of analyses'),
+                                  ('name_n', 'Sample and number of analyses'),
                                   ('name', 'Sample name'),
                                   ('off', 'None')]),
+            export.Option('legend_k', 'Number of components in legend heading', 'bool', True,
+                          group='Names',
+                          tip='Adds "3 components" (or "minimum age model") to the legend '
+                              'heading, whichever heading is chosen above.'),
+        ] + self._mix_stack_options() + [
             export.Option('x_min', 'Age from', 'text', group='Axis ranges', placeholder='auto'),
             export.Option('x_max', 'to', 'text', group='Axis ranges', placeholder='auto'),
         ]
+
+    def _mix_stack_options(self):
+        """Every sample in its own panel, one above the other (2 or more samples)."""
+        act = self._active_all()
+        if len(act) < 2:
+            return []
+        kv = [('window', 'As in the window')] + [
+            (self.mix_k.itemText(i), self.mix_k.itemText(i)) for i in range(self.mix_k.count())]
+        opts = [export.Option(
+            'stack', 'Every sample, one above the other', 'bool', False, group='Samples',
+            tip='A components diagram for each sample, each with its own mixture model '
+                'and legend, on one age axis. The radial plot and ΔBIC are left out; '
+                'Data and Scale are as in the window.')]
+        for k, sm in enumerate(act):
+            opts.append(export.Option(
+                f'mixk_{k}', sm.name, 'choice', group='Samples', values=kv,
+                depends=('stack', True),
+                tip='Components of the mixture model of this sample.',
+                ident=sm.experiment_name() or sm.name))
+        return opts
+
+    def _mix_export_stacked(self, fig, spec):
+        """Each sample's components diagram, stacked on one age axis."""
+        st, opts = self._mix_state, spec.get('options', {})
+        rows = []
+        for k, sm in enumerate(self._active_all()):
+            use = np.ones(len(sm.ages), bool) if st['all_data'] else sm.mask()
+            t, sig = sm.ages[use], sm.sig1()[use]
+            kc = opts.get(f'mixk_{k}', 'window')
+            if len(t) < 3:
+                continue
+            fit = self._mix_fit(t, sig, st['kchoice'] if kc in (None, 'window') else kc,
+                                st['space'])[0]
+            if fit is not None:
+                rows.append((sm, t, sig, fit, am.component_tiers(fit, sm.j_cfg)))
+        if not rows:
+            fig.text(0.5, 0.5, 'No sample has enough analyses', ha='center')
+            return
+        x0, x1 = self._opt_float(spec, 'x_min'), self._opt_float(spec, 'x_max')
+        lims = [am.mixture_xlim(t, sig, fit, self.display_sigma) for _, t, sig, fit, _ in rows]
+        xl = (min(l[0] for l in lims) if x0 is None else x0,
+              max(l[1] for l in lims) if x1 is None else x1)
+        axes = [fig.add_subplot(len(rows), 1, 1)]
+        axes += [fig.add_subplot(len(rows), 1, k + 1, sharex=axes[0])
+                 for k in range(1, len(rows))]
+        self._fixed_frame(fig, spec)
+        mx = opts.get('legend_max')
+        for ax, (sm, t, sig, fit, tiers) in zip(axes, rows):
+            title = self._mix_title(opts.get('legend_title', 'model'),
+                                    opts.get('legend_k', True), s=sm, fit=fit)
+            am.draw_components(
+                ax, t, sig, fit, xl, tiers, ds=self.display_sigma, dec=int(self.age_dec),
+                title=title, show=opts, tiers_mode=opts.get('legend_ages', 'all'),
+                with_n=opts.get('legend_n', True),
+                max_rows=(int(mx) if str(mx).isdigit() else 0) or None).remove()
+            # inside each panel: above it is the panel before
+            ax.legend(loc='upper left', framealpha=0.92, prop={'size': 8}, title=title,
+                      title_fontproperties={'size': 9, 'weight': 'bold'},
+                      alignment='left').set_zorder(20)
+            export.place_legend(ax, spec)
+        for a in axes[:-1]:                 # one age axis, at the bottom
+            a.set_xlabel('')
+            a.tick_params(labelbottom=False)
+        for a in axes:
+            a.set_ylabel('')
+        fig.supylabel('Rank', fontsize=axes[0].xaxis.label.get_fontsize())
+        export.scale_text(fig, spec.get('font_scale', 1.0),
+                          spec.get('line_scale', 1.0), spec.get('marker_scale', 1.0))
+        fig.subplots_adjust(hspace=0.08)
 
     def _mix_export_render(self, fig, spec):
         st = self._mix_state
         opts = spec.get('options', {})
         fig.clear()
+        if opts.get('stack') and len(self._active_all()) > 1:
+            self._mix_export_stacked(fig, spec)
+            return
         pans = [(p, w) for p, w in export.active_panels(spec)
                 if not (p == 'bic' and not st['fits'])] or [('components', 1.0)]
         x0, x1 = self._opt_float(spec, 'x_min'), self._opt_float(spec, 'x_max')
@@ -3843,14 +3974,18 @@ class ProbabilityWindow(QMainWindow):
                 leg = am.draw_components(
                     ax, st['t'], st['sig'], st['fit'], xl, st['tiers'],
                     ds=self.display_sigma, dec=int(self.age_dec),
-                    title=self._mix_title(opts.get('legend_title', 'model')),
+                    title=self._mix_title(opts.get('legend_title', 'model'),
+                                    opts.get('legend_k', True)),
                     show=opts, tiers_mode=opts.get('legend_ages', 'all'),
-                    with_n=opts.get('legend_n', True))
+                    with_n=opts.get('legend_n', True),
+                    max_rows=(int(opts['legend_max'])
+                              if str(opts.get('legend_max', '')).isdigit() else 0) or None)
                 if pid != axes[0][0]:
                     # not the top panel: no room above it, so inside
                     leg.remove()
                     ax.legend(loc='upper left', framealpha=0.92, prop={'size': 8},
-                              title=self._mix_title(opts.get('legend_title', 'model')),
+                              title=self._mix_title(opts.get('legend_title', 'model'),
+                                    opts.get('legend_k', True)),
                               title_fontproperties={'size': 9, 'weight': 'bold'},
                               alignment='left').set_zorder(20)
                 export.place_legend(ax, spec)
@@ -4242,7 +4377,8 @@ class ProbabilityWindow(QMainWindow):
         self.in_sig_sel.setCurrentIndex(0 if self.input_sigma == 1 else 1)
         self.method_sel.setCurrentIndex(1 if _STAT_METHOD == METHOD_GLS else 0)
         self.ymode_sel.setCurrentIndex(
-            {'rank': 0, 'relative': 1, 'probability': 2}.get(self.y_mode, 0))
+            {'rank': 0, 'relative': 1, 'probability': 2,
+             'normalised': 3}.get(self.y_mode, 0))
 
         self.pool_btn.blockSignals(True)
         self.pool_btn.setChecked(self.pool_on)
@@ -4276,6 +4412,11 @@ class ProbabilityWindow(QMainWindow):
             export.Option('dashed', 'Dashed curve (excluded)', 'bool', True),
             export.Option('points', 'Individual analyses', 'bool', True),
             export.Option('wm', 'Weighted-mean line', 'bool', True),
+            export.Option('split', 'Samples in separate panels', 'bool', False,
+                          tip='The samples in panels stacked on one age axis, one '
+                              'sample each unless set otherwise under Panels, '
+                              'with the pooled curve in every panel when Pool is '
+                              'on. Best with the Y axis on Normalised.'),
             export.Option('legend_ages', 'Ages in legend', 'choice',
                           values=[('all', 'WM ± analytical / internal / external'),
                                   ('int', 'WM ± internal'),
@@ -4286,7 +4427,7 @@ class ProbabilityWindow(QMainWindow):
                               'level and decimals set in the window. Internal = '
                               'analytical + J. MSWD and p stay with the ages.'),
             export.Option('legend_n', 'n in legend', 'bool', True,
-                          tip='Number of included analyses: after each sample '
+                          tip='Included analyses out of all, e.g. n = 46/56: after each sample '
                               'when Pool is off, on the pooled entry only when '
                               'Pool is on.'),
             export.Option('pool_legend', 'Pooled age in legend', 'choice',
@@ -4327,6 +4468,15 @@ class ProbabilityWindow(QMainWindow):
                      'file again to get it; until then its current name is used.'),
                 follows=('names_from', {'window': sm.name, 'raw': exp or sm.name}),
                 ident=exp or sm.name))
+        if len(act) > 1:
+            for k, sm in enumerate(act):
+                opts.append(export.Option(
+                    f'panel_{k}', sm.name, 'choice', group='Panels',
+                    values=[(str(i + 1), f'Panel {i + 1}') for i in range(len(act))],
+                    default=str(k + 1), depends=('split', True),
+                    tip='Samples given the same panel are drawn together in it, '
+                        'from the top panel down.',
+                    ident=sm.experiment_name() or sm.name))
         opts += [
             export.Option('x_min', 'Age from', 'text', group='Axis ranges',
                           placeholder='auto'),
@@ -4352,10 +4502,26 @@ class ProbabilityWindow(QMainWindow):
         """Draw the plot into *fig* exactly as the dialog asks."""
         opts = spec.get('options', {})
         fig.clear()
-        ax = fig.add_subplot(111)
+        act = self._active_all()
+        split = bool(opts.get('split')) and len(act) > 1
+        groups = [None]
+        if split:
+            pnum = []
+            for k in range(len(act)):
+                try:
+                    pnum.append(int(opts.get(f'panel_{k}', k + 1)))
+                except (TypeError, ValueError):
+                    pnum.append(k + 1)
+            groups = [[sm for sm, q in zip(act, pnum) if q == g]
+                      for g in sorted(set(pnum))]
+            axes = [fig.add_subplot(len(groups), 1, 1)]
+            axes += [fig.add_subplot(len(groups), 1, k + 1, sharex=axes[0])
+                     for k in range(1, len(groups))]
+        else:
+            axes = [fig.add_subplot(111)]
+        ax = axes[0]
         old_fig, old_ax = self.fig, self.ax
         old_clicks = self._click_pts
-        act = self._active_all()
         old_names = [sm.name for sm in act]
         src = opts.get('names_from', 'window')
         for k, sm in enumerate(act):                  # renamed for this figure
@@ -4363,34 +4529,95 @@ class ProbabilityWindow(QMainWindow):
                   opts.get(f'name_{k}') if src == 'typed' else None)
             if nm:
                 sm.name = nm
-        self.fig, self.ax = fig, ax
+        self.fig = fig
         self._offscreen = True
         self._export_show = dict(opts)
         try:
-            self.redraw()
+            for k, a in enumerate(axes):
+                self.ax = a
+                self._only_sample = groups[k]
+                self.redraw()
         finally:
             self.fig, self.ax = old_fig, old_ax
             self._click_pts = old_clicks
             self._offscreen = False
             self._export_show = {}
+            self._only_sample = None
             for sm, nm in zip(act, old_names):
                 sm.name = nm
+        for a in axes[:-1]:                 # one age axis, at the bottom
+            a.set_xlabel('')
+            a.tick_params(labelbottom=False)
+        if split:                           # and one y label for the stack
+            ylab = ax.get_ylabel()
+            for a in axes:
+                a.set_ylabel('')
+            fig.supylabel(ylab, fontsize=ax.xaxis.label.get_fontsize())
         if opts.get('title'):
             ax.set_title(opts['title'], fontsize=11, fontweight='bold')
         x0, x1 = self._opt_float(spec, 'x_min'), self._opt_float(spec, 'x_max')
+        if split and x0 is None and x1 is None:
+            # the same age range in every panel: the widest of them
+            lims = [a.get_xlim() for a in axes]
+            ax.set_xlim(min(l[0] for l in lims), max(l[1] for l in lims))
         if x0 is not None or x1 is not None:
             cur = ax.get_xlim()
             ax.set_xlim(cur[0] if x0 is None else x0,
                         cur[1] if x1 is None else x1)
         y0, y1 = self._opt_float(spec, 'y_min'), self._opt_float(spec, 'y_max')
-        if y0 is not None or y1 is not None:
-            cur = ax.get_ylim()
-            ax.set_ylim(cur[0] if y0 is None else y0,
-                        cur[1] if y1 is None else y1)
-        export.place_legend(ax, spec)
+        for a in axes:
+            if y0 is not None or y1 is not None:
+                cur = a.get_ylim()
+                a.set_ylim(cur[0] if y0 is None else y0,
+                           cur[1] if y1 is None else y1)
+        if len(axes) > 1 and spec.get('legend') in ('below', 'above', 'outside'):
+            # outside the panels: one legend for the stack, each entry once
+            self._merge_legends(axes, axes[-1] if spec.get('legend') == 'below'
+                                else axes[0])
+            export.place_legend(axes[-1] if spec.get('legend') == 'below'
+                                else axes[0], spec)
+        else:
+            for a in axes:
+                export.place_legend(a, spec)
         export.scale_text(fig, spec.get('font_scale', 1.0),
                           spec.get('line_scale', 1.0), spec.get('marker_scale', 1.0))
         self._fixed_frame(fig, spec, has_title=bool(opts.get('title')))
+        if split:
+            fig.subplots_adjust(hspace=0.08)
+
+    @staticmethod
+    def _merge_legends(axes, target):
+        """Move the legends of *axes* into one on *target*, keeping each
+        entry once (the pooled entry is in every panel)."""
+        handles, labels, first = [], [], None
+        for a in axes:
+            lg = a.get_legend()
+            if lg is None:
+                continue
+            first = first or lg
+            hs = list(getattr(lg, 'legend_handles', None)
+                      or getattr(lg, 'legendHandles', []))
+            for h, t in zip(hs, lg.get_texts()):
+                if t.get_text() not in labels:
+                    handles.append(h)
+                    labels.append(t.get_text())
+        if first is None:
+            return
+        # the pooled entry last, after every sample
+        order = sorted(range(len(labels)),
+                       key=lambda i: labels[i].lstrip().startswith('Pooled'))
+        handles = [handles[i] for i in order]
+        labels = [labels[i] for i in order]
+        kw = {}
+        if first.get_texts():
+            kw['prop'] = first.get_texts()[0].get_fontproperties()
+        if first.get_title().get_text():
+            kw['title'] = first.get_title().get_text()
+            kw['title_fontsize'] = first.get_title().get_fontsize()
+        for a in axes:
+            if a.get_legend() is not None:
+                a.get_legend().remove()
+        target.legend(handles=handles, labels=labels, **kw)
 
     @staticmethod
     def _fixed_frame(fig, spec, has_title=False):
