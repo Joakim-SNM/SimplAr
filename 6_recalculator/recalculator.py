@@ -5,9 +5,9 @@ calibration, and combine ages that were published on different calibrations.
 Recalculate: one dataset at a time.  Pick the monitor the authors used, the age
 they gave it and their decay constant, then the target calibration; paste the
 ages.  The sample's ratio to the monitor is recovered from the published age and
-the age is recalculated on the target, through the monitor's R relative to Fish
-Canyon sanidine when the monitor is not FCs (arar_math.recalculate; Renne et al.
-1998, Mercer and Hodges 2016).  The analytical and internal errors are carried
+the age is recalculated on the target, through the route from the monitor to
+the target calibration (arar_math.recalculate; Renne et al. 1998, Mercer &
+Hodges 2016).  The analytical and internal errors are carried
 over; the external error is that of the target calibration, propagated as in the
 other SimplAr tools.  Recalculating onto the calibration the ages were published
 on gives the external error that calibration implies, e.g. the astronomical
@@ -1536,13 +1536,13 @@ class RecalculatorWindow(QMainWindow):
                  ['CONVENTIONS'],
                  ['Recalculation', 'Each published age is turned back into its ratio to the monitor '
                                    'with the monitor age and decay constant it was published with, '
-                                   'and recalculated on the target calibration through the R of the '
-                                   'monitor relative to Fish Canyon sanidine.'],
+                                   'and recalculated on the target calibration through the route from '
+                                   'the monitor to that calibration.'],
                  ['± analytical, ± internal', 'The published errors, scaled by dt′/dt. The internal '
                                              'error includes J; it is blank where none was given.'],
                  ['± external', 'The internal error (or the analytical one where no internal was '
-                                'given) with the target calibration\'s systematic terms and, for '
-                                'a monitor other than FCs, the uncertainty of its R.'],
+                                'given) with the systematic terms of the target calibration and '
+                                'of each R on the route.'],
                  ['Change (%)', 'Recalculated age relative to the published age.'],
                  []]
         try:

@@ -438,12 +438,12 @@ class DirectInputPanel(QWidget):
                           bind_line_edit(self.col_extra_label, QLineEdit())))
         cl.addWidget(bind_check(self.is_ratio_var, QCheckBox(
             "Values are ⁴⁰Ar*/³⁹Ar ratios (R): also show J from the calibration in the "
-            "File Import tab")))
+            "File import tab")))
         cl.addWidget(_note('Checked columns appear in that order before Value and Uncertainty. '
                            'ID = crystal; a blank ID continues the crystal above. '
                            'Extra = laser power (or temperature) of the step.'))
         cl.addWidget(_note('Outlier rejection, statistical model, crystal and calibration '
-                           'options are on the File Import tab and apply here too. Changing '
+                           'options are on the File import tab and apply here too. Changing '
                            'one there re-runs this analysis at once (exclusions kept).',
                            color='#1f4e79'))
         outer.addWidget(cfg)
@@ -464,9 +464,9 @@ class DirectInputPanel(QWidget):
         outer.addWidget(scroll, 1)
 
         # ── Bottom bar ────────────────────────────────────────────────────────
-        add_btn = QPushButton("+ Add Group")
+        add_btn = QPushButton("+ Add group")
         add_btn.clicked.connect(lambda: self.add_group())
-        ex_btn = QPushButton("Load Example")
+        ex_btn = QPushButton("Load example")
         ex_btn.clicked.connect(self.load_example)
         rb2, rb1 = QRadioButton("±2σ"), QRadioButton("±1σ")
         bind_radios(self.uncertainty_type, [(rb2, "2sigma"), (rb1, "1sigma")],
@@ -740,7 +740,7 @@ class DirectInputPanel(QWidget):
                 main_calc._run_analysis('=== DIRECT INPUT ANALYSIS ===')
             main_calc.log('\nDirect input analysis complete.')
             n_pts = sum(len(v) for v in valid.values())
-            main_calc._set_current_data(f"Direct Input: {n_pts} points in {len(valid)} groups")
+            main_calc._set_current_data(f"Direct input: {n_pts} points in {len(valid)} groups")
 
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Error analysing data: {str(e)}")
@@ -974,7 +974,7 @@ class FluxMonitorsWindow(QMainWindow):
         """
         cols = [str(c) for c in df.columns]
         dlg = QDialog(self)
-        dlg.setWindowTitle("Select Columns")
+        dlg.setWindowTitle("Select columns")
         lay = QVBoxLayout(dlg)
         lay.addWidget(_note("Could not automatically identify all required columns.\n"
                             "Please select them from your file's headers below.",
@@ -1274,11 +1274,11 @@ class FluxMonitorsWindow(QMainWindow):
         file_scroll.setFrameShape(QFrame.NoFrame)
         file_page = QWidget()
         file_scroll.setWidget(file_page)
-        mode_tabs.addTab(file_scroll, "File Import")
+        mode_tabs.addTab(file_scroll, "File import")
         self.setup_file_import_mode(file_page)
 
         self.direct_input = DirectInputPanel(self)
-        mode_tabs.addTab(self.direct_input, "Direct Input")
+        mode_tabs.addTab(self.direct_input, "Direct input")
 
         # Results display
         results_box = QGroupBox("Results")
@@ -1301,7 +1301,7 @@ class FluxMonitorsWindow(QMainWindow):
         self.results_text = QPlainTextEdit()
         self.results_text.setReadOnly(True)
         self.results_text.setFont(mono_font(9))
-        tabs.addTab(self.results_text, "Analysis Results")
+        tabs.addTab(self.results_text, "Analysis results")
 
         # Plots tab
         plots_tab = QWidget()
@@ -1330,13 +1330,13 @@ class FluxMonitorsWindow(QMainWindow):
         bind_combo(self._view_label_var, view_combo, _on_view)
 
         self.zoom_mode_var = Value("adaptive")
-        rb_ad, rb_full = QRadioButton("Adaptive"), QRadioButton("Full Range")
+        rb_ad, rb_full = QRadioButton("Adaptive"), QRadioButton("Full range")
         bind_radios(self.zoom_mode_var, [(rb_ad, "adaptive"), (rb_full, "full")],
                     command=self.update_plot)
         refresh = QPushButton("Refresh")
         refresh.clicked.connect(lambda: self.update_plot())
         pl.addLayout(_row(QLabel("Category:"), self.category_combo, 15,
-                          QLabel("Data Type:"), self.data_type_combo, 10,
+                          QLabel("Data type:"), self.data_type_combo, 10,
                           QLabel("View:"), view_combo, 10, rb_ad, rb_full, 10, refresh))
 
         self.plot_frame = QWidget()
@@ -1347,7 +1347,7 @@ class FluxMonitorsWindow(QMainWindow):
 
         # Manual Exclusion tab
         exclusion_tab = QWidget()
-        tabs.addTab(exclusion_tab, "Manual Exclusion")
+        tabs.addTab(exclusion_tab, "Manual exclusion")
         self._setup_exclusion_tab(exclusion_tab)
 
     # ── plot area ──────────────────────────────────────────────────────────────
@@ -1411,11 +1411,11 @@ class FluxMonitorsWindow(QMainWindow):
         self.excl_cat_combo = bind_combo(self.excl_cat_var, QComboBox(),
                                          self._on_excl_category_change)
         self.excl_cat_combo.setMinimumWidth(110)
-        b_apply = QPushButton("Apply && Recalculate")
+        b_apply = QPushButton("Apply && recalculate")
         b_apply.clicked.connect(self._apply_exclusions)
-        b_clear = QPushButton("Clear All Exclusions for Category")
+        b_clear = QPushButton("Clear all exclusions for category")
         b_clear.clicked.connect(self._clear_exclusions)
-        b_all = QPushButton("Clear All Categories")
+        b_all = QPushButton("Clear all categories")
         b_all.clicked.connect(self._clear_all_exclusions)
         lay.addLayout(_row(QLabel("Category:"), self.excl_cat_combo, 12, b_apply, 6,
                            b_clear, 6, b_all))
@@ -1423,7 +1423,7 @@ class FluxMonitorsWindow(QMainWindow):
         # ── Info label ───────────────────────────────────────────────────────
         lay.addWidget(_note(
             "Double-click a row to cycle default → excluded → force-included; right-click "
-            "(or Enter) an excluded row to give a reason; then 'Apply & Recalculate'. "
+            "(or Enter) an excluded row to give a reason; then 'Apply & recalculate'. "
             "Clicking a point on the plot does the same and recalculates at once. "
             "The rows are what is being averaged: steps, or crystals in 'one point per "
             "crystal' mode. A step excluded in 'every step' mode also stays out of its "
@@ -1444,7 +1444,7 @@ class FluxMonitorsWindow(QMainWindow):
         lay.addWidget(self.excl_tree, 1)
 
         # Summary label at bottom
-        self.excl_summary_var = Value("Run analysis first to populate this table.")
+        self.excl_summary_var = Value("Run the analysis to fill this table.")
         summary = bind_label(self.excl_summary_var, QLabel())
         summary.setStyleSheet("font-style: italic;")
         lay.addWidget(summary)
@@ -1667,7 +1667,7 @@ class FluxMonitorsWindow(QMainWindow):
         """Crystal basis or step grouping changed: redo the last analysis."""
         if self.raw_category_data and self.results is not None:
             if self._options_valid(show=False):
-                self._run_analysis("=== REANALYSIS ===")
+                self._run_analysis("=== RE-ANALYSIS ===")
 
     # Option fields whose change re-runs the current analysis.
     def _option_vars(self):
@@ -1714,7 +1714,7 @@ class FluxMonitorsWindow(QMainWindow):
             QMessageBox.critical(self, "Error", f"Error analysing data: {str(e)}")
 
     def _set_current_data(self, text):
-        """Show what 'Analyse Data' will re-run, and allow it."""
+        """Show what 'Analyse data' will re-run, and allow it."""
         self.format_info_var.set(f"Current data: {text}.")
         self.analyze_btn.setEnabled(True)
 
@@ -1732,10 +1732,10 @@ class FluxMonitorsWindow(QMainWindow):
     def _apply_exclusions(self):
         """Rerun analysis respecting current manual exclusions, refresh plot."""
         if not self.raw_category_data:
-            QMessageBox.warning(self, "No Data", "Run analysis first before applying exclusions.")
+            QMessageBox.warning(self, "No data", "Run the analysis before applying exclusions.")
             return
-        self._run_analysis("=== REANALYSIS WITH MANUAL EXCLUSIONS ===")
-        self.log("\nReanalysis with manual exclusions complete.")
+        self._run_analysis("=== RE-ANALYSIS WITH MANUAL EXCLUSIONS ===")
+        self.log("\nRe-analysis with manual exclusions complete.")
 
     def _run_analysis(self, title):
         """raw steps → crystal basis → rejection + weighted mean of R → J."""
@@ -2243,7 +2243,7 @@ class FluxMonitorsWindow(QMainWindow):
         lay = QVBoxLayout(page)
 
         # Import section
-        imp = QGroupBox("Step 1: Import Data")
+        imp = QGroupBox("Step 1: Import data")
         il = QVBoxLayout(imp)
         il.addWidget(QLabel("Data file:"))
         self.raw_file_var = Value("")
@@ -2265,12 +2265,12 @@ class FluxMonitorsWindow(QMainWindow):
         lay.addWidget(imp)
 
         # Options
-        opts = QGroupBox("Analysis Options")
+        opts = QGroupBox("Analysis options")
         ol = QVBoxLayout(opts)
         lay.addWidget(opts)
 
         # Quality filters
-        quality = QGroupBox("Data Quality")
+        quality = QGroupBox("Data quality")
         ql = QVBoxLayout(quality)
         self.use_error_filter_var = Value(True)
         ql.addWidget(bind_check(self.use_error_filter_var,
@@ -2282,7 +2282,7 @@ class FluxMonitorsWindow(QMainWindow):
         ol.addWidget(quality)
 
         # Outlier rejection
-        outl = QGroupBox("Outlier Rejection")
+        outl = QGroupBox("Outlier rejection")
         orl = QVBoxLayout(outl)
         self.use_nmad_var = Value(True)
         cb_nmad = bind_check(self.use_nmad_var, QCheckBox("NMAD outlier rejection"))
@@ -2317,7 +2317,7 @@ class FluxMonitorsWindow(QMainWindow):
         ol.addWidget(outl)
 
         # Statistical Models
-        stats = QGroupBox("Statistical Models")
+        stats = QGroupBox("Statistical models")
         sl = QVBoxLayout(stats)
         self.use_reml_var = Value(True)
         cb_reml = bind_check(self.use_reml_var, QCheckBox("REML random-effects"))
@@ -2331,7 +2331,7 @@ class FluxMonitorsWindow(QMainWindow):
         ol.addWidget(stats)
 
         # Display σ
-        disp = QGroupBox("Reported Uncertainties")
+        disp = QGroupBox("Reported uncertainties")
         dl = QVBoxLayout(disp)
         self.display_sigma_var = Value('1sigma')
 
@@ -2361,7 +2361,7 @@ class FluxMonitorsWindow(QMainWindow):
                     command=self._rerun_if_loaded)
         cyl.addLayout(_row(QLabel("Compare steps by:"), rb_pw, 8, rb_st))
         cryst.setToolTip(
-            "A crystal is the grain ID (CSV / Direct Input; a blank cell continues the\n"
+            "A crystal is the grain ID (CSV / Direct input; a blank cell continues the\n"
             "crystal above) or, for .arar files, the run-ID prefix or the laser-power\n"
             "sequence. One step = fusion; several = step-heated. 'One point per crystal'\n"
             "uses each step-heated crystal's ³⁹Ar-weighted total-gas R. Per-crystal and\n"
@@ -2467,11 +2467,11 @@ class FluxMonitorsWindow(QMainWindow):
         self._show_route()
         ol.addWidget(std)
 
-        self.analyze_btn = QPushButton("Analyse Data")
+        self.analyze_btn = QPushButton("Analyse data")
         self.analyze_btn.setEnabled(False)
         self.analyze_btn.clicked.connect(self.analyze_data)
         lay.addWidget(self.analyze_btn)
-        self.export_btn = QPushButton("Export Results")
+        self.export_btn = QPushButton("Export results")
         self.export_btn.setEnabled(False)
         self.export_btn.clicked.connect(self.export_results)
         lay.addWidget(self.export_btn)
@@ -3163,9 +3163,8 @@ class FluxMonitorsWindow(QMainWindow):
         self._populate_exclusion_table()
 
     def _plot_all_groups(self, data_type):
-        """Overview: every group's own weighted mean ± SE on one axis, so the
-        variation between groups is visible at a glance. No cross-group mean or
-        statistics are computed — this is purely a side-by-side visualisation."""
+        """Overview: every group's own weighted mean ± SE on one axis, to compare
+        the groups. No mean or statistics across the groups are computed."""
         self._clear_plot()
         # This view has no clickable points.
         self._pick_pts = []
@@ -3173,7 +3172,7 @@ class FluxMonitorsWindow(QMainWindow):
 
         results = getattr(self, 'results', None)
         if not results:
-            self._plot_message("No results yet, run analysis first.")
+            self._plot_message("No results yet: run the analysis first.")
             return
 
         if data_type == "Calculated J":
@@ -3295,7 +3294,7 @@ class FluxMonitorsWindow(QMainWindow):
         share one last panel."""
         raw = self.raw_category_data.get(category, [])
         if not raw:
-            self._no_view("No raw data, run analysis first.")
+            self._no_view("No data yet: run the analysis first.")
             return
         tagged = self._parse_crystal_structure(raw)
         crystals = OrderedDict()
@@ -3631,7 +3630,7 @@ class FluxMonitorsWindow(QMainWindow):
                                  f"{len(data)} categories ({n_excl} steps excluded in the files)")
         self.log(f"Loaded {self.input_name}: {n_steps} steps, {n_cryst} crystals, "
                  f"{len(data)} categories; {n_excl} steps excluded in the files come in as "
-                 f"manual exclusions (Manual Exclusion tab).")
+                 f"manual exclusions (Manual exclusion tab).")
         if info['calibrations']:
             cal = ", ".join(f"FC {t:g} Ma / λ {l:.4e}" for t, l in sorted(info['calibrations']))
             self.log(f"Calibration stored in the files: {cal}. J here uses the Standard Age & "
@@ -3646,7 +3645,7 @@ class FluxMonitorsWindow(QMainWindow):
             return
         if self.loaded_source == 'direct' and self.raw_category_data:
             try:
-                self._run_analysis('=== RE-ANALYSIS of the Direct Input data (exclusions kept) ===')
+                self._run_analysis('=== RE-ANALYSIS of the Direct input data (exclusions kept) ===')
                 self.log('\nAnalysis complete.')
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Error analysing data: {str(e)}")

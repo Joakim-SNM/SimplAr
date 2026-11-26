@@ -460,7 +460,7 @@ def _sample_from_dict(sd):
     s._flux_override = tuple(ov) if ov else None
     s.j_cfg = {**_default_j_cfg(), **sd.get('j_cfg', {})}
     s.ages = np.array(sd.get('ages', []), float)
-    s.unc_2s = np.array(sd.get('unc_2s', []), float)
+    s.unc_1s = np.array(sd.get('unc_2s', []), float)
     s.r_vals = np.array(sd.get('r_vals', []), float)
     s.r_uncs = np.array(sd.get('r_uncs', []), float)
     s.kca_vals = np.array(sd.get('kca_vals', []), float)
@@ -764,7 +764,7 @@ class Sample:
         self.input_mode = 'age'          # 'age' | 'ratio'
         self.j_cfg = _default_j_cfg()
         self.ages = np.array([], float)      # always Ma (converted if ratio)
-        self.unc_2s = np.array([], float)    # 1-sigma Ma (despite the name; see sig1())
+        self.unc_1s = np.array([], float)    # 1σ, Ma (saved under the old key 'unc_2s')
         self.r_vals = np.array([], float)
         self.r_uncs = np.array([], float)    # 1-sigma
         self.kca_vals = np.array([], float)  # K/Ca per analysis (from .arar)
@@ -814,7 +814,7 @@ class Sample:
         if self.reject == 'none' or n < 3:
             self.auto_mask = np.ones(n, bool)
         elif self.reject == '2sigma':
-            self.auto_mask = iterative_2sigma_rejection(self.ages, self.unc_2s)
+            self.auto_mask = iterative_2sigma_rejection(self.ages, self.unc_1s)
         else:
             self.auto_mask = nmad_rejection(self.ages, self.nmad_thresh)
 
@@ -834,7 +834,7 @@ class Sample:
 
     def set_ages(self, ages, unc):
         self.ages = np.asarray(ages, float)
-        self.unc_2s = np.asarray(unc, float)
+        self.unc_1s = np.asarray(unc, float)
         self.manual = np.full(len(self.ages), 'auto', dtype=object)
         self.compute_auto()
 
@@ -849,7 +849,7 @@ class Sample:
         When raw ratios are present the age of every step is computed from R_unk
         and J (J given directly, or from R_std / R_FCs), never from a stored age,
         so a change to R_unk, R_std, J, t_FCs or an applied disk flux can never
-        leave a stale age on the plot. r_uncs and unc_2s are both stored at
+        leave a stale age on the plot. r_uncs and unc_1s are both stored at
         1-sigma. Safe to call repeatedly; it does not compound errors.
         Returns an error string or None.
         """
@@ -865,7 +865,7 @@ class Sample:
         ages, sig1 = res
         keep = self.manual.copy() if len(self.manual) == len(self.r_vals) else None
         self.ages = np.asarray(ages, float)
-        self.unc_2s = np.asarray(sig1, float)
+        self.unc_1s = np.asarray(sig1, float)
         self.manual = keep if keep is not None else \
             np.full(len(self.ages), 'auto', dtype=object)
         self.compute_auto()
@@ -906,7 +906,7 @@ class Sample:
     def sig1(self):
         # blank-dominated steps can carry a negative stored uncertainty;
         # matplotlib refuses negative error bars, so always use the magnitude
-        return np.abs(np.asarray(self.unc_2s, dtype=float))
+        return np.abs(np.asarray(self.unc_1s, dtype=float))
 
     def flux_key(self):
         return _j_flux_key(self.j_cfg)
@@ -1061,8 +1061,8 @@ class SamplePanel(QFrame):
         row.addWidget(QLabel('thr:'))
         self.thr = QLineEdit(f'{self.s.nmad_thresh:g}')
         self.thr.setFixedWidth(36)
-        self.thr.setToolTip('NMAD multiplier: exclude points with |age - median| > thr * NMAD.\n'
-                            'Lower = stricter. Typical 2-3.')
+        self.thr.setToolTip('NMAD multiplier k: exclude points with |age − median| > k × NMAD.\n'
+                            'Lower = stricter. Typical 2–3.')
         self.thr.editingFinished.connect(self._on_thresh)
         row.addWidget(self.thr)
         self.cb_plateau = QCheckBox('Collapse to 1 age')
@@ -1138,8 +1138,8 @@ class SamplePanel(QFrame):
         self.data = _PasteEdit(self._apply_paste)
         self.data.setFixedHeight(64)
         self.data.setFont(mono_font(9))
-        self.data.setPlaceholderText('Paste: age <tab> uncertainty  (one per line) '
-                                     ', edits apply when you click away')
+        self.data.setPlaceholderText('Paste: age <tab> uncertainty, one per line. '
+                                     'Edits apply when you click away.')
         v.addWidget(self.data)
 
         # run list toolbar: sort + label
@@ -1150,7 +1150,7 @@ class SamplePanel(QFrame):
         rlhdr.addStretch()
         sort_btn = QPushButton('Sort ages')
         sort_btn.setStyleSheet('font-size:9px; padding:1px 5px;')
-        sort_btn.setToolTip('Reorder runs youngest → oldest by age')
+        sort_btn.setToolTip('Reorder the runs from youngest to oldest')
         sort_btn.clicked.connect(self._sort_by_age)
         rlhdr.addWidget(sort_btn)
         v.addLayout(rlhdr)
@@ -1352,7 +1352,7 @@ class SamplePanel(QFrame):
             self.s.r_uncs = self.s.r_uncs * factor
             self.s.recompute()                     # unc follows R, stays consistent
         else:
-            self.s.unc_2s = self.s.unc_2s * factor
+            self.s.unc_1s = self.s.unc_1s * factor
             self.s.compute_auto()
         self.sync_data_box()
         self.app.redraw()
@@ -1375,7 +1375,7 @@ class SamplePanel(QFrame):
     def _clear_data(self):
         """Wipe all data from this sample (keeps its J settings and name)."""
         self.s.ages = np.array([], float)
-        self.s.unc_2s = np.array([], float)
+        self.s.unc_1s = np.array([], float)
         self.s.r_vals = np.array([], float)
         self.s.r_uncs = np.array([], float)
         self.s.kca_vals = np.array([], float)
@@ -1447,7 +1447,7 @@ class SamplePanel(QFrame):
             self.s._from_file = False
             err = self.s.recompute()
             if err:
-                QMessageBox.warning(self, 'R->Age', err)
+                QMessageBox.warning(self, 'R → age', err)
                 return
         else:
             self.s.input_mode = 'age'
@@ -1544,7 +1544,7 @@ class SamplePanel(QFrame):
             return
         order = np.argsort(self.s.ages)
         self.s.ages = self.s.ages[order]
-        self.s.unc_2s = self.s.unc_2s[order]
+        self.s.unc_1s = self.s.unc_1s[order]
         if len(self.s.r_vals) == n:
             self.s.r_vals = self.s.r_vals[order]
         if len(self.s.r_uncs) == n:
@@ -1592,7 +1592,7 @@ class SamplePanel(QFrame):
         keep = np.ones(n, bool)
         keep[i] = False
         self.s.ages = self.s.ages[keep]
-        self.s.unc_2s = self.s.unc_2s[keep]
+        self.s.unc_1s = self.s.unc_1s[keep]
         if len(self.s.r_vals) == n:
             self.s.r_vals = self.s.r_vals[keep]
         if len(self.s.r_uncs) == n:
@@ -1635,7 +1635,7 @@ class SamplePanel(QFrame):
             self.data.setText('\n'.join(lines))
         else:
             self.data.setText('\n'.join(f'{a}\t{float(u * k)}' for a, u in
-                                        zip(self.s.ages, self.s.unc_2s)))
+                                        zip(self.s.ages, self.s.unc_1s)))
         self.data._last = self.data.toPlainText()
 
 
@@ -1890,7 +1890,7 @@ class ProbabilityWindow(QMainWindow):
         self.method_sel.setCurrentIndex(0)
         self.method_sel.setToolTip(
             'How the aliquot/sample ages are combined. Both options build the same\n'
-            'covariance matrix (shared J-flux and FCs/λ, which do not average down);\n'
+            'covariance matrix (shared J and calibration, which do not average down);\n'
             'they differ only in the mean estimator and the overdispersion model.\n'
             'WM + √MSWD: inverse-variance weighted mean, analytical tier scaled by\n'
             '√MSWD when overdispersed.\n'
@@ -2518,7 +2518,7 @@ class ProbabilityWindow(QMainWindow):
                 sample.r_vals = np.array([], float)
                 sample.r_uncs = np.array([], float)
                 sample.set_ages(all_ages, all_uncs)
-                QMessageBox.warning(self, 'Load', f'R->Age: {err}; showing stored ages.')
+                QMessageBox.warning(self, 'Load', f'R → age: {err}; showing stored ages.')
         else:
             sample.input_mode = 'age'
             sample.set_ages(all_ages, all_uncs)
@@ -2551,16 +2551,16 @@ class ProbabilityWindow(QMainWindow):
         try:
             aliquots = parse_ararstack(path)
         except Exception as e:
-            QMessageBox.warning(self, 'Load Stack', str(e))
+            QMessageBox.warning(self, 'Load stack', str(e))
             return
         if not aliquots:
-            QMessageBox.information(self, 'Load Stack',
+            QMessageBox.information(self, 'Load stack',
                                     'No aliquots found in file.')
             return
 
         # ── Options dialog ────────────────────────────────────────────────────
         dlg = QDialog(self)
-        dlg.setWindowTitle('Load Stack')
+        dlg.setWindowTitle('Load stack')
         dv = QVBoxLayout(dlg)
         dv.addWidget(QLabel(
             f'{len(aliquots)} aliquot(s) found in:\n{os.path.basename(path)}'))
@@ -2617,7 +2617,7 @@ class ProbabilityWindow(QMainWindow):
                    f'{os.path.basename(path)}')
 
         self.redraw()
-        QMessageBox.information(self, 'Load Stack', msg)
+        QMessageBox.information(self, 'Load stack', msg)
 
     def append_into(self, sample):
         paths, _ = dfold.get_open_file_names(
@@ -2684,7 +2684,7 @@ class ProbabilityWindow(QMainWindow):
         keep_r = old_r_ok and app_r
         n_old_ages = len(sample.ages)
         a = sample.ages.tolist() + new_a
-        u = sample.unc_2s.tolist() + new_u
+        u = sample.unc_1s.tolist() + new_u
         if keep_r:
             sample.r_vals = np.array(sample.r_vals.tolist() + new_rv, float)
             sample.r_uncs = np.array(sample.r_uncs.tolist() + new_ru, float)
@@ -3623,8 +3623,8 @@ class ProbabilityWindow(QMainWindow):
         self.mix_k = QComboBox()
         self.mix_k.addItems(['Auto (BIC)'] + [str(k) for k in range(1, 11)] + [self._MIX_MAM])
         self.mix_k.setToolTip(
-            'Auto (BIC): the number of components with the lowest Bayes Information\n'
-            'Criterion, taking the fewest components within 2 of the lowest.\n'
+            'Auto (BIC): the fewest components whose Bayesian information\n'
+            'criterion is within 2 of the lowest.\n'
             '1-10: that many components.\n'
             'Minimum age model: the youngest age plus a continuous spread of older\n'
             'analyses (Galbraith et al. 1999). It assumes no analysis is too young:\n'
@@ -4195,7 +4195,7 @@ class ProbabilityWindow(QMainWindow):
              f"  Weighted mean = {r['wm']:.5f} Ma   (n = {int(m.sum())}/{len(s.ages)})",
              f"  ±{ds}σ analytical = {r['sigma_ana']*ds:.5f} Ma",
              f"  ±{ds}σ internal   = {r['sigma_int']*ds:.5f} Ma   (+ J flux)",
-             f"  ±{ds}σ external   = {r['sigma_ext']*ds:.5f} Ma   (+ FCs/λ)",
+             f"  ±{ds}σ external   = {r['sigma_ext']*ds:.5f} Ma   (+ calibration)",
              f"  MSWD = {r['mswd']:.3f}   p = {r.get('prob', float('nan')):.3f}"
              f"   ({mswd_classify(r['mswd'], int(m.sum())) or '-'})"]
         if 'overdispersion' in r or r.get('overdispersed'):
@@ -4289,7 +4289,7 @@ class ProbabilityWindow(QMainWindow):
              f"  Uncertainty budget ({ds}σ)          (Error breakdown for the pie chart)",
              f"    analytical    ± {pr['sigma_ana']*ds:.4f} Ma     mass-spec scatter",
              f"    internal      ± {pr['sigma_int']*ds:.4f} Ma     + J / neutron flux",
-             f"    external      ± {pr['sigma_ext']*ds:.4f} Ma     + FCs age & decay const"
+             f"    external      ± {pr['sigma_ext']*ds:.4f} Ma     + calibration and λ"
              f"  [{ext_route}]"]
         if _fs_warn:
             L.append(f"    Note: {_fs_warn}")
@@ -4407,7 +4407,7 @@ class ProbabilityWindow(QMainWindow):
                 disk_id=s.disk_id, hole_id=s.hole_id, irradiation=s.irradiation,
                 flux_override=(list(s._flux_override)
                                if getattr(s, '_flux_override', None) else None),
-                ages=s.ages.tolist(), unc_2s=s.unc_2s.tolist(),
+                ages=s.ages.tolist(), unc_2s=s.unc_1s.tolist(),
                 r_vals=s.r_vals.tolist(), r_uncs=s.r_uncs.tolist(),
                 kca_vals=s.kca_vals.tolist(), kca_errs=s.kca_errs.tolist(),
                 ar40_pct=s.ar40_pct.tolist(), labels=s.labels, run_ids=s.run_ids,
@@ -4907,7 +4907,7 @@ class ProbabilityWindow(QMainWindow):
         _sink = export.TableSink(path, results_note='The analyses of each sample, the sample results and the pooled result.')
         with _sink as fh:
             w = csv.writer(fh)
-            w.writerow([f'# Statistics: {method_label}  |  Covariance: shared J + FCs/λ (Vermeesch 2015 §13, both methods)'])
+            w.writerow([f'# Statistics: {method_label}  |  Covariance: shared J + calibration (Vermeesch 2015 §13, both methods)'])
             w.writerow([])
 
             # ---- constants: one box for the whole export ----------------------
@@ -5043,7 +5043,7 @@ class ProbabilityWindow(QMainWindow):
                                     ', '.join(_m.name for _m in gmembers)])
                     _ncal = len({calibration_group_key(_s.j_cfg) for _s in act})
                     w.writerow(['Standard',
-                                'Shared FCs/λ systematic (external tier)' if _ncal == 1 else
+                                'Shared calibration systematic (external tier)' if _ncal == 1 else
                                 f'{_ncal} calibrations, each shared within its own samples'])
                     if self._disk_flux:
                         dm = [_s for _s in act if self._flux_match(_s) is not None]

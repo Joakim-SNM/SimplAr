@@ -428,7 +428,7 @@ def _lambda_table():
     for d in stdlib.load_default()['decay_constants']:
         s = float(d.get('lambda_1s') or 0)
         rows.append(f"<tr><td>{d['name']}</td><td>{float(d['lambda']):.5g}</td>"
-                    f"<td>{f'{s:.2g}' if s else 'none'}</td></tr>")
+                    f"<td>{f'{s:.3g}' if s else 'none'}</td></tr>")
     rows.append('</table>')
     return '\n'.join(rows)
 
@@ -443,7 +443,7 @@ def _monitor_table():
         _, _, ic = stdlib.recommended_R(s)
         num, den = ('FCs', s['id']) if ic.get('ratio') == 'FCs/std' else (s['id'], 'FCs')
         rows.append(f"<tr><td>{s['name']}</td><td>R<sub>{num}/{den}</sub> = {float(ic['R']):.6g}</td>"
-                    f"<td>{float(ic.get('R_1s') or 0):.2g}</td>"
+                    f"<td>{float(ic.get('R_1s') or 0):.3g}</td>"
                     f"<td>{stdlib.short_ref(ic.get('reference'))}</td></tr>")
     rows.append('</table>')
     return '\n'.join(rows)
@@ -639,7 +639,7 @@ def build_about_html(base_dir):
     </table>
     <p>The R<sub>FCs/A</sub> used is the one that gives each paper's FCs age with the
     Min et&nbsp;al. (2000) &lambda;. It differs from the printed value in the fifth
-    figure. If the FCs age error is edited, the FCs age and the typed error are used as
+    figure, and for Kuiper et&nbsp;al. (2008) in the fourth. If the FCs age error is edited, the FCs age and the typed error are used as
     they stand, without the tephra.</p>
 
     <h3>Comparing with other decay systems</h3>
@@ -857,7 +857,7 @@ def build_about_html(base_dir):
       <tr><td>Complex 3D</td><td>v = ax + by + cz + d + e(xz) + f(yz) + g(xy) + h(xyz)</td><td>8</td><td>8 (12 or more preferred)</td></tr>
     </table>
     <p>v is the monitor value (J, or R in R mode), x and y are the position coordinates
-    (cm) and z the height of the disk in the stack.</p>
+    (cm) and z the height of the disk in the stack (mm).</p>
     <ul>
       <li><b>Planar</b>. J changes linearly across the disk. Each disk gets its own
           plane, with nothing shared between disks.</li>
@@ -893,7 +893,7 @@ def build_about_html(base_dir):
     <p>in each direction, 0.2&ndash;0.3&nbsp;mm for about ten crystals in the
     2.7&ndash;4.0&nbsp;mm monitor holes of the 13- and 21-hole disks. The standard
     deviation of the shift is drawn in each iteration between 15 and 450&nbsp;&mu;m
-    (typically about 0.26&nbsp;mm). Disk heights are not shifted.</p>
+    (root mean square 0.26&nbsp;mm). Disk heights are not shifted.</p>
     <p>If the monitors scatter about the surface more than their errors allow (weighted
     MSWD above the Wendt &amp; Carl limit for n&nbsp;&minus;&nbsp;k degrees of freedom,
     with k the number of parameters), every &sigma;<sub>J</sub> is multiplied by
@@ -1048,8 +1048,8 @@ def build_about_html(base_dir):
     <p>so each component age is a weighted mean of the analyses, each weighted by its
     probability of belonging. The uncertainties of &mu;<sub>i</sub> and
     &pi;<sub>i</sub> come from the information matrix (Galbraith 2005), as in IsoplotR's
-    peakfit (Vermeesch 2018). The number of components is chosen with the Bayes
-    Information Criterion (Schwarz 1978),</p>
+    peakfit (Vermeesch 2018). The number of components is chosen with the Bayesian
+    information criterion (Schwarz 1978),</p>
     """ + E(r'\mathrm{BIC} = -2\ln L + (2k-1)\ln n') + """
     <p>as the fewest components within 2 of the lowest BIC. A smaller difference is not
     considered evidence (Kass &amp; Raftery 1995). Up to ten components are tried, since
@@ -1149,7 +1149,7 @@ def build_about_html(base_dir):
     monitor, which depends on neither constant.</p>
     """ + E(r'R_{u/S} = \frac{e^{\lambda_{0} t} - 1}{e^{\lambda_{0} t_{S}} - 1}') + """
     <p>On the target calibration the ingrowth of the monitor comes from its route
-    (Section&nbsp;2), and the recalculated age is (Renne et&nbsp;al. 1998; Mercer and
+    (Section&nbsp;2), and the recalculated age is (Renne et&nbsp;al. 1998; Mercer &amp;
     Hodges 2016)</p>
     """ + E(r"t' = \frac{1}{\lambda}\ln\left[1 + R_{u/S}\,\prod_{i} R_{i}\left(e^{\lambda t_{C}} - 1\right)\right]") + """
     <p>The analytical and internal errors are multiplied by dt&prime;/dt. The external
@@ -1174,7 +1174,11 @@ def build_about_html(base_dir):
     refs = """
     <a name="refs"></a>
     <h2>12. References</h2>
+    <p>The sources of the values in the tables of Section&nbsp;10 are given in full in
+    the Standards window.</p>
     <ul style="font-size:13px;">
+      <li>Audi et al. (1997): the NUBASE evaluation of nuclear and decay properties.
+          <i>Nucl. Phys. A</i> 624, 1&ndash;124.</li>
       <li>Carter et al. (2025): jointly calibrated <sup>40</sup>K decay constant
           and Fish Canyon age. <i>Geochim. Cosmochim. Acta</i> 397, 149&ndash;163.</li>
       <li>Galbraith (1988): the radial plot. <i>Technometrics</i> 30,
@@ -1207,7 +1211,7 @@ def build_about_html(base_dir):
           <i>GCA</i> 75, 5097&ndash;5100.</li>
       <li>Rivera et al. (2011): astronomically tuned Fish Canyon age.
           <i>Earth Planet. Sci. Lett.</i> 311, 420&ndash;426.</li>
-      <li>Schwarz (1978): the Bayes Information Criterion. <i>Ann. Stat.</i> 6,
+      <li>Schwarz (1978): the Bayesian information criterion. <i>Ann. Stat.</i> 6,
           461&ndash;464.</li>
       <li>Schaen et al. (2021): interpretation and reporting standards.
           <i>GSA Bull.</i> 133, 461&ndash;487.</li>

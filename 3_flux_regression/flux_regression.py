@@ -2,8 +2,8 @@
 Flux regression: J (or R) across the irradiation disk, with Monte Carlo
 uncertainty propagation.
 
-Fits a spatial plane (2D, 3D, or individual disk) to flux monitor measurements
-and predicts J or 40/39 R values at unknown disk positions. The fit is weighted
+Fits a plane to the monitors of each disk, or a 3D model through the monitors
+of several disks, and predicts J or 40/39 R values at the unknown positions. The fit is weighted
 by 1/σ²; uncertainty is propagated via Monte Carlo perturbation of both hole
 coordinates and measured values, and scaled by √MSWD when the monitors scatter
 about the fit beyond the Wendt & Carl limit. Physical constants default to
@@ -32,7 +32,7 @@ import warnings
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from arar_math import (
     LAMBDA_DEFAULT, STD_AGE_DEFAULT, STD_AGE_ERR,
-    FC_PRESETS, paired_lambda, force_light, no_wheel_on_dropdowns, DEFAULT_FC_INDEX, DEFAULT_FC_NAME,
+    FC_PRESETS, paired_lambda, force_light, no_wheel_on_dropdowns, DEFAULT_FC_INDEX,
     fc_ingrowth, mswd_critical, mswd_classify, mono_font,
     calibration_notes, edited_standards_note,
 )
@@ -133,7 +133,8 @@ def lack_of_fit(X, y, sigma):
 
 
 class MonteCarloThread(QThread):
-    """Fits the regression plane to perturbed copies of the input data.
+    """Fits a 3D model through the monitors of every enabled disk to perturbed
+    copies of the input data.
 
     Each iteration shifts the positions (perturb_positions) and applies Gaussian
     perturbation of the measured values before refitting. The distribution of
@@ -143,7 +144,7 @@ class MonteCarloThread(QThread):
     progress = pyqtSignal(int)
     finished = pyqtSignal(object)
 
-    def __init__(self, coords_3d, values, errors, regression_type='2d', complex_3d=False):
+    def __init__(self, coords_3d, values, errors, regression_type='3d', complex_3d=False):
         super().__init__()
         self.coords_3d = coords_3d
         self.values = values
@@ -173,12 +174,9 @@ class MonteCarloThread(QThread):
         self.finished.emit(np.array(results))
 
     def _fit_regression_model(self, coords_perturbed, values_perturbed):
-        """Build the design matrix and return least-squares coefficients."""
         n_points = len(coords_perturbed)
 
-        if self.regression_type == '2d':
-            X = np.column_stack([coords_perturbed[:, 0], coords_perturbed[:, 1], np.ones(n_points)])
-        elif self.regression_type == '3d' and not self.complex_3d:
+        if not self.complex_3d:
             X = np.column_stack([
                 coords_perturbed[:, 0], coords_perturbed[:, 1],
                 coords_perturbed[:, 2], np.ones(n_points)
@@ -195,7 +193,7 @@ class IndividualDiskMonteCarloThread(QThread):
 
     Each disk uses only its own standard holes, giving completely isolated
     per-disk coefficient estimates. The same dual perturbation scheme is
-    applied as in the global thread.
+    applied as in the 3D thread.
     """
     progress = pyqtSignal(int)
     finished = pyqtSignal(object)
@@ -253,11 +251,10 @@ class IndividualDiskMonteCarloThread(QThread):
 
 
 class DiskCoordinates:
-    """Static class containing standard disk designs and their hole coordinates."""
+    """The disk designs and their hole coordinates (cm)."""
 
     @staticmethod
     def get_disk_designs():
-        """Return dictionary of available disk designs with coordinates."""
         return {
             "2.4mm (7 holes)": {
                 "diameter": 2.4,
@@ -294,7 +291,7 @@ class DiskCoordinates:
 
 
 class SimplePlotWidget(QWidget):
-    """Custom plotting widget for 2D and 3D regression visualization."""
+    """The plot area of the tool."""
 
     def __init__(self):
         super().__init__()
@@ -305,7 +302,6 @@ class SimplePlotWidget(QWidget):
         self._setup_layout()
 
     def _setup_toolbar_and_navigation(self):
-        """Initialize toolbar and scroll navigation."""
         from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT
         self.toolbar = NavigationToolbar2QT(self.canvas, self)
         self.canvas.mpl_connect('scroll_event', self._on_scroll)
@@ -346,7 +342,6 @@ class SimplePlotWidget(QWidget):
         self.canvas.draw_idle()
 
     def _on_scroll(self, event):
-        """Handle mouse wheel zoom events."""
         if not event.inaxes:
             return
 
@@ -380,25 +375,7 @@ class SimplePlotWidget(QWidget):
 
         self.canvas.draw()
 
-    def plot_2d_regression(self, all_disk_data, mode=MODE_J):
-        """Plot 2D regression - Shows original values for standards, predicted for unknowns."""
-        self.figure.clear()
-        ax = self.figure.add_subplot(111, projection='3d')
-
-        all_vals = []
-        legend_handles, legend_labels = [], []
-
-        for plot_idx, disk_data in enumerate(all_disk_data):
-            if not self._should_plot_disk(disk_data):
-                continue
-            self._plot_disk_2d_points(ax, disk_data, plot_idx, all_vals, mode)
-            self._add_disk_to_legend(legend_handles, legend_labels, disk_data, plot_idx)
-
-        self.plot_2d_fitted_plane(ax, all_disk_data)
-        self._finalize_2d_plot(ax, all_vals, legend_handles, legend_labels, all_disk_data, mode)
-
     def plot_individual_disk_regressions(self, all_disk_data, mode=MODE_J):
-        """Plot individual planar regressions for each disk with error bars."""
         self.figure.clear()
         self._note_text = self._below_note = None
         ax = self.figure.add_subplot(111, projection='3d')
@@ -411,20 +388,6 @@ class SimplePlotWidget(QWidget):
             all_vals.extend(vals)
             self._add_disk_to_legend(legend_handles, legend_labels, disk_data, plot_idx)
         self._finalize_individual_plot(ax, legend_handles, legend_labels, all_vals, mode)
-
-    def plot_3d_regression(self, all_disk_data):
-        """Plot 3D regression with improved visualization and uncertainty shown as point size."""
-        self.figure.clear()
-        ax = self.figure.add_subplot(111, projection='3d')
-
-        all_j_values, all_uncertainties = self._collect_3d_plot_data(all_disk_data)
-
-        if not all_j_values:
-            return
-
-        # Plot points and setup visualization
-        self._plot_3d_points(ax, all_disk_data, all_j_values, all_uncertainties)
-        self._setup_3d_visualization(ax, all_j_values, all_uncertainties)
 
     # ── Views by disk: (A) the stack, (B) one map per disk ─────────────────
     # ``disks`` is a list of dicts: label, z (height, mm), f (vectorised
@@ -566,7 +529,7 @@ class SimplePlotWidget(QWidget):
             ax.set_title(f"{d['label']}   z = {float(d['z']):g} mm\nmean {q} {mu:.6g}", fontsize=9)
         for x0, nrm, cmp, lab in ((0.07, dnorm, 'PuOr_r', f'predicted {q} minus the disk mean'),
                                   (0.57, colors.Normalize(-rmax, rmax), 'bwr',
-                                   f'monitor residual (measured minus predicted)')):
+                                   'monitor residual (measured minus predicted)')):
             cax = self.figure.add_axes([x0, 0.075, 0.36, 0.018])
             cb = self.figure.colorbar(cm.ScalarMappable(norm=nrm, cmap=cmp), cax=cax,
                                       orientation='horizontal')
@@ -579,62 +542,9 @@ class SimplePlotWidget(QWidget):
                    'Circles are monitors, grey squares the other holes.')
 
     def _should_plot_disk(self, disk_data):
-        """Check if disk should be included in plot."""
         return disk_data.get('coordinates') and disk_data.get('enabled', True)
 
-    def _plot_disk_2d_points(self, ax, disk_data, plot_idx, all_vals, mode=MODE_J):
-        """Plot points for a single disk in 2D regression."""
-        x_coords = [coord[0] for coord in disk_data['coordinates']]
-        y_coords = [coord[1] for coord in disk_data['coordinates']]
-        regression_values = disk_data.get('regression_values', [])
-        regression_errors = disk_data.get('regression_errors', [])
-        all_data = disk_data.get('all_data', [])
-        color = COLORS[plot_idx % len(COLORS)]
-
-        for i, (x, y) in enumerate(zip(x_coords, y_coords)):
-            if i >= len(all_data):
-                continue
-            hole_data = all_data[i]
-            point_info = self._get_point_plotting_info(
-                hole_data, regression_values, regression_errors, i, color, mode)
-            if point_info is None:
-                continue
-            val, err, marker_style, alpha, size, edge_color, edge_width = point_info
-            all_vals.append(val)
-            ax.scatter(x, y, val, c=color, s=size, alpha=alpha,
-                      edgecolors=edge_color, linewidth=edge_width, marker=marker_style)
-            self._add_error_bars(ax, x, y, val, err)
-            self._add_hole_label(ax, x, y, val, i + 1)
-
-    def _get_point_plotting_info(self, hole_data, regression_values, regression_errors, index, color, mode=MODE_J):
-        """Get plotting information for a single point.
-        In J mode: standards plot j_value, unknowns plot regression_values (J).
-        In R mode: standards plot r_value, unknowns plot regression_values (R).
-        regression_values always contains the primary output quantity (J or R).
-        """
-        is_standard = hole_data.get('is_standard', False)
-        output_sigma = getattr(self, 'output_sigma', 1)
-
-        if is_standard:
-            if mode == MODE_R and hole_data.get('r_value') is not None:
-                val   = hole_data['r_value']
-                err   = hole_data.get('r_error', 0) * output_sigma
-                return val, err, 'o', 0.9, 180, 'black', 2
-            elif mode == MODE_J and hole_data.get('j_value') is not None:
-                val   = hole_data['j_value']
-                err   = hole_data.get('j_error', 0) * output_sigma
-                return val, err, 'o', 0.9, 180, 'black', 2
-            else:
-                return None
-        elif index < len(regression_values) and regression_values[index] is not None:
-            val = regression_values[index]
-            err = (regression_errors[index] if index < len(regression_errors) else 0) * output_sigma
-            return val, err, 's', 0.7, 120, color, 1
-        else:
-            return None
-
     def _add_error_bars(self, ax, x, y, j_val, j_error):
-        """Add error bars to a point."""
         if j_error <= 0:
             return
 
@@ -650,14 +560,12 @@ class SimplePlotWidget(QWidget):
                color='black', linewidth=1.5, alpha=0.7)
 
     def _add_hole_label(self, ax, x, y, j_val, hole_number):
-        """Add hole number label to a point."""
         ax.text(x, y, j_val + j_val*0.002, str(hole_number), fontsize=10,
                ha='center', va='bottom', weight='bold',
                bbox=dict(boxstyle="round,pad=0.2", facecolor="white",
                        alpha=0.8, edgecolor='none'))
 
     def _add_disk_to_legend(self, legend_handles, legend_labels, disk_data, plot_idx):
-        """Add disk entry to legend."""
         color = COLORS[plot_idx % len(COLORS)]
         disk_number = disk_data.get('disk_number', plot_idx + 1)
         disk_label = disk_data.get('disk_label', '').strip()
@@ -668,51 +576,7 @@ class SimplePlotWidget(QWidget):
         label_str = f'Disk {disk_number} [{disk_label}]' if disk_label else f'Disk {disk_number}'
         legend_labels.append(label_str)
 
-    def plot_2d_fitted_plane(self, ax, all_disk_data):
-        """Plot fitted plane through J values."""
-        coeffs = self._get_regression_coefficients(all_disk_data)
-        if coeffs is None or len(coeffs) < 3:
-            return
-
-        all_x, all_y = self._collect_all_coordinates(all_disk_data)
-        if not all_x or not all_y:
-            return
-
-        # Create mesh for plane
-        x_min, x_max = min(all_x), max(all_x)
-        y_min, y_max = min(all_y), max(all_y)
-        x_padding = (x_max - x_min) * 0.3
-        y_padding = (y_max - y_min) * 0.3
-
-        x_range = np.linspace(x_min - x_padding, x_max + x_padding, 20)
-        y_range = np.linspace(y_min - y_padding, y_max + y_padding, 20)
-        X_mesh, Y_mesh = np.meshgrid(x_range, y_range)
-
-        Z_mesh = coeffs[0] * X_mesh + coeffs[1] * Y_mesh + coeffs[2]
-
-        ax.plot_surface(X_mesh, Y_mesh, Z_mesh, alpha=0.4, color='lightblue')
-        ax.plot_wireframe(X_mesh, Y_mesh, Z_mesh, alpha=0.6, color='blue', linewidth=1)
-
-    def _get_regression_coefficients(self, all_disk_data):
-        """Get regression coefficients from first enabled disk."""
-        for disk_data in all_disk_data:
-            if disk_data.get('enabled', True) and 'coefficients' in disk_data and disk_data['coefficients'] is not None:
-                return disk_data['coefficients']
-        return None
-
-    def _collect_all_coordinates(self, all_disk_data):
-        """Collect all x,y coordinates from enabled disks."""
-        all_x, all_y = [], []
-        for disk_data in all_disk_data:
-            if disk_data.get('enabled', True) and 'coordinates' in disk_data:
-                x_coords = [coord[0] for coord in disk_data['coordinates']]
-                y_coords = [coord[1] for coord in disk_data['coordinates']]
-                all_x.extend(x_coords)
-                all_y.extend(y_coords)
-        return all_x, all_y
-
     def _plot_individual_disk(self, ax, disk_data, plot_idx, mode=MODE_J):
-        """Plot individual disk regression plane and points."""
         x_coords = [coord[0] for coord in disk_data['coordinates']]
         y_coords = [coord[1] for coord in disk_data['coordinates']]
         individual_coeffs = disk_data.get('individual_plane_coeffs')
@@ -760,7 +624,6 @@ class SimplePlotWidget(QWidget):
         return vals
 
     def _plot_disk_plane(self, ax, x_coords, y_coords, coeffs, color):
-        """Plot regression plane for individual disk."""
         x_range = np.array(x_coords)
         y_range = np.array(y_coords)
         x_min, x_max = x_range.min() - 0.2, x_range.max() + 0.2
@@ -775,219 +638,12 @@ class SimplePlotWidget(QWidget):
         ax.plot_surface(X_mesh, Y_mesh, Z_mesh, alpha=0.3, color=color)
         ax.plot_wireframe(X_mesh, Y_mesh, Z_mesh, alpha=0.6, color=color, linewidth=1)
 
-    def _collect_3d_plot_data(self, all_disk_data):
-        """Collect all J values and uncertainties for 3D plot scaling."""
-        all_j_values = []
-        all_uncertainties = []
-
-        mode = getattr(self, 'regression_mode', MODE_J)
-
-        for disk_data in all_disk_data:
-            if not disk_data.get('enabled', True):
-                continue
-
-            all_data = disk_data.get('all_data', [])
-            x_coords = [coord[0] for coord in disk_data['coordinates']]
-            y_coords = [coord[1] for coord in disk_data['coordinates']]
-            disk_height = disk_data['height']
-
-            for i, hole_data in enumerate(all_data):
-                if hole_data.get('is_standard'):
-                    if mode == MODE_R and hole_data.get('r_value') is not None:
-                        all_j_values.append(hole_data['r_value'])
-                        all_uncertainties.append(hole_data.get('r_error', 0))
-                    elif hole_data.get('j_value') is not None:
-                        all_j_values.append(hole_data['j_value'])
-                        all_uncertainties.append(hole_data.get('j_error', 0))
-                else:
-                    # Calculate predicted values for unknown holes
-                    if i < len(x_coords) and i < len(y_coords):
-                        x, y = x_coords[i], y_coords[i]
-                        if hasattr(self, 'predict_j_value'):
-                            j_pred, j_error = self.predict_j_value(x, y, disk_height)
-                            if j_pred is not None:
-                                all_j_values.append(j_pred)
-                                all_uncertainties.append(j_error if j_error is not None else 0)
-
-        return all_j_values, all_uncertainties
-
-    def _plot_3d_points(self, ax, all_disk_data, all_j_values, all_uncertainties):
-        """Plot all points for 3D regression visualization."""
-        if not all_j_values:
-            return
-
-        unc_min, unc_max = min(all_uncertainties), max(all_uncertainties)
-        unc_range = unc_max - unc_min if unc_max > unc_min else 1e-10
-
-        cmap = plt.cm.turbo
-
-        for disk_idx, disk_data in enumerate(all_disk_data):
-            if not disk_data.get('coordinates') or not disk_data.get('enabled', True):
-                continue
-
-            self._plot_3d_disk_points(ax, disk_data, disk_idx, all_j_values, unc_min, unc_range, cmap)
-
-    def _plot_3d_disk_points(self, ax, disk_data, disk_idx, all_j_values, unc_min, unc_range, cmap):
-        """Plot points for a single disk in 3D visualization."""
-        x_coords = [coord[0] for coord in disk_data['coordinates']]
-        y_coords = [coord[1] for coord in disk_data['coordinates']]
-        all_data = disk_data.get('all_data', [])
-        disk_height = disk_data['height']
-
-        mode = getattr(self, 'regression_mode', MODE_J)
-
-        for i, (x, y) in enumerate(zip(x_coords, y_coords)):
-            if i >= len(all_data):
-                continue
-
-            hole_data = all_data[i]
-            is_standard = hole_data.get('is_standard', False)
-
-            if is_standard:
-                if mode == MODE_R and hole_data.get('r_value') is not None:
-                    j_val    = hole_data['r_value']
-                    j_error  = hole_data.get('r_error', 0)
-                elif hole_data.get('j_value') is not None:
-                    j_val    = hole_data['j_value']
-                    j_error  = hole_data.get('j_error', 0)
-                else:
-                    continue
-                marker_style = 'o'
-            else:
-                j_pred, j_error = self.predict_j_value(x, y, disk_height)
-                if j_pred is None:
-                    continue
-                j_val = j_pred
-                marker_style = 's'
-
-            # Calculate color and size
-            j_percentile = np.sum(np.array(all_j_values) <= j_val) / len(all_j_values)
-            heat_color = cmap(j_percentile)
-
-            # Scale point size based on uncertainty
-            if unc_range > 0:
-                uncertainty_factor = (j_error - unc_min) / unc_range
-            else:
-                uncertainty_factor = 0
-            point_size = 120 + int(120 * uncertainty_factor)
-
-            # Plot point
-            alpha = 0.9 if is_standard else 0.7
-            ax.scatter(x, y, disk_height, c=[heat_color], s=point_size, alpha=alpha,
-                     edgecolors='black', linewidth=2.5 if is_standard else 2, marker=marker_style)
-
-            # Add hole number label
-            label_height = disk_height + max(0.5, disk_height * 0.05)
-            ax.text(x, y, label_height, str(i+1), fontsize=9,
-                   ha='center', va='center', weight='bold',
-                   bbox=dict(boxstyle="round,pad=0.15", facecolor="white",
-                           alpha=0.9, edgecolor='gray', linewidth=0.5))
-
-    def _setup_3d_visualization(self, ax, all_j_values, all_uncertainties):
-        """Setup 3D plot visualization elements."""
-        mode = getattr(self, 'regression_mode', MODE_J)
-        qty  = 'R (40/39)' if mode == MODE_R else 'J'
-
-        # Setup colorbar
-        v_min, v_max = min(all_j_values), max(all_j_values)
-        cmap = plt.cm.turbo
-        sm = plt.cm.ScalarMappable(cmap=cmap)
-        sm.set_array(all_j_values)
-        sm.set_clim(v_min, v_max)
-        cbar = self.figure.colorbar(sm, ax=ax, shrink=0.6, aspect=15, pad=0.2)
-        cbar.set_label(f'Original {qty} Value', rotation=270, labelpad=15, fontsize=11, weight='bold')
-        cbar.ax.tick_params(labelsize=9)
-
-        # Setup axis labels and title
-        ax.set_xlabel('X Coordinate (cm)', fontsize=11, labelpad=10)
-        ax.set_ylabel('Y Coordinate (cm)', fontsize=11, labelpad=10)
-        ax.set_zlabel('Height (mm)', fontsize=11, labelpad=10)
-        ax.set_title(f'Multi-Disk 3D Regression\n(Colors = {qty} values, Point size = Uncertainty)', fontsize=12)
-
-        # Setup legends
-        self._setup_3d_legends(ax, all_uncertainties)
-
-        ax.view_init(elev=20, azim=45)
-        plt.subplots_adjust(left=0.05, right=0.95, top=0.95, bottom=0.25)
-
-    def _setup_3d_legends(self, ax, all_uncertainties):
-        """Setup legends for 3D plot."""
-        mode = getattr(self, 'regression_mode', MODE_J)
-        qty  = 'R' if mode == MODE_R else 'J'
-
-        # Marker type legend
-        marker_legend_elements = [
-            plt.Line2D([0], [0], marker='o', color='gray', linestyle='None',
-                       markersize=8, markeredgecolor='black', markerfacecolor='lightblue',
-                       label=f'Standards (original {qty})'),
-            plt.Line2D([0], [0], marker='s', color='gray', linestyle='None',
-                       markersize=8, markeredgecolor='black', markerfacecolor='lightcoral',
-                       label=f'Unknowns (predicted {qty})')
-        ]
-
-        marker_legend = ax.legend(handles=marker_legend_elements,
-                                 bbox_to_anchor=(0.1, -0.12), loc='upper center',
-                                 fontsize=9, markerscale=1.0, framealpha=0.95,
-                                 title='Point Types', title_fontsize=10)
-        marker_legend.get_frame().set_facecolor('white')
-        marker_legend.get_frame().set_edgecolor('gray')
-
-        # Uncertainty legend
-        unc_min, unc_max = min(all_uncertainties), max(all_uncertainties)
-        unc_range = unc_max - unc_min
-
-        if unc_range > 0:
-            uncertainty_elements = [
-                plt.Line2D([0], [0], marker='o', color='gray', linestyle='None',
-                           markersize=6, markerfacecolor='gray', alpha=0.7,
-                           label=f'Small = Low uncertainty (±{unc_min:.1e})'),
-                plt.Line2D([0], [0], marker='o', color='gray', linestyle='None',
-                           markersize=12, markerfacecolor='gray', alpha=0.7,
-                           label=f'Large = High uncertainty (±{unc_max:.1e})')
-            ]
-
-            uncertainty_legend = ax.legend(handles=uncertainty_elements,
-                                         bbox_to_anchor=(0.7, -0.12), loc='upper center',
-                                         fontsize=9, markerscale=1.0, framealpha=0.95,
-                                         title='Point Size Legend', title_fontsize=10)
-            uncertainty_legend.get_frame().set_facecolor('white')
-            uncertainty_legend.get_frame().set_edgecolor('gray')
-
-            ax.add_artist(marker_legend)
-
-    def _finalize_2d_plot(self, ax, all_vals, legend_handles, legend_labels, all_disk_data, mode=MODE_J):
-        """Finalize 2D plot with labels, legend, and formatting."""
-        qty = "R (40/39)" if mode == MODE_R else "J Value"
-        ax.set_xlabel('X Coordinate (cm)', labelpad=10)
-        ax.set_ylabel('Y Coordinate (cm)', labelpad=10)
-        ax.set_zlabel(f'{qty} (Measured for Standards, Predicted for Unknowns)', labelpad=10)
-        ax.set_title(f'{qty} Planar Regression with Error Bars\n'
-                     f'(Circles = Standards [measured], Squares = Unknowns [predicted])')
-
-        if len(all_disk_data) > 1 and legend_handles:
-            ax.legend(legend_handles, legend_labels,
-                     bbox_to_anchor=(0.02, 0.98), loc='upper left',
-                     fontsize=10, markerscale=1.0, framealpha=0.95)
-
-        if all_vals:
-            v_min, v_max = min(all_vals), max(all_vals)
-            if v_max > v_min:
-                ax.text(0.02, 0.98, 0.02,
-                       f'{qty} Range: {v_min:.4e} to {v_max:.4e}',
-                       transform=ax.transAxes, fontsize=10,
-                       bbox=dict(boxstyle="round,pad=0.3", facecolor="lightblue", alpha=0.8),
-                       verticalalignment='top')
-
-        plt.subplots_adjust(left=0.05, right=0.95, top=0.95, bottom=0.05)
-        self.canvas.draw()
-
     def _finalize_individual_plot(self, ax, legend_handles, legend_labels, all_vals, mode=MODE_J):
-        """Finalize individual disk regression plot with proper axis scaling."""
-        qty = "R (40/39)" if mode == MODE_R else "J Value"
-        ax.set_xlabel('X Coordinate (cm)', labelpad=10)
-        ax.set_ylabel('Y Coordinate (cm)', labelpad=10)
+        qty = "R (40/39)" if mode == MODE_R else "J"
+        ax.set_xlabel('x (cm)', labelpad=10)
+        ax.set_ylabel('y (cm)', labelpad=10)
         ax.set_zlabel(qty, labelpad=10)
-        ax.set_title(f'Individual Disk Planar Regressions: {qty}\n(Each disk fitted independently)')
+        ax.set_title(f'{qty}, one plane per disk\n(each disk fitted on its own)')
 
         if legend_handles:
             ax.legend(legend_handles, legend_labels,
@@ -1004,11 +660,12 @@ class SimplePlotWidget(QWidget):
         self.figure.subplots_adjust(left=0.0, right=1.0, top=0.91, bottom=0.0)
         self.canvas.draw()
 
+
 # ── Disk configuration widget ────────────────────────────────────────────────
 
 
 class DiskWidget(QWidget):
-    """Widget for configuring individual disks with drag-and-drop reordering."""
+    """One disk: its design, height and hole table."""
 
     def __init__(self, disk_number, parent_calculator):
         super().__init__()
@@ -1018,7 +675,6 @@ class DiskWidget(QWidget):
         self.init_ui()
 
     def init_ui(self):
-        """Initialize the user interface for disk configuration."""
         layout = QVBoxLayout()
 
         # Configuration section
@@ -1043,33 +699,25 @@ class DiskWidget(QWidget):
         self.load_disk_coordinates(preserve_data=False)
 
     def _setup_control_buttons(self, layout):
-        """Setup control buttons for drag and enable/disable."""
-        self.drag_button = QPushButton("⇅ Drag to Reorder")
+        self.drag_button = QPushButton("⇅ Drag to reorder")
         self.drag_button.setMaximumWidth(120)
-        self.drag_button.setStyleSheet("QPushButton { background-color: lightgray; }")
         self.drag_button.mousePressEvent = self.start_drag
         layout.addWidget(self.drag_button)
 
-        self.enable_checkbox = QCheckBox("Include in Regression")
+        self.enable_checkbox = QCheckBox("Include in regression")
         self.enable_checkbox.setChecked(True)
-        self.enable_checkbox.setStyleSheet("QCheckBox { font-weight: bold; color: darkgreen; }")
         layout.addWidget(self.enable_checkbox)
         layout.addStretch()
 
-        self.remove_btn = QPushButton("✕ Remove Disk")
-        self.remove_btn.setStyleSheet(
-            "QPushButton { background-color: #e74c3c; color: white; font-weight: bold; }"
-            "QPushButton:disabled { background-color: #c0392b; color: #888; }"
-        )
+        self.remove_btn = QPushButton("✕ Remove disk")
         self.remove_btn.clicked.connect(lambda: self.parent_calculator.remove_specific_disk(self))
         layout.addWidget(self.remove_btn)
 
     def _setup_disk_configuration(self, layout):
-        """Setup disk design selection and height configuration."""
         self.disk_combo = QComboBox()
         self.disk_combo.addItems(DiskCoordinates.get_disk_designs().keys())
         self.disk_combo.currentTextChanged.connect(lambda _: self.load_disk_coordinates(preserve_data=False))
-        layout.addRow("Disk Design:", self.disk_combo)
+        layout.addRow("Disk design:", self.disk_combo)
 
         # Short label used when exporting (e.g. "E"); defaults to a letter by position.
         self.disk_label_edit = QLineEdit(chr(ord('A') + (self.disk_number - 1) % 26))
@@ -1090,7 +738,6 @@ class DiskWidget(QWidget):
         layout.addRow(self.height_widget)
 
     def create_data_table(self):
-        """Create the data entry table for samples and standards."""
         self.table_widget = QTableWidget()
         self.table_widget.setColumnCount(7)
         self._set_data_table_headers()
@@ -1136,7 +783,6 @@ class DiskWidget(QWidget):
             QTableWidget.keyPressEvent(t, event)
 
     def paste_data(self):
-        """Paste clipboard data into the table."""
         clipboard = QApplication.clipboard()
         text = clipboard.text()
         if not text:
@@ -1166,7 +812,6 @@ class DiskWidget(QWidget):
                 self._paste_cell_value(row, col, value)
 
     def _paste_cell_value(self, row, col, value):
-        """Paste a single cell value with appropriate validation."""
         if col == 0:  # Sample name
             self.table_widget.setItem(row, col, QTableWidgetItem(value.strip()))
         elif col == 3 or col == 4:  # J value or J error
@@ -1177,7 +822,6 @@ class DiskWidget(QWidget):
                 pass  # Skip invalid numeric values
 
     def load_disk_coordinates(self, preserve_data=False):
-        """Load coordinates for selected disk design."""
         disk_name = self.disk_combo.currentText()
         all_designs = DiskCoordinates.get_disk_designs()
         all_designs.update(getattr(self.parent_calculator, 'custom_disk_designs', {}))
@@ -1194,7 +838,6 @@ class DiskWidget(QWidget):
             self._setup_table_row(i, x, y, existing_data)
 
     def _collect_existing_data(self):
-        """Collect existing table data for preservation."""
         existing_data = {}
         if self.table_widget.rowCount() > 0:
             for i in range(self.table_widget.rowCount()):
@@ -1212,7 +855,6 @@ class DiskWidget(QWidget):
         return existing_data
 
     def _setup_table_row(self, i, x, y, existing_data):
-        """Setup a single row in the table."""
         # Sample name
         if i in existing_data and existing_data[i].get('sample_name'):
             sample_name = existing_data[i]['sample_name']
@@ -1264,7 +906,6 @@ class DiskWidget(QWidget):
             self.table_widget.setItem(i, 6, height_item)
 
     def _setup_j_value_cells(self, i, existing_data):
-        """Setup J value and J error cells."""
         val_text = existing_data[i]['j_value'] if i in existing_data else ""
         err_text = existing_data[i]['j_error'] if i in existing_data else ""
         for col, text in [(3, val_text), (4, err_text)]:
@@ -1275,7 +916,6 @@ class DiskWidget(QWidget):
                 self.table_widget.setItem(i, col, QTableWidgetItem(text))
 
     def update_height_column(self):
-        """Update height column when height spinbox changes."""
         height = self.height_spinbox.value()
         for i in range(self.table_widget.rowCount()):
             height_item = QTableWidgetItem(f"{height:.2f}")
@@ -1283,7 +923,7 @@ class DiskWidget(QWidget):
             self.table_widget.setItem(i, 6, height_item)
 
     def get_disk_data(self):
-        """Get all data for this disk in standardized format."""
+        """The holes, monitors and settings of this disk as one dict."""
         disk_name = self.disk_combo.currentText()
         all_designs = DiskCoordinates.get_disk_designs()
         all_designs.update(getattr(self.parent_calculator, 'custom_disk_designs', {}))
@@ -1374,7 +1014,6 @@ class DiskWidget(QWidget):
         return hole_data
 
     def start_drag(self, event):
-        """Start drag operation for reordering."""
         if event.button() == Qt.LeftButton:
             drag = QDrag(self)
             mime_data = QMimeData()
@@ -1383,14 +1022,12 @@ class DiskWidget(QWidget):
             drag.exec_(Qt.MoveAction)
 
     def dragEnterEvent(self, event):
-        """Handle drag enter events."""
         if event.mimeData().hasText():
             event.accept()
         else:
             event.ignore()
 
     def dropEvent(self, event):
-        """Handle drop events for reordering."""
         source_disk_num = int(event.mimeData().text())
         target_disk_num = self.disk_number
 
@@ -1399,7 +1036,6 @@ class DiskWidget(QWidget):
         event.accept()
 
     def update_disk_number(self, new_number):
-        """Update disk number after reordering."""
         self.disk_number = new_number
         for child in self.findChildren(QGroupBox):
             if "Configuration" in child.title():
@@ -1433,7 +1069,8 @@ def read_flux_monitors_export(path):
         wb.close()
     head = next((i for i, r in enumerate(rows)
                  if r and r[0] == 'Category' and 'Reported R' in r), None)
-    # a monitor other than FCs: use its FCs-equivalent R (measured R / R_M/FCs)
+    # the monitor named in the export; for a monitor other than FCs both the
+    # measured R and its FCs-equivalent R are read
     monitor = 'FCs'
     for r in rows:
         if r and isinstance(r[0], str) and r[0].startswith('Monitor: '):
@@ -1550,7 +1187,6 @@ class FluxRegressionCalculator(QMainWindow):
         self.init_ui()
 
     def init_ui(self):
-        """Initialize the main user interface."""
         self.create_menu_bar()
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -1576,7 +1212,6 @@ class FluxRegressionCalculator(QMainWindow):
         self.update_interface_for_disk_count()
 
     def _create_left_panel(self):
-        """Create the left control panel."""
         left_scroll = QScrollArea()
         left_panel = QWidget()
         left_layout = QVBoxLayout(left_panel)
@@ -1596,8 +1231,7 @@ class FluxRegressionCalculator(QMainWindow):
         return left_scroll
 
     def _create_constants_section(self):
-        """Create the constants configuration section."""
-        constants_group = QGroupBox("Constants && Regression Mode")
+        constants_group = QGroupBox("Constants && regression mode")
         constants_layout = QFormLayout()
 
         # Calibration preset: fills age, error and the anchored λ below
@@ -1718,7 +1352,7 @@ class FluxRegressionCalculator(QMainWindow):
         constants_layout.addRow("Input error:", sigma_widget)
 
         # Regression mode toggle
-        mode_label = QLabel("Regression Mode:")
+        mode_label = QLabel("Regression mode:")
         self.mode_j_radio = QPushButton("J-value mode")
         self.mode_r_radio = QPushButton("R (40/39) mode")
         self.mode_j_radio.setCheckable(True)
@@ -1762,16 +1396,15 @@ class FluxRegressionCalculator(QMainWindow):
             self.lambda_edit.setText(f"{pl[1]:.4e}")
 
     def _create_disk_management_section(self):
-        """Create the disk management section."""
-        disk_management_group = QGroupBox("Disk Management")
+        disk_management_group = QGroupBox("Disk management")
         disk_layout = QVBoxLayout()
 
         # Disk control buttons
         disk_controls = QHBoxLayout()
-        self.add_disk_btn = QPushButton("Add Disk")
+        self.add_disk_btn = QPushButton("Add disk")
         self.add_disk_btn.clicked.connect(self.add_disk)
         disk_controls.addWidget(self.add_disk_btn)
-        self.import_fm_btn = QPushButton("Import Flux monitors export...")
+        self.import_fm_btn = QPushButton("Import Flux monitors export…")
         self.import_fm_btn.setToolTip(
             "Fill the monitor holes from an .xlsx export of the Flux monitors tool:\n"
             "category C1 goes to the disk labelled C, hole 1, with its reported R and SE.")
@@ -1788,7 +1421,7 @@ class FluxRegressionCalculator(QMainWindow):
             "share J covariance; different disks or irradiations are independent.\n"
             "Used to match samples when loading into the Plateau & isochron and Age distribution tools.")
         irr_row.addWidget(self.irradiation_edit)
-        self.export_flux_btn = QPushButton("Export Flux Config (.jflux)")
+        self.export_flux_btn = QPushButton("Export flux config (.jflux)")
         self.export_flux_btn.setToolTip(
             "Write a per-disk J + cross-hole covariance file (joint Monte Carlo)\n"
             "that the Plateau & isochron and Age distribution tools load to combine same-disk samples\n"
@@ -1811,22 +1444,15 @@ class FluxRegressionCalculator(QMainWindow):
         return disk_management_group
 
     def _create_calculations_section(self):
-        """Create the calculations section."""
         calc_group = QGroupBox("Calculations")
         calc_layout = QVBoxLayout()
 
         # Regression calculation buttons
         regression_controls = QHBoxLayout()
-        # One plane through several disks is not offered: a planar fit is made
-        # to each disk on its own (calculate_individual_btn).  The button is kept,
-        # hidden, for the code that enables and disables the buttons together.
-        self.calculate_2d_btn = QPushButton("Calculate Planar Regression")
-        self.calculate_2d_btn.clicked.connect(lambda: self.calculate_regression('2d'))
-        self.calculate_2d_btn.setVisible(False)
-        self.calculate_individual_btn = QPushButton("Calculate Planar Regression")
+        self.calculate_individual_btn = QPushButton("Calculate planar regression")
         self.calculate_individual_btn.setToolTip('A plane fitted to the monitors of each disk on its own.')
         self.calculate_individual_btn.clicked.connect(self.calculate_individual_disk_regressions)
-        self.calculate_3d_btn = QPushButton("Calculate 3D Regression")
+        self.calculate_3d_btn = QPushButton("Calculate 3D regression")
         self.calculate_3d_btn.clicked.connect(lambda: self.calculate_regression('3d'))
         self.calculate_complex_3d_btn = QPushButton("Calculate Complex 3D")
         self.calculate_complex_3d_btn.clicked.connect(lambda: self.calculate_regression('3d', complex_3d=True))
@@ -1837,10 +1463,10 @@ class FluxRegressionCalculator(QMainWindow):
         calc_layout.addLayout(regression_controls)
 
         advanced_controls = QHBoxLayout()
-        self.compare_methods_btn = QPushButton("Compare Methods")
+        self.compare_methods_btn = QPushButton("Compare methods")
         self.compare_methods_btn.clicked.connect(self.compare_regression_methods)
         self.compare_methods_btn.setEnabled(False)
-        self.export_btn = QPushButton("Export Results")
+        self.export_btn = QPushButton("Export results")
         self.export_btn.clicked.connect(self.export_results)
         self.export_btn.setEnabled(False)
 
@@ -1856,8 +1482,7 @@ class FluxRegressionCalculator(QMainWindow):
         return calc_group
 
     def _create_extrapolation_section(self):
-        """Create the extrapolation section."""
-        extrap_group = QGroupBox("3D Extrapolation")
+        extrap_group = QGroupBox("3D extrapolation")
         extrap_layout = QVBoxLayout()
 
         # Height input
@@ -1867,18 +1492,18 @@ class FluxRegressionCalculator(QMainWindow):
         self.extrap_z.setDecimals(2)
         self.extrap_z.setValue(0.0)
         self.extrap_z.setSuffix(" mm")
-        height_layout.addRow("Prediction Height:", self.extrap_z)
+        height_layout.addRow("Prediction height:", self.extrap_z)
         extrap_layout.addLayout(height_layout)
 
         # Disk design selection
         disk_extrap_layout = QFormLayout()
         self.extrap_disk_combo = QComboBox()
         self.extrap_disk_combo.addItems(DiskCoordinates.get_disk_designs().keys())
-        disk_extrap_layout.addRow("Disk Design:", self.extrap_disk_combo)
+        disk_extrap_layout.addRow("Disk design:", self.extrap_disk_combo)
         extrap_layout.addLayout(disk_extrap_layout)
 
         # Prediction button
-        self.predict_disk_btn = QPushButton("Predict Entire Disk")
+        self.predict_disk_btn = QPushButton("Predict entire disk")
         self.predict_disk_btn.clicked.connect(self.predict_entire_disk)
         self.predict_disk_btn.setEnabled(False)
         extrap_layout.addWidget(self.predict_disk_btn)
@@ -1893,26 +1518,26 @@ class FluxRegressionCalculator(QMainWindow):
         return extrap_group
 
     def create_menu_bar(self):
-        """Create menu bar with File, Configuration, and Help menus."""
+        """The File and Configuration menus."""
         menubar = self.menuBar()
 
         # File menu
         file_menu = menubar.addMenu('File')
-        save_action = QAction('Save Session', self)
+        save_action = QAction('Save session', self)
         save_action.setShortcut('Ctrl+S')
         save_action.triggered.connect(self.save_session)
         file_menu.addAction(save_action)
-        load_action = QAction('Load Session', self)
+        load_action = QAction('Load session', self)
         load_action.setShortcut('Ctrl+O')
         load_action.triggered.connect(self.load_session)
         file_menu.addAction(load_action)
-        import_fm_action = QAction('Import Flux monitors export (.xlsx)...', self)
+        import_fm_action = QAction('Import Flux monitors export (.xlsx)…', self)
         import_fm_action.triggered.connect(lambda: self.import_flux_monitors_export())
         file_menu.addAction(import_fm_action)
 
         # Configuration menu
         config_menu = menubar.addMenu('Configuration')
-        hole_stack_action = QAction('Configure Hole Stacking', self)
+        hole_stack_action = QAction('Configure hole stacking', self)
         hole_stack_action.triggered.connect(self.show_hole_stacking_dialog)
         config_menu.addAction(hole_stack_action)
 
@@ -1925,7 +1550,6 @@ class FluxRegressionCalculator(QMainWindow):
         menubar.setNativeMenuBar(False)
 
     def create_results_table(self):
-        """Create the results display table."""
         self.results_widget = QTableWidget()
         self.results_widget.setColumnCount(15)
         self._update_results_table_headers()
@@ -1957,7 +1581,6 @@ class FluxRegressionCalculator(QMainWindow):
     # ── Disk management methods ──────────────────────────────────────────────
 
     def add_disk(self):
-        """Add a new disk to the configuration."""
         disk_number = len(self.disk_widgets) + 1
         disk_widget = DiskWidget(disk_number, self)
 
@@ -1979,7 +1602,6 @@ class FluxRegressionCalculator(QMainWindow):
         self.update_interface_for_disk_count()
 
     def remove_disk(self):
-        """Remove the last disk from the configuration."""
         if self.disk_widgets:
             disk_widget = self.disk_widgets.pop()
 
@@ -2039,7 +1661,6 @@ class FluxRegressionCalculator(QMainWindow):
         self.update_interface_for_disk_count()
 
     def _update_button_states(self):
-        """Update button enabled states based on disk count."""
         has_multiple_disks = len(self.disk_widgets) > 1
         self.calculate_3d_btn.setEnabled(has_multiple_disks)
         self.calculate_complex_3d_btn.setEnabled(has_multiple_disks)
@@ -2054,7 +1675,6 @@ class FluxRegressionCalculator(QMainWindow):
             dw._set_data_table_headers()
 
     def update_interface_for_disk_count(self):
-        """Update interface elements based on number of disks."""
         has_multiple_disks = len(self.disk_widgets) > 1
 
         # Disable (not hide) 3D buttons when only one disk
@@ -2067,7 +1687,6 @@ class FluxRegressionCalculator(QMainWindow):
                 disk_widget.height_widget.setVisible(has_multiple_disks)
 
     def reorder_disks(self, source_disk_num, target_disk_num):
-        """Reorder disks via drag and drop."""
         try:
             source_widget = None
             target_widget = None
@@ -2083,10 +1702,9 @@ class FluxRegressionCalculator(QMainWindow):
                 self.renumber_disks()
 
         except Exception as e:
-            QMessageBox.warning(self, "Reorder Error", f"Failed to reorder disks: {str(e)}")
+            QMessageBox.warning(self, "Reorder error", f"Failed to reorder disks: {str(e)}")
 
     def _perform_disk_reorder(self, source_widget, target_widget):
-        """Perform the actual disk widget reordering."""
         layout = self.disk_container_layout
         source_index = -1
         target_index = -1
@@ -2107,15 +1725,15 @@ class FluxRegressionCalculator(QMainWindow):
             self.disk_widgets.insert(target_list_index, source_widget)
 
     def renumber_disks(self):
-        """Renumber all disks after reordering."""
         for i, widget in enumerate(self.disk_widgets):
             widget.update_disk_number(i + 1)
             widget.load_disk_coordinates(preserve_data=True)
 
     # ── Regression calculation methods ───────────────────────────────────────
 
-    def calculate_regression(self, regression_type='2d', complex_3d=False):
-        """Calculate regression using Monte Carlo uncertainty propagation."""
+    def calculate_regression(self, regression_type='3d', complex_3d=False):
+        """Fit a 3D model through the monitors of every enabled disk, with
+        Monte Carlo uncertainties."""
         try:
             all_standard_data, all_disk_data = self._collect_regression_data()
 
@@ -2142,7 +1760,6 @@ class FluxRegressionCalculator(QMainWindow):
             self.progress_bar.setVisible(False)
 
     def _collect_regression_data(self):
-        """Collect standard data and disk data for regression."""
         all_standard_data = []
         all_disk_data = []
 
@@ -2160,22 +1777,21 @@ class FluxRegressionCalculator(QMainWindow):
         return len({round(float(s['coordinates_3d'][2]), 6) for s in standards})
 
     def _validate_regression_data(self, all_disk_data, all_standard_data, complex_3d,
-                                  regression_type='2d'):
-        """Validate data requirements for regression."""
+                                  regression_type='3d'):
         if len(all_disk_data) == 0:
             QMessageBox.warning(self, "Error", "No disks are enabled for regression.")
             return False
 
         if len(all_standard_data) < 3:
-            QMessageBox.warning(self, "Error", "Need at least 3 standard holes for regression.")
+            QMessageBox.warning(self, "Error", "Need at least 3 monitor holes for a regression.")
             return False
 
         if regression_type == '3d' and not complex_3d and len(all_standard_data) < 4:
-            QMessageBox.warning(self, "Error", "Need at least 4 standard holes for 3D regression.")
+            QMessageBox.warning(self, "Error", "Need at least 4 monitor holes for a 3D regression.")
             return False
 
         if complex_3d and len(all_standard_data) < 8:
-            QMessageBox.warning(self, "Error", "Need at least 8 standard holes for complex 3D regression.")
+            QMessageBox.warning(self, "Error", "Need at least 8 monitor holes for a Complex 3D regression.")
             return False
 
         # A 3D fit with every monitor at one height has no information on the
@@ -2191,7 +1807,6 @@ class FluxRegressionCalculator(QMainWindow):
 
     def _start_monte_carlo_regression(self, coords_3d, values, errors, regression_type,
                                       complex_3d, all_disk_data):
-        """Start Monte Carlo regression calculation thread."""
         self.progress_bar.setVisible(True)
         self._disable_all_buttons()
 
@@ -2203,7 +1818,6 @@ class FluxRegressionCalculator(QMainWindow):
         self.mc_thread.start()
 
     def on_monte_carlo_finished(self, mc_results, regression_type, complex_3d, all_enabled_disk_data):
-        """Process completed Monte Carlo regression results."""
         try:
             self.progress_bar.setVisible(False)
             self.enable_all_buttons()
@@ -2238,13 +1852,10 @@ class FluxRegressionCalculator(QMainWindow):
             self.plot_widget.output_sigma    = self.output_sigma
             self.plot_widget.regression_mode = self.regression_mode
 
-            if regression_type == '2d':
-                self.plot_widget.plot_2d_regression(processed_disk_data, mode=self.regression_mode)
-            else:
-                disks = self._surface_disks(processed_disk_data, mean_coeffs, complex_3d)
-                pw, mode = self.plot_widget, self.regression_mode
-                pw.set_pages([('Stack', lambda: pw.draw_stack(disks, mode)),
-                              ('By disk', lambda: pw.draw_disk_maps(disks, mode))])
+            disks = self._surface_disks(processed_disk_data, mean_coeffs, complex_3d)
+            pw, mode = self.plot_widget, self.regression_mode
+            pw.set_pages([('Stack', lambda: pw.draw_stack(disks, mode)),
+                          ('By disk', lambda: pw.draw_disk_maps(disks, mode))])
 
             self._show_regression_success_message(regression_type, complex_3d, processed_disk_data)
 
@@ -2280,7 +1891,6 @@ class FluxRegressionCalculator(QMainWindow):
         return out
 
     def _process_regression_results(self, all_enabled_disk_data):
-        """Process regression results and populate results table."""
         # Prepare disk data with numbering
         all_disk_data_for_table = []
         for disk_idx, disk_widget in enumerate(self.disk_widgets):
@@ -2392,10 +2002,10 @@ class FluxRegressionCalculator(QMainWindow):
             coeffs = disk_data.get('coefficients')
             if coeffs is not None:
                 x, y, z    = hole_data['coordinates_3d']
-                reg_type   = getattr(self, '_last_regression_type', '2d')
+                reg_type   = getattr(self, '_last_regression_type', 'individual')
                 complex_3d = getattr(self, '_last_complex_3d', False)
                 try:
-                    if reg_type in ('2d', 'individual'):
+                    if reg_type == 'individual':
                         plane_val = coeffs[0]*x + coeffs[1]*y + coeffs[2]
                     elif not complex_3d:
                         plane_val = coeffs[0]*x + coeffs[1]*y + coeffs[2]*z + coeffs[3]
@@ -2439,7 +2049,6 @@ class FluxRegressionCalculator(QMainWindow):
             item.setBackground(QColor("#e8f4fd") if mode == MODE_R else QColor("#edfced"))
 
     def _show_regression_success_message(self, regression_type, complex_3d, processed_disk_data):
-        """Show success message for regression calculation."""
         regression_label = regression_type.upper()
         if complex_3d:
             regression_label += " Complex"
@@ -2465,7 +2074,7 @@ class FluxRegressionCalculator(QMainWindow):
                     enabled_disks.append(disk_data)
 
             if len(enabled_disks) == 0:
-                QMessageBox.warning(self, "Error", "No enabled disks with sufficient standards.")
+                QMessageBox.warning(self, "Error", "No enabled disk has enough monitors.")
                 return
 
             # Start Monte Carlo calculation
@@ -2485,7 +2094,6 @@ class FluxRegressionCalculator(QMainWindow):
             self.enable_all_buttons()
 
     def on_individual_monte_carlo_finished(self, all_disk_results, enabled_disks):
-        """Process Monte Carlo results for individual disk regressions."""
         try:
             self.progress_bar.setVisible(False)
             self.enable_all_buttons()
@@ -2517,7 +2125,7 @@ class FluxRegressionCalculator(QMainWindow):
 
             fit_lines = "\n".join(
                 self._lack_of_fit_text(dd.get('disk_label') or f"Disk {dd.get('disk_number', '?')}",
-                                       dd['standard_data'], '2d', False)
+                                       dd['standard_data'], 'individual', False)
                 for dd in processed_disks)
             QMessageBox.information(self, "Success",
                                   f"Planar regressions calculated for {len(processed_disks)} disk(s).\n"
@@ -2530,7 +2138,6 @@ class FluxRegressionCalculator(QMainWindow):
             self.enable_all_buttons()
 
     def _process_individual_disk_results(self, all_disk_results, enabled_disks):
-        """Process results for individual disk regressions."""
         # Setup results table
         total_rows = sum(len(disk_data['all_data']) for disk_data in enabled_disks)
         self.results_widget.setRowCount(total_rows)
@@ -2545,7 +2152,7 @@ class FluxRegressionCalculator(QMainWindow):
             # Calculate coefficients and errors
             mean_coeffs = np.mean(disk_mc_results, axis=0)
             std_coeffs = np.std(disk_mc_results, axis=0) * self._lack_of_fit(
-                disk_data['standard_data'], '2d', False)[2]
+                disk_data['standard_data'], 'individual', False)[2]
 
             disk_data['individual_plane_coeffs'] = mean_coeffs
             disk_data['coefficients'] = mean_coeffs
@@ -2577,7 +2184,7 @@ class FluxRegressionCalculator(QMainWindow):
             pred_val, pred_err = self.predict_j_value(
                 x, y, disk_data['height'],
                 specific_standards=disk_data['standard_data'],
-                force_regression_type='2d')
+                force_regression_type='individual')
             if pred_val is None:
                 j_pred = j_error = r_pred = r_error = None
             else:
@@ -2644,7 +2251,7 @@ class FluxRegressionCalculator(QMainWindow):
         key = ('r_value', 'r_error') if mode == MODE_R else ('j_value', 'j_error')
         values = np.array([s[key[0]] for s in standards], float)
         errors = np.array([s[key[1]] for s in standards], float)
-        if regression_type in ('2d', 'individual'):
+        if regression_type == 'individual':
             coords = np.array([[s['coordinates_2d'][0], s['coordinates_2d'][1]]
                                for s in standards], float)
         else:
@@ -2674,7 +2281,7 @@ class FluxRegressionCalculator(QMainWindow):
             values = np.array([s['j_value'] for s in standards])
             errors = np.array([s['j_error'] for s in standards])
 
-        if regression_type in ('2d', 'individual'):
+        if regression_type == 'individual':
             coords_original = np.array([[s['coordinates_2d'][0], s['coordinates_2d'][1]] for s in standards])
         else:
             coords_original = np.array([s['coordinates_3d'] for s in standards])
@@ -2698,8 +2305,7 @@ class FluxRegressionCalculator(QMainWindow):
         return predictions
 
     def _build_prediction_matrices(self, coords_perturbed, x, y, z, regression_type, complex_3d):
-        """Build design matrix and prediction vector for regression."""
-        if regression_type == '2d' or regression_type == 'individual':
+        if regression_type == 'individual':
             X = np.column_stack([coords_perturbed[:, 0], coords_perturbed[:, 1], np.ones(len(coords_perturbed))])
             x_pred = np.array([x, y, 1])
         elif not complex_3d:
@@ -2737,7 +2343,7 @@ class FluxRegressionCalculator(QMainWindow):
         captures the real cross-hole correlation (validated against the
         analytic g_i.C.g_j form).  The fit is the one the results table shows:
         each disk's own standards for an individual-disk regression, the
-        standards of every enabled disk for a global 2D / 3D one.  Holes are
+        standards of every enabled disk for a 3D one.  Holes are
         keyed by their hole number; disks by the disk label; the file is keyed
         by the irradiation name.  Monitor holes keep their measured value and
         σ (flagged in 'monitor'); unknowns take the plane.
@@ -2775,14 +2381,14 @@ class FluxRegressionCalculator(QMainWindow):
 
         enabled = [w.get_disk_data() for w in self.disk_widgets]
         enabled = [dd for dd in enabled if dd['enabled']]
-        # A global fit ('2d' or '3d') is one model through the standards of
-        # every enabled disk, exactly as the results table predicts it; an
-        # 'individual' fit uses each disk's own standards.  The exported J
+        # A 3D fit is one model through the standards of every enabled disk,
+        # exactly as the results table predicts it; an 'individual' fit uses
+        # each disk's own standards.  The exported J
         # must come from the same fit the table shows.
         is_global = rtype not in ('individual',)
 
         def _std_arrays(standards):
-            if rtype in ('2d', 'individual'):
+            if rtype == 'individual':
                 cs = np.array([[s['coordinates_2d'][0], s['coordinates_2d'][1]]
                                for s in standards])
             else:
@@ -2825,12 +2431,11 @@ class FluxRegressionCalculator(QMainWindow):
                 return None
             return [np.array(d) for d in draws]
 
-        fit_type = '2d' if rtype == 'individual' else rtype
         if is_global:
             all_std = [s for dd in enabled for s in dd['standard_data']]
             per_disk = (_joint_draws(all_std, [dd['all_data'] for dd in enabled])
                         if len(all_std) >= 3 else None) or []
-            lof = self._lack_of_fit(all_std, fit_type, complex_3d)
+            lof = self._lack_of_fit(all_std, rtype, complex_3d)
             jobs = [(dd, d, lof) for dd, d in zip(enabled, per_disk)]
         else:
             jobs = []
@@ -2840,7 +2445,7 @@ class FluxRegressionCalculator(QMainWindow):
                 res = _joint_draws(dd['standard_data'], [dd['all_data']])
                 if res is not None:
                     jobs.append((dd, res[0],
-                                 self._lack_of_fit(dd['standard_data'], '2d', False)))
+                                 self._lack_of_fit(dd['standard_data'], 'individual', False)))
 
         fit_ids = ({id(s) for s in all_std} if is_global else None)
         joint = []          # (disk label, J draws) for the cross-disk blocks
@@ -2956,7 +2561,7 @@ class FluxRegressionCalculator(QMainWindow):
         try:
             with open(path, 'w', encoding='utf-8') as fh:
                 json.dump(payload, fh, indent=2)
-            note = ("\n\nThis is a global fit through the standards of all disks, "
+            note = ("\n\nThis is a global fit through the monitors of all disks, "
                     "so the file also stores the J correlation between holes on "
                     "different disks."
                     if cross else "")
@@ -2975,7 +2580,7 @@ class FluxRegressionCalculator(QMainWindow):
         n = len(coords_perturbed)
         if errors is None:
             errors = np.ones(n)
-        if regression_type in ('2d', 'individual'):
+        if regression_type == 'individual':
             X = np.column_stack([coords_perturbed[:, 0], coords_perturbed[:, 1], np.ones(n)])
             coeffs = _wls(X, values_perturbed, errors)
             P = np.array([[h['coordinates_2d'][0], h['coordinates_2d'][1], 1.0] for h in holes])
@@ -3026,8 +2631,7 @@ class FluxRegressionCalculator(QMainWindow):
                        f"Errors reported as {sigma_str}",
                        "=" * 65]
 
-            # Which fit predicts the disk.  A global 2D / 3D fit predicts any
-            # position.  Individual-disk planes only describe the disks they were
+            # Which fit predicts the disk.  A 3D fit predicts any position.  Individual-disk planes only describe the disks they were
             # fitted to, so the disk(s) fitted at this height are used, each with
             # its own monitors.
             reg_info = getattr(self, 'regression_info', {})
@@ -3044,12 +2648,10 @@ class FluxRegressionCalculator(QMainWindow):
                 fits = [(f"Disk {dd.get('disk_number', '?')} [{dd.get('disk_label', '')}], "
                          f"{len(dd['standard_data'])} monitors",
                          dict(specific_standards=dd['standard_data'],
-                              force_regression_type='2d'))
+                              force_regression_type='individual'))
                         for dd in at_height]
             else:
                 fits = [(None, {})]
-                if reg_info.get('type') == '2d':
-                    results.append("(planar fit through all enabled disks: height not used)")
 
             for fit_label, fit_kw in fits:
                 if fit_label:
@@ -3115,11 +2717,11 @@ class FluxRegressionCalculator(QMainWindow):
                     all_standards.extend(disk_data['standard_data'])
 
             if len(enabled_disks) < 2:
-                QMessageBox.warning(self, "Error", "Need at least 2 enabled disks for method comparison.")
+                QMessageBox.warning(self, "Error", "Need at least 2 enabled disks to compare the methods.")
                 return
 
             if len(all_standards) < 8:
-                QMessageBox.warning(self, "Error", "Need at least 8 total standards for meaningful comparison.")
+                QMessageBox.warning(self, "Error", "Need at least 8 monitors in all to compare the methods.")
                 return
 
             if self._n_heights(all_standards) < 2:
@@ -3144,12 +2746,11 @@ class FluxRegressionCalculator(QMainWindow):
             QMessageBox.critical(self, "Error", f"Method comparison failed: {str(e)}")
 
     def _create_comparison_progress_dialog(self):
-        """Create progress dialog for method comparison."""
         progress_dialog = QDialog(self)
-        progress_dialog.setWindowTitle("Comparing Methods")
+        progress_dialog.setWindowTitle("Comparing methods")
         progress_dialog.setModal(True)
         layout = QVBoxLayout()
-        label = QLabel("Running cross-validation analysis...")
+        label = QLabel("Running cross-validation analysis…")
         progress_bar = QProgressBar()
         layout.addWidget(label)
         layout.addWidget(progress_bar)
@@ -3159,7 +2760,6 @@ class FluxRegressionCalculator(QMainWindow):
         return progress_dialog
 
     def _run_method_comparisons(self, enabled_disks, all_standards, progress_dialog):
-        """Run all method comparisons and return results."""
         results = {}
         layout = progress_dialog.layout()
         label = layout.itemAt(0).widget()
@@ -3169,7 +2769,7 @@ class FluxRegressionCalculator(QMainWindow):
         progress_bar.setValue(10)
         progress_dialog.repaint()
         QApplication.processEvents()
-        label.setText("Testing Individual Disk Regressions...")
+        label.setText("Testing individual disk regressions…")
 
         individual_rmse, individual_aic, individual_params, individual_chi2 = self.cross_validate_individual(enabled_disks)
         # only disks with at least 4 monitors take part in the leave-one-out
@@ -3187,7 +2787,7 @@ class FluxRegressionCalculator(QMainWindow):
         progress_bar.setValue(40)
         progress_dialog.repaint()
         QApplication.processEvents()
-        label.setText("Testing Simple 3D Regression...")
+        label.setText("Testing Simple 3D regression…")
 
         simple_3d_rmse, simple_3d_aic, simple_3d_chi2 = self.cross_validate_3d_regression(all_standards, complex_3d=False)
         results['Simple 3D'] = {
@@ -3203,7 +2803,7 @@ class FluxRegressionCalculator(QMainWindow):
             progress_bar.setValue(70)
             progress_dialog.repaint()
             QApplication.processEvents()
-            label.setText("Testing Complex 3D Regression...")
+            label.setText("Testing Complex 3D regression…")
 
             complex_3d_rmse, complex_3d_aic, complex_3d_chi2 = self.cross_validate_3d_regression(all_standards, complex_3d=True)
             results['Complex 3D'] = {
@@ -3398,7 +2998,7 @@ class FluxRegressionCalculator(QMainWindow):
             return float('inf'), float('inf'), float('inf')
 
     def calculate_uncertainty_realism(self, residuals, predicted_errors, measurement_errors):
-        """Calculate chi-squared statistic to assess uncertainty realism."""
+        """Reduced χ² of the leave-one-out residuals."""
         try:
             if len(residuals) != len(predicted_errors) or len(residuals) == 0:
                 return float('inf')
@@ -3415,14 +3015,13 @@ class FluxRegressionCalculator(QMainWindow):
             return float('inf')
 
     def show_comparison_results(self, results, n_standards):
-        """Show method comparison results in a dialog."""
         dialog = QDialog(self)
-        dialog.setWindowTitle("Method Comparison Results")
+        dialog.setWindowTitle("Method comparison results")
         dialog.setMinimumSize(700, 500)
 
         layout = QVBoxLayout()
 
-        title = QLabel("<h2>Statistical Method Comparison</h2>")
+        title = QLabel("<h2>Statistical method comparison</h2>")
         title.setAlignment(Qt.AlignCenter)
         layout.addWidget(title)
 
@@ -3437,7 +3036,7 @@ class FluxRegressionCalculator(QMainWindow):
 
         # Add buttons
         button_layout = QHBoxLayout()
-        copy_btn = QPushButton("Copy Results")
+        copy_btn = QPushButton("Copy results")
         copy_btn.clicked.connect(lambda: QApplication.clipboard().setText(table_text))
         button_layout.addWidget(copy_btn)
 
@@ -3450,9 +3049,8 @@ class FluxRegressionCalculator(QMainWindow):
         dialog.exec_()
 
     def _generate_comparison_table(self, results, n_standards):
-        """Generate formatted comparison table text."""
-        table_text = f"Total Standards: {n_standards}\n\n"
-        table_text += "Method Comparison Results:\n"
+        table_text = f"Monitors: {n_standards}\n\n"
+        table_text += "Method comparison:\n"
         table_text += "=" * 95 + "\n"
         table_text += f"{'Method':<15} {'CV RMSE':<12} {'AIC':<10} {'χ²ᵣₑᵈ':<8} {'Params':<8} {'Std/Param':<10} {'Rank':<6}\n"
         table_text += "-" * 95 + "\n"
@@ -3470,7 +3068,7 @@ class FluxRegressionCalculator(QMainWindow):
         table_text += "AIC: Akaike information criterion (lower is better).\n"
         table_text += (f"χ²ᵣₑᵈ: reduced χ² of the leave-one-out residuals; inside the Wendt & Carl 95% "
                        f"limits for n = {n_standards} ({max(0.0, 1 - 2 * math.sqrt(2 / n_standards)):.2f}–{mswd_critical(n_standards + 1):.2f}) the "
-                       "uncertainties are realistic, below it too large, above it too small.\n")
+                       "uncertainties are realistic, below them too large, above them too small.\n")
         table_text += "Std/Param: monitors per fitted parameter.\n\n"
 
         # Add recommendation
@@ -3553,7 +3151,7 @@ class FluxRegressionCalculator(QMainWindow):
         layout.addWidget(validation_text)
 
         button_layout = QHBoxLayout()
-        copy_btn = QPushButton("Copy Report")
+        copy_btn = QPushButton("Copy report")
         copy_btn.clicked.connect(lambda: QApplication.clipboard().setText(validation_text.toPlainText()))
         button_layout.addWidget(copy_btn)
 
@@ -3568,12 +3166,12 @@ class FluxRegressionCalculator(QMainWindow):
     def show_hole_stacking_dialog(self):
         """Show the hole stacking alignment configuration dialog."""
         dialog = QDialog(self)
-        dialog.setWindowTitle("Configure Hole Stacking")
+        dialog.setWindowTitle("Configure hole stacking")
         dialog.setMinimumSize(900, 700)
 
         layout = QVBoxLayout()
 
-        title_label = QLabel("<h2>Hole Stacking Configuration</h2>")
+        title_label = QLabel("<h2>Hole stacking configuration</h2>")
         title_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(title_label)
 
@@ -3588,7 +3186,7 @@ class FluxRegressionCalculator(QMainWindow):
         config_widget = QWidget()
         config_layout = QHBoxLayout(config_widget)
 
-        disk_group = QGroupBox("Disk Designs")
+        disk_group = QGroupBox("Disk designs")
         disk_group.setMaximumWidth(400)
         disk_layout = QVBoxLayout(disk_group)
 
@@ -3601,15 +3199,14 @@ class FluxRegressionCalculator(QMainWindow):
             self.disk_selector.addItem(disk_name)
         disk_mgmt_layout.addWidget(self.disk_selector)
 
-        import_btn = QPushButton("Import Design...")
-        import_btn.setStyleSheet("QPushButton { background-color: #3498db; color: white; font-weight: bold; }")
+        import_btn = QPushButton("Import design…")
         import_btn.clicked.connect(self._import_disk_design)
         disk_mgmt_layout.addWidget(import_btn)
 
         disk_layout.addLayout(disk_mgmt_layout)
 
         self.disk_info_label = QLabel()
-        self.disk_info_label.setStyleSheet("font-weight: bold; margin: 5px; padding: 5px; background-color: #ecf0f1;")
+        self.disk_info_label.setStyleSheet("font-weight: bold; margin: 5px; padding: 5px;")
         disk_layout.addWidget(self.disk_info_label)
 
         self.hole_display_table = QTableWidget()
@@ -3623,23 +3220,23 @@ class FluxRegressionCalculator(QMainWindow):
 
         config_layout.addWidget(disk_group)
 
-        alignment_group = QGroupBox("Hole Alignment Configuration")
+        alignment_group = QGroupBox("Hole alignment configuration")
         alignment_layout = QVBoxLayout(alignment_group)
 
-        current_label = QLabel("<b>Current Alignment:</b>")
+        current_label = QLabel("<b>Current alignment:</b>")
         alignment_layout.addWidget(current_label)
 
         default_text = QTextEdit()
         default_text.setMaximumHeight(100)
         default_text.setReadOnly(True)
         default_text.setPlainText(
-            "The center hole (0, 0) is hole 7 of the 7-hole disk, hole 13 of the 13-hole "
+            "The centre hole (0, 0) is hole 7 of the 7-hole disk, hole 13 of the 13-hole "
             "disk and hole 21 of the 21-hole disk. The reference holes chosen below are "
             "taken to sit above one another; the defaults are holes 4, 7 and 1.")
         alignment_layout.addWidget(default_text)
 
         # Configuration options
-        config_label = QLabel("<b>Configure Custom Alignment:</b>")
+        config_label = QLabel("<b>Configure custom alignment:</b>")
         alignment_layout.addWidget(config_label)
 
         # Reference hole selection
@@ -3663,14 +3260,13 @@ class FluxRegressionCalculator(QMainWindow):
         alignment_layout.addLayout(ref_layout)
 
         # Quick center alignment button
-        center_btn = QPushButton("Use the Center Holes")
-        center_btn.setStyleSheet("QPushButton { background-color: #f39c12; color: white; font-weight: bold; }")
+        center_btn = QPushButton("Use the centre holes")
         center_btn.clicked.connect(self._set_center_holes)
-        center_btn.setToolTip("Set the references to the center holes (0, 0)")
+        center_btn.setToolTip("Set the references to the centre holes (0, 0)")
         alignment_layout.addWidget(center_btn)
 
         # Coordinate display
-        coord_label = QLabel("<b>Selected Reference Coordinates:</b>")
+        coord_label = QLabel("<b>Selected reference coordinates:</b>")
         alignment_layout.addWidget(coord_label)
 
         self.coord_display = QTextEdit()
@@ -3689,14 +3285,13 @@ class FluxRegressionCalculator(QMainWindow):
         # Action buttons
         button_layout = QHBoxLayout()
 
-        reset_btn = QPushButton("Reset to Defaults")
+        reset_btn = QPushButton("Reset to defaults")
         reset_btn.clicked.connect(self._reset_hole_stacking_defaults)
         button_layout.addWidget(reset_btn)
 
         button_layout.addStretch()
 
-        apply_btn = QPushButton("Apply Configuration")
-        apply_btn.setStyleSheet("QPushButton { background-color: #27ae60; color: white; font-weight: bold; }")
+        apply_btn = QPushButton("Apply configuration")
         apply_btn.clicked.connect(lambda: self._apply_hole_stacking_config(dialog))
         button_layout.addWidget(apply_btn)
 
@@ -3715,10 +3310,9 @@ class FluxRegressionCalculator(QMainWindow):
         dialog.exec_()
 
     def _import_disk_design(self):
-        """Import a new disk design from file."""
         try:
             filename, _ = dfold.get_open_file_name(
-                self, "Import Disk Design", "",
+                self, "Import disk design", "",
                 "JSON files (*.json);;Text files (*.txt);;All files (*.*)"
             )
 
@@ -3727,12 +3321,12 @@ class FluxRegressionCalculator(QMainWindow):
 
             # Show import dialog
             import_dialog = QDialog(self)
-            import_dialog.setWindowTitle("Import Disk Design")
+            import_dialog.setWindowTitle("Import disk design")
             import_dialog.setMinimumSize(500, 400)
 
             layout = QVBoxLayout()
 
-            layout.addWidget(QLabel("<b>Import New Disk Design</b>"))
+            layout.addWidget(QLabel("<b>Import new disk design</b>"))
             layout.addWidget(QLabel("Enter disk design data in the format: [(x1,y1), (x2,y2), ...]"))
 
             # Name input
@@ -3776,14 +3370,13 @@ class FluxRegressionCalculator(QMainWindow):
             # Buttons
             button_layout = QHBoxLayout()
 
-            parse_btn = QPushButton("Parse && Preview")
+            parse_btn = QPushButton("Parse && preview")
             parse_btn.clicked.connect(lambda: self._preview_import(coord_input.toPlainText(), import_dialog))
             button_layout.addWidget(parse_btn)
 
             button_layout.addStretch()
 
-            import_btn = QPushButton("Import Design")
-            import_btn.setStyleSheet("QPushButton { background-color: #27ae60; color: white; font-weight: bold; }")
+            import_btn = QPushButton("Import design")
             import_btn.clicked.connect(lambda: self._do_import_design(
                 name_input.text(), diam_input.value(), coord_input.toPlainText(), import_dialog
             ))
@@ -3798,7 +3391,7 @@ class FluxRegressionCalculator(QMainWindow):
             import_dialog.exec_()
 
         except Exception as e:
-            QMessageBox.critical(self, "Import Error", f"Failed to import disk design: {str(e)}")
+            QMessageBox.critical(self, "Import error", f"Failed to import disk design: {str(e)}")
 
     def _preview_import(self, coord_text, dialog):
         """Preview imported coordinates."""
@@ -3812,10 +3405,9 @@ class FluxRegressionCalculator(QMainWindow):
 
             QMessageBox.information(dialog, "Preview", preview_text)
         except Exception as e:
-            QMessageBox.warning(dialog, "Parse Error", f"Could not parse coordinates: {str(e)}")
+            QMessageBox.warning(dialog, "Parse error", f"Could not parse coordinates: {str(e)}")
 
     def _parse_coordinates(self, coord_text):
-        """Parse coordinate text in various formats."""
         # Try JSON format first
         try:
             data = json.loads(coord_text)
@@ -3849,7 +3441,6 @@ class FluxRegressionCalculator(QMainWindow):
         raise ValueError("Could not parse coordinate format")
 
     def _do_import_design(self, name, diameter, coord_text, dialog):
-        """Actually import the disk design."""
         try:
             if not name.strip():
                 QMessageBox.warning(dialog, "Error", "Please enter a design name")
@@ -3888,16 +3479,15 @@ class FluxRegressionCalculator(QMainWindow):
             dialog.accept()
 
         except Exception as e:
-            QMessageBox.critical(dialog, "Import Error", f"Failed to import: {str(e)}")
+            QMessageBox.critical(dialog, "Import error", f"Failed to import: {str(e)}")
 
     def _set_center_holes(self):
-        """Set reference holes to the true center holes (0,0 coordinates)."""
+        """Set the reference holes to the centre holes (0, 0)."""
         self.ref_7_hole.setCurrentIndex(6)   # Hole 7 (center)
         self.ref_13_hole.setCurrentIndex(12) # Hole 13 (center)
         self.ref_21_hole.setCurrentIndex(20) # Hole 21 (center)
 
     def _update_disk_display(self):
-        """Update the disk display table based on selected disk."""
         if not hasattr(self, 'disk_selector'):
             return
 
@@ -3931,7 +3521,7 @@ class FluxRegressionCalculator(QMainWindow):
                 hole_item.setBackground(QColor("#fff2cc"))
                 x_item.setBackground(QColor("#fff2cc"))
                 y_item.setBackground(QColor("#fff2cc"))
-                hole_item.setToolTip("Center hole (0,0)")
+                hole_item.setToolTip("Centre hole (0, 0)")
 
             self.hole_display_table.setItem(i, 0, hole_item)
             self.hole_display_table.setItem(i, 1, x_item)
@@ -3940,7 +3530,6 @@ class FluxRegressionCalculator(QMainWindow):
         self.hole_display_table.resizeColumnsToContents()
 
     def _update_reference_coordinates(self):
-        """Update the reference coordinate display."""
         if not hasattr(self, 'coord_display'):
             return
 
@@ -3971,13 +3560,11 @@ class FluxRegressionCalculator(QMainWindow):
         self.coord_display.setPlainText(coord_text)
 
     def _reset_hole_stacking_defaults(self):
-        """Reset hole stacking to default configuration."""
         self.ref_7_hole.setCurrentIndex(3)   # Hole 4 (practical default)
         self.ref_13_hole.setCurrentIndex(6)  # Hole 7 (practical default)
         self.ref_21_hole.setCurrentIndex(0)  # Hole 1 (practical default)
 
     def _apply_hole_stacking_config(self, dialog):
-        """Apply the hole stacking configuration."""
         # Get current selections
         ref_7 = self.ref_7_hole.currentIndex() + 1
         ref_13 = self.ref_13_hole.currentIndex() + 1
@@ -3990,7 +3577,7 @@ class FluxRegressionCalculator(QMainWindow):
         }
 
         # Show confirmation
-        QMessageBox.information(dialog, "Configuration Applied",
+        QMessageBox.information(dialog, "Configuration applied",
                             f"Hole stacking configuration updated:\n"
                             f"• 7-hole disk: Hole {ref_7} as reference\n"
                             f"• 13-hole disk: Hole {ref_13} as reference\n"
@@ -4002,16 +3589,12 @@ class FluxRegressionCalculator(QMainWindow):
     # ── Utility and helper methods ───────────────────────────────────────────
 
     def enable_all_buttons(self):
-        """Helper method to re-enable all calculation buttons consistently."""
-        self.calculate_2d_btn.setEnabled(True)
         self.calculate_3d_btn.setEnabled(True)
         self.calculate_complex_3d_btn.setEnabled(True)
         self.calculate_individual_btn.setEnabled(True)
         self.compare_methods_btn.setEnabled(len(self.disk_widgets) > 1)
 
     def _disable_all_buttons(self):
-        """Disable all calculation buttons during processing."""
-        self.calculate_2d_btn.setEnabled(False)
         self.calculate_3d_btn.setEnabled(False)
         self.calculate_complex_3d_btn.setEnabled(False)
         self.calculate_individual_btn.setEnabled(False)
@@ -4020,12 +3603,16 @@ class FluxRegressionCalculator(QMainWindow):
     def _export_constants_rows(self):
         """[name, value, note] rows of the constants block of the results export."""
         reg = getattr(self, 'regression_info', {})
-        model = {'2d': 'plane through all disks', 'individual': 'one plane per disk',
-                 '3d': '3D'}.get(reg.get('type'), '')
+        model = {'individual': 'one plane per disk', '3d': '3D'}.get(reg.get('type'), '')
         if reg.get('complex_3d'):
             model = '3D with interaction terms'
-        rows = [
-            ['FC age (Ma)', self.standard_age_edit.text(), 'Flux monitor (Fish Canyon sanidine)'],
+        cal = self._cal_cfg()
+        rec = cal.get('route') or {}
+        std = rec.get('standard', 'FCs')
+        rows = [['Calibration', route_text(cal), 'monitor → R values → calibration · λ']] if rec else []
+        rows += [
+            [f'{std} age (Ma)' if rec else 'FC age (Ma)', self.standard_age_edit.text(),
+             f'calibration of {std}' if rec else 'Fish Canyon sanidine (FCs) calibration'],
             ['  ± (Ma, 1σ)', self.standard_age_err_edit.text(), ''],
             ['40K decay constant λ (1/yr)', self.lambda_edit.text(), 'total (ε + β)'],
         ]
@@ -4040,7 +3627,7 @@ class FluxRegressionCalculator(QMainWindow):
             rows.append(['Standards', edited_standards_note(), ''])
         mk = self.monitor_combo.keys()
         if mk['monitor'] != 'FCs':
-            rows += [['Flux monitor', mk['monitor'], 'R values are FCs-equivalent: measured R / R(monitor/FCs)'],
+            rows += [['Flux monitor', mk['monitor'], 'R values are the measured ratios of this monitor'],
                      [f"  R({mk['monitor']}/FCs)", f"{mk['monitorR']:.8g}", f"± {mk['monitorRErr']:.3g} (1σ)"]]
         rows += [
             ['Regression on', 'R (40Ar*/39ArK)' if self.regression_mode == MODE_R else 'J', ''],
@@ -4056,11 +3643,11 @@ class FluxRegressionCalculator(QMainWindow):
         # MSWD of the monitors about the fit, as shown after the calculation
         enabled = [dd for dd in (w.get_disk_data() for w in self.disk_widgets) if dd['enabled']]
         if reg.get('type') == 'individual':
-            fits = [(dd.get('disk_label') or f"Disk {k + 1}", dd['standard_data'], '2d', False)
+            fits = [(dd.get('disk_label') or f"Disk {k + 1}", dd['standard_data'], 'individual', False)
                     for k, dd in enumerate(enabled) if len(dd['standard_data']) >= 3]
         else:
             fits = [('Fit', [st for dd in enabled for st in dd['standard_data']],
-                     reg.get('type', '2d'), bool(reg.get('complex_3d')))]
+                     reg.get('type', '3d'), bool(reg.get('complex_3d')))]
         for label, standards, rtype, cplx in fits:
             mswd, dof, scale = self._lack_of_fit(standards, rtype, cplx)
             if mswd is not None:
@@ -4075,7 +3662,7 @@ class FluxRegressionCalculator(QMainWindow):
         try:
             irr = self.irradiation_edit.text().strip()
             filename, flt = dfold.get_save_file_name(
-                self, "Export Results", (irr or "flux_regression") + ".xlsx", export.save_filter())
+                self, "Export results", (irr or "flux_regression") + ".xlsx", export.save_filter())
             if not filename:
                 return
             filename = export.ensure_ext(filename, flt)
@@ -4106,10 +3693,9 @@ class FluxRegressionCalculator(QMainWindow):
             QMessageBox.critical(self, "Error", f"Export failed: {str(e)}")
 
     def save_session(self):
-        """Save current session to a JSON file."""
         try:
             filename, _ = dfold.get_save_file_name(
-                self, "Save Session", "flux_regression_session.json", "JSON files (*.json)"
+                self, "Save session", "flux_regression_session.json", "JSON files (*.json)"
             )
             if not filename:
                 return
@@ -4287,10 +3873,9 @@ class FluxRegressionCalculator(QMainWindow):
         QMessageBox.information(self, "Flux monitors export imported", "\n".join(msg))
 
     def load_session(self):
-        """Load a previously saved session from a JSON file."""
         try:
             filename, _ = dfold.get_open_file_name(
-                self, "Load Session", "", "JSON files (*.json)"
+                self, "Load session", "", "JSON files (*.json)"
             )
             if not filename:
                 return
@@ -4442,10 +4027,9 @@ class FluxRegressionCalculator(QMainWindow):
             f"  Entered at {input_sigma}σ, reported at {output_sigma}σ; held at 1σ in between.",
             "",
             "Models",
-            "  Planar:      v = ax + by + c                               3 parameters",
+            "  Planar:      v = ax + by + c, one plane per disk           3 parameters per disk",
             "  Simple 3D:   v = ax + by + cz + d                          4 parameters",
             "  Complex 3D:  v = ax + by + cz + d + e·xz + f·yz + g·xy + h·xyz   8 parameters",
-            "  Individual:  one plane per disk                            3 parameters per disk",
             "",
             "Each iteration shifts the monitor positions, draws every monitor value",
             "from its uncertainty and fits the model again.  A monitor hole keeps its",
@@ -4457,7 +4041,7 @@ class FluxRegressionCalculator(QMainWindow):
             "(weighted MSWD above the Wendt & Carl limit), the plane errors are",
             "multiplied by √MSWD.",
             "",
-            "Compare Methods ranks the models by leave-one-out cross-validation",
+            "Compare methods ranks the models by leave-one-out cross-validation",
             "error and also gives the AIC and the reduced χ² of the leave-one-out",
             "residuals, judged against the Wendt & Carl (1991) 95% limits.",
         ]

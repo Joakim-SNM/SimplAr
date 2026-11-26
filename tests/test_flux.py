@@ -459,7 +459,7 @@ def test_jflux_r_mode_mean():
         if d['monitor'][i]:
             continue
         tab = w.predict_j_value(*h['coordinates_3d'], specific_standards=dd['standard_data'],
-                                force_regression_type='2d', n_iterations=2000)[0]
+                                force_regression_type='individual', n_iterations=2000)[0]
         assert abs(d['R'][i] - tab) < 1e-12, (h['hole_number'], d['R'][i], tab)
     ok('unknowns: .jflux R equals the results-table R')
 
@@ -508,7 +508,7 @@ def test_flux_regression_route_chain():
     tcs = am.route_cfg(S.default_route(am.STANDARDS, 'TCs'))
     close(w.monitor_ingrowth(), am.monitor_ingrowth(tcs), 1e-15,
           'values untouched; J here = (e^(λ t_TCs) − 1) / R')
-    w.regression_info = {'type': '2d', 'complex_3d': False}
+    w.regression_info = {'type': 'individual', 'complex_3d': False}
     path = os.path.join(tempfile.mkdtemp(), 'c.jflux')
     fr.dfold.get_save_file_name = lambda *a, **k: (path, '')
     fr.MONTE_CARLO_ITERATIONS = 2000

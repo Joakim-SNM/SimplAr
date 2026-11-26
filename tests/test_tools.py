@@ -595,8 +595,8 @@ def test_arprob_as_sample():
             QMessageBox.question = old_q
         if answer == QMessageBox.Yes:
             assert [x.name for x in b.samples] == ['S0', 'S1', 'S2']
-            for x, ref in zip(b.samples, ages):
-                for u, v in zip(x.ages, ref):
+            for x, want in zip(b.samples, ages):
+                for u, v in zip(x.ages, want):
                     assert abs(u - v) <= 1e-12 * abs(v), (u, v)
             assert b.samples[2].manual[1] == 'out'
             assert b.samples[1].j_cfg['rStd'] == 5.72
@@ -812,10 +812,10 @@ def test_age_distribution_data_box():
     win.input_sigma = 2
     p.data.setPlainText('55.0\t0.2\n56.0\t0.2\n55.5\t0.2')
     p._apply_paste()
-    close_abs(float(p.s.unc_2s[0]), 0.1, 1e-15, 'pasted at 2σ, stored at 1σ')
+    close_abs(float(p.s.unc_1s[0]), 0.1, 1e-15, 'pasted at 2σ, stored at 1σ')
     p.data.setPlainText(p.data.toPlainText().replace('56.0', '56.1'))
     p._apply_paste()
-    assert np.allclose(p.s.unc_2s, 0.1) and abs(p.s.ages[1] - 56.1) < 1e-12, p.s.unc_2s
+    assert np.allclose(p.s.unc_1s, 0.1) and abs(p.s.ages[1] - 56.1) < 1e-12, p.s.unc_1s
     ok('an edit of one line at σ-in 2σ leaves every error at 0.1')
     path = synth.write_arar_files(tempfile.mkdtemp())[0]
     s2 = win.add_sample()
@@ -1017,6 +1017,84 @@ def test_plateau_calibration_dialog():
     am.reload_standards()
 
 
+def test_plateau_paste_calibration():
+    print('Plateau & isochron, pasted data: Calibration… in the column dialog uses routes:')
+    lam = am.LAMBDA_DEFAULT
+    J0, R = 0.0027, [11.30, 11.31, 11.29, 11.30, 11.32, 11.30]
+    t0 = [math.log1p(J0 * r) / lam / 1e6 for r in R]
+    df = pd.DataFrame({'Step': list('ABCDEF'), 'Age (Ma)': t0, 'Err 1s': [0.02] * 6,
+                       'Cum %39Ar': [10, 30, 50, 70, 90, 100], '40/39 ratio': R, 'J': [J0] * 6})
+
+    def paste(monitor=None, compute=True):
+        def run_map(dlg):
+            assert dlg._cb_compute_from_r is not None
+            dlg._cb_compute_from_r.setChecked(compute)
+            if monitor:
+                pl._CalibrationDialog.exec_ = lambda d: (d._mon_cb.setCurrentText(monitor),
+                                                         QDialog.Accepted)[1]
+                dlg._open_recalc()
+                assert monitor in dlg._lbl_recalc.text()
+            return QDialog.Accepted
+        pl.ColumnMappingDialog.exec_ = run_map
+        w = pl.PlateauWindow()
+        w._process_df(df, 'clipboard')
+        return w
+
+    w = paste()
+    assert w.cfg['ageFluxMode'] == 'ratio_J' and 'Phillips' in w._lbl_route.text()
+    close(am.cfg_J(w.cfg)[0], J0, 1e-12, 'no recalculation: the pasted J')
+    close(w.steps_c[0]['age'], t0[0], 1e-9, '  and the pasted age')
+    close(am.cfg_ingrowth(w.cfg) / w.cfg['rStd'], J0, 1e-12, '  R standard from that J')
+
+    w = paste('TCs')
+    assert w.cfg['monitor'] == 'TCs' and w.cfg['route']['steps'][0]['to'] == 'FCs'
+    assert 'TCs' in w._lbl_route.text() and w.cfg['ageFluxMode'] == 'ratio_J'
+    close(am.cfg_J(w.cfg)[0] / J0, 1.0112, 1e-12, 'TCs → FCs → Phillips: J × R(TCs/FCs)')
+    t1 = math.log1p(1.0112 * math.expm1(lam * t0[0] * 1e6)) / lam / 1e6
+    close(w.steps_c[0]['age'], t1, 1e-9, '  and the ages recast with it')
+    assert any(k.startswith('R(TCs/FCs)') for k, _ in am.systematic_components(t1, w.cfg))
+
+    w = paste('TCs', compute=False)
+    assert w.cfg['monitor'] == 'TCs' and w.cfg['ageFluxMode'] != 'ratio_J'
+    close(w.raw_steps[0]['age'], t1, 1e-9, 'without R mode, the stored ages recast the same way')
+
+    # ages from an older study: their constants typed under Advanced
+    def run_old(dlg):
+        def calib(d):
+            d._o_age.setText('28.02')
+            d._o_lam.setText('5.543e-10')
+            return QDialog.Accepted
+        pl._CalibrationDialog.exec_ = calib
+        dlg._cb_compute_from_r.setChecked(False)
+        dlg._open_recalc()
+        assert 'recast' in dlg._lbl_recalc.text()
+        return QDialog.Accepted
+    pl.ColumnMappingDialog.exec_ = run_old
+    w = pl.PlateauWindow()
+    w._process_df(df, 'clipboard')
+    ing1, ing2 = math.expm1(5.543e-10 * 28.02e6), am.monitor_ingrowth(w.cfg)
+    t2 = math.log1p(J0 * ing2 / ing1 * R[0]) / lam / 1e6      # from the pasted R and J
+    close(w.raw_steps[0]['age'], t2, 1e-9, 'older study (28.02 Ma, S&J λ) to Phillips')
+
+    # stack mode, Paste+: the same dialog; the aliquot gets the route
+    def run_stack(dlg):
+        assert dlg._cb_compute_from_r is None
+        pl._CalibrationDialog.exec_ = lambda d: (d._mon_cb.setCurrentText('TCs'), QDialog.Accepted)[1]
+        dlg._open_recalc()
+        return QDialog.Accepted
+    pl.ColumnMappingDialog.exec_ = run_stack
+    pl._PasteAliquotDialog.exec_ = lambda dlg: QDialog.Accepted
+    ws = pl.PlateauWindow()
+    ws._toggle_stack_mode(True)
+    QApplication.clipboard().setText(df.to_csv(sep='\t', index=False))
+    ws._stack_paste_add()
+    sess = ws._sessions[-1]
+    assert sess['cfg']['monitor'] == 'TCs' and sess['cfg']['route']['steps'][0]['to'] == 'FCs'
+    close(sess['raw_steps'][0]['age'], t1, 1e-9, 'stack Paste+: the aliquot recast to TCs')
+    close(am.cfg_J(sess['cfg'])[0] / J0, 1.0112, 1e-12, '  with its J')
+    ok('pasted ages put on a route, with or without R mode, single and stack')
+
+
 def test_age_distribution_calibration():
     print('Age distribution, Calibration…: one bar, samples on different monitors:')
     ad = load('5_age_distribution/age_distribution.py', 'ad_cal')
@@ -1049,7 +1127,7 @@ def test_age_distribution_calibration():
     assert '2 calibrations' in win.route_lbl.text() and not win.mon_info.text()
     ok('A stays on FCs, B moves to TCs; same end calibration, so no warning')
     win.pool_on = True
-    pr = win.pool()
+    win.pool()
     ages = [a.wm()['wm'], b.wm()['wm']]
     C, labels = am.systematic_matrix(ages, [a.j_cfg, b.j_cfg])
     shared = [l for l in labels if (C[:, labels.index(l)] != 0).all()]
@@ -1173,6 +1251,7 @@ if __name__ == '__main__':
     test_age_distribution_data_box()
     test_age_distribution_normalised()
     test_plateau_calibration_dialog()
+    test_plateau_paste_calibration()
     test_age_distribution_calibration()
     test_route_survives_files()
     test_recalculator_and_converter_calibration()

@@ -240,7 +240,8 @@ ASTRONOMICAL_FC_NAMES = {c['name'] for c in _fcs_cals(STANDARDS)
 # R_FCs/astro is stored as the value consistent with each paper's published FCs
 # age, not the value they print. The two differ in the 5th significant figure
 # (Phillips print 4.0819, which implies 28.176473 Ma against their published
-# 28.176) purely from rounding. Using the printed R would shift every age by
+# 28.176) from rounding, and for Kuiper in the 4th (4.3664 on 6.500 Ma implies
+# 28.2135 Ma against the published 28.201). Using the printed R would shift every age by
 # ~0.9 kyr at 55 Ma and put the age on a different FCs age from the one the
 # preset advertises. The relative sigma on R -- the only thing the external
 # uses it for -- changes by 0.002%, i.e. not at all.
@@ -683,8 +684,10 @@ def _flux_monitor_R(d):
 
 
 def flux_hole_measured(fx, i):
-    """The monitor ratio of a hole as measured on the flux's own monitor
-    (the stored R is FCs-equivalent for a monitor other than FCs)."""
+    """The monitor ratio of a hole as measured on the flux's own monitor.
+    Older files store an FCs-equivalent R for a monitor other than FCs, and
+    their monitorR turns it back; newer files store the measured R with
+    monitorR = 1."""
     R = flux_hole_R(fx, i)
     return R * float(fx.get('monitorR') or 1.0) if R else R
 
@@ -1290,7 +1293,7 @@ def cfg_covariance(cfg):
 
 
 def _rvalue_partials(age_ma, t_std_ma, lam):
-    """(dT/dt_std, dT/dλ) in SI-ish units (yr per unit), with R implied by the age."""
+    """(dT/dt_std, dT/dλ [yr²], T [yr]), with R implied by the age."""
     T = age_ma * 1e6
     t_std = t_std_ma * 1e6
     e_std = math.exp(lam * t_std)
@@ -1675,8 +1678,8 @@ def full_systematics_warning(cfg):
     if cls == 'joint':
         return ('Full external (Min et al., 2000) treats the decay constant as '
                 'independent of the monitor age, which does not hold for a jointly '
-                'calibrated λ (Carter et al., 2025). Use Intercalibrated external for '
-                'this calibration, or a calibration on the Min et al. λ for Full external.')
+                'calibrated λ (Carter et al., 2025). Use the intercalibrated external error '
+                'for this calibration, or a calibration on the Min et al. λ for Full external.')
     return ''
 
 
@@ -2119,7 +2122,8 @@ def library_standard(std_id):
 
 
 def standard_age_on(cfg, R=1.0):
-    """Age (Ma) of a monitor with ratio R to FCs on calibration cfg."""
+    """Age (Ma) of a monitor with ratio R to the standard calibrated in cfg
+    (FCs for a cfg without a route)."""
     lam = cfg.get('lambdaYr', LAMBDA_DEFAULT)
     return math.log1p(R * cfg_ingrowth(cfg, lam)) / lam / 1e6
 
@@ -2133,7 +2137,10 @@ def recalculate(age_ma, src_std_age_ma, src_lam, tgt_cfg, R=1.0, R_1s=0.0,
     src_lam         total decay constant they used (yr⁻¹)
     tgt_cfg         target calibration (cfg keys stdAgeMa, stdAgeErrMa,
                     stdAgeErrType, lambdaYr, lambdaErrYr, fullSystematics ...)
-    R, R_1s         the monitor's ratio to FCs and its 1σ (1, 0 for FCs)
+    R, R_1s         the monitor's ratio to the standard the target is a
+                    calibration of (the product of the route's steps), and
+                    a 1σ to add as its own component (0 when the route's
+                    steps carry it); 1, 0 when the monitor is that standard
     R_label         label of the R component, so that ages on the same monitor
                     and the same R share it when combined
 
@@ -2200,19 +2207,20 @@ def reload_standards():
 # --------------------------------------------------------------------------
 # Monitors other than Fish Canyon sanidine
 #
-# A calibration is always a Fish Canyon calibration (stdAgeMa, λ ...); a
-# monitor other than FCs is tied to it by its R relative to FCs from the
-# standards library, R_M/FCs (the one marked "Use").  The cfg then carries
+# A cfg without a route (older files, the data converter, a typed R standard)
+# has a Fish Canyon calibration (stdAgeMa, λ ...), and a monitor other than
+# FCs is tied to it by its R relative to FCs from the standards library,
+# R_M/FCs (the one marked "Use").  The cfg then carries
 #
 #     monitor      the monitor's id ('FCs' when absent)
 #     monitorR     R_M/FCs
 #     monitorRErr  its 1σ
 #
-# A measured monitor ratio R_M becomes the FCs-equivalent R_M / R_M/FCs where
-# it enters (Flux monitors, a typed R standard), so everything downstream is
-# FCs-based; J is the same either way.  The 1σ of R_M/FCs is a systematic
+# and a measured monitor ratio R_M is stored as the FCs-equivalent
+# R_M / R_M/FCs; J is the same either way.  The 1σ of R_M/FCs is a systematic
 # component of the external tier (systematic_components), shared by every age
-# on the same monitor.
+# on the same monitor.  With a route (next section) monitorR is the product of
+# the route's steps instead, and each step has its own component.
 # --------------------------------------------------------------------------
 
 MONITOR_KEYS = ('monitor', 'monitorR', 'monitorRErr')
@@ -2633,7 +2641,7 @@ def edited_standards_note():
 # found by maximum likelihood (Galbraith & Green 1990; Galbraith & Laslett 1993),
 # by the EM algorithm, with uncertainties from the observed information matrix
 # (Galbraith 2005), as in IsoplotR's peakfit (Vermeesch 2018).  The number of
-# components is chosen with the Bayes Information Criterion.
+# components is chosen with the Bayesian information criterion.
 #
 # Minimum age model: one youngest discrete age plus a continuous spread of older
 # analyses, truncated at it (Galbraith et al. 1999), with the normal likelihood

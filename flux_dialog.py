@@ -24,7 +24,7 @@ from PyQt5.QtGui import QColor
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 
-from arar_math import render_disk, force_light, hole_candidates, mono_font
+from arar_math import render_disk, force_light, mono_font
 
 
 def flux_choices(disk_flux):

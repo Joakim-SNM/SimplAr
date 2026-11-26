@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The standards library: Fish Canyon calibrations, ⁴⁰K decay constants and
+"""The standards library: ⁴⁰K decay constants, calibrations, routes and
 neutron-fluence monitors, with its editor and the Monitor dropdown of the tools.
 
 The published values ship in standards_default.json next to this file.  Edits
@@ -11,17 +11,21 @@ correct defaults.  An entry the user deleted is stored as {"name": ...,
 user file elsewhere; the tests set it to an empty location so that they always
 run on the published values.
 
-Three sections, each a list of dicts keyed by "name" (standards by "id"):
+Four sections, each a list of dicts keyed by "name" (standards by "id"):
 
   decay_constants  total ⁴⁰K decay constant (yr⁻¹) and its 1σ
-  calibrations     an age of Fish Canyon sanidine (FCs) with the decay
-                   constant it pairs with, how it was determined (basis
-                   'astronomical', 'joint' or 'k-ar'), the astronomical anchor
-                   when there is one, and cov(λ, t_FCs) for a joint calibration
-  standards        a monitor with its R values relative to FCs, each stored
-                   the way its paper prints it ('ratio': 'std/FCs', the
-                   ⁴⁰Ar*/³⁹Ar_K of the standard over that of FCs, or 'FCs/std')
-                   and the ages published for it
+  calibrations     an age of one standard (Fish Canyon sanidine, FCs, unless
+                   'standard' says otherwise) with the decay constant it pairs
+                   with, how it was determined (basis 'astronomical', 'joint'
+                   or 'k-ar'), the astronomical anchor when there is one, and
+                   cov(λ, t_FCs) for a joint calibration
+  routes           saved routes: a monitor, the R steps between standards,
+                   the calibration they end at and the decay constant
+  standards        a monitor with its R values relative to FCs or another
+                   standard ('other'), each stored the way its paper prints it
+                   ('ratio': 'std/FCs', the ⁴⁰Ar*/³⁹Ar_K of the standard over
+                   that of the other, or 'FCs/std') and the ages published
+                   for it
 
 All uncertainties are 1σ.  arar_math builds its preset tables from the
 library.

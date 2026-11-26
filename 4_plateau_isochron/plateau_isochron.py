@@ -23,7 +23,7 @@ conversion happens only at the I/O boundary (_load_session_data / _steps_to_disk
 Layout of this file, top to bottom
 -----------------------------------
   plateau finder, Ca/K axis, cumulative %39Ar, column auto-detection
-  dialogs: column mapping, age recalculation, quick calibration
+  dialogs: column mapping (with the shared Calibration dialog)
   session persistence (.arar / .ararpt / .ararstack)
   canvases: spectrum (PlateauCanvas), overlay, isochron (IsochronCanvas)
   disk-flux hosts and the combination-statistics dialog (_StatsDialog)
@@ -71,14 +71,14 @@ import pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from arar_math import (
     chi2_cdf, t_crit, LAMBDA_DEFAULT, LAMBDA_ERR, STD_AGE_DEFAULT,
-    STD_AGE_ERR, LAMBDA_PRESETS, FC_PRESETS, weighted_mean,
+    STD_AGE_ERR, weighted_mean,
     combine_ages_vermeesch, mswd_classify, mswd_critical, york_regression,
     cfg_j_err_frac, r_to_age, rr_from_age, fsig, ff,
-    paired_lambda_index, paired_lambda, DEFAULT_STD_AGE_ERR_TYPE,
+    DEFAULT_STD_AGE_ERR_TYPE,
     external_sigma_array, age_error_budget,
     full_systematics_warning, calibration_warning, force_light, no_wheel_on_dropdowns, calibration_group_key,
-    internal_sigma_array, systematic_matrix, dt_dlnR, fc_ingrowth, j_correlation, match_flux_hole, flux_hole_matches,
-    external_route, DEFAULT_FC_NAME, DEFAULT_LAMBDA_NAME,
+    internal_sigma_array, systematic_matrix, dt_dlnR, fc_ingrowth, cfg_ingrowth, j_correlation, match_flux_hole, flux_hole_matches,
+    external_route,
     cfg_J, scale_sem, position_ident, read_jflux, serialize_disk_flux,
     deserialize_disk_flux, merge_disk_flux, flux_hole_R, flux_hole_rel, flux_hole_J,
     isochron_age, draw_budget_pie, combine, file_age_calibration, file_err_div,
@@ -100,21 +100,6 @@ _AGEMODE_LABEL = {
     'ratio_J':     'R mode (insert J)',
     'ratio_R_std': 'R mode',
 }
-
-# recalculation presets: the shared tables plus a Custom row for the dialogs
-_RECALC_LAMBDA_OPTS = LAMBDA_PRESETS + [('Custom…', None, 0.0)]
-_RECALC_FC_OPTS     = FC_PRESETS + [('Custom…', None, 0.0, False)]
-
-
-def _lam_idx(prefix):
-    """Index of the first λ preset whose name starts with prefix."""
-    return next(i for i, r in enumerate(_RECALC_LAMBDA_OPTS) if r[0].startswith(prefix))
-
-
-def _fc_idx(prefix):
-    """Index of the first FC preset whose name starts with prefix."""
-    return next(i for i, r in enumerate(_RECALC_FC_OPTS) if r[0].startswith(prefix))
-
 
 def _alpha_label(i):
     """Step label for index i: A … Z, AA, AB, …"""
@@ -648,11 +633,12 @@ def _recalc_ages_in_steps(steps, lam1, fc1_ma, j1_default, lam2, fc2_ma,
 class ColumnMappingDialog(QDialog):
 
     def __init__(self, headers, detected, parent=None, default_sigma=2,
-                 j_default=None, j_err_default=None):
+                 j_default=None, j_err_default=None, cfg=None, compute_option=True):
         super().__init__(parent)
         self._j_default     = j_default
         self._j_err_default = j_err_default
-        self.setWindowTitle("Column Mapping: Review Auto-Detection")
+        self._cfg           = dict(cfg or _SESSION_CFG_DEFAULTS)
+        self.setWindowTitle("Column mapping: review the auto-detection")
         self.setMinimumWidth(440)
         layout = QVBoxLayout(self)
 
@@ -741,163 +727,32 @@ class ColumnMappingDialog(QDialog):
 
         self._recalc_params = None
         recalc_row = QHBoxLayout()
-        self._btn_recalc = QPushButton("Recalculate ages…")
+        self._btn_recalc = QPushButton("Calibration…")
         self._btn_recalc.setToolTip(
-            "Convert ages to a different decay constant / flux monitor standard")
+            "The calibration to put the pasted ages and J on. Under Advanced: the\n"
+            "constants they were calculated with, if not the current calibration.")
         self._btn_recalc.clicked.connect(self._open_recalc)
         self._lbl_recalc = QLabel("")
+        self._lbl_recalc.setWordWrap(True)
         self._lbl_recalc.setStyleSheet("font-size: 9px; color: #1565c0;")
         recalc_row.addWidget(self._btn_recalc)
         recalc_row.addWidget(self._lbl_recalc, stretch=1)
         layout.addLayout(recalc_row)
 
-        # ── Compute-from-R section ───────────────────────────────────────────
-        # Visible only when both R (r4039) and J (j_val) columns are detected.
-        self._cb_compute_from_r   = None
-        self._compute_lam_le      = None
-        self._compute_lam_err_val = LAMBDA_ERR
-        self._compute_fc_sp       = None
-        self._compute_fc_err_sp   = None
-        self._compute_fc_ext      = True
-        if 'r4039' in detected and 'j_val' in detected:
+        # Compute ages from R and J: offered when both columns are detected.
+        self._cb_compute_from_r = None
+        if compute_option and 'r4039' in detected and 'j_val' in detected:
             sep_r = QFrame()
             sep_r.setFrameShape(QFrame.HLine)
             sep_r.setStyleSheet("color: #ddd; margin-top: 4px;")
             layout.addWidget(sep_r)
-
-            self._cb_compute_from_r = QCheckBox(
-                "Compute ages from R and J  (R mode with J; sets λ, FC age and R_std)")
+            self._cb_compute_from_r = QCheckBox("Compute ages from R and J  (R mode with J)")
             self._cb_compute_from_r.setChecked(True)
             self._cb_compute_from_r.setToolTip(
-                "After pasting, the age source is R mode (insert J), with\n"
-                "R_std = (exp(λ·t_FC) − 1) / J from the λ and FC age set below.\n"
-                "The ages follow when the calibration is changed later.")
+                "After pasting, the age source is R mode (insert J), on the calibration\n"
+                "set with Calibration… above (else the current one). The ages follow\n"
+                "when the calibration is changed later.")
             layout.addWidget(self._cb_compute_from_r)
-
-            _cfr_form = QFormLayout()
-            _cfr_form.setLabelAlignment(Qt.AlignRight)
-            _cfr_form.setContentsMargins(20, 2, 0, 2)
-            _cfr_form.setHorizontalSpacing(6)
-
-            # ── λ row (all presets + Custom) ──────────────────────────────────
-            _lam_opts = _RECALC_LAMBDA_OPTS   # includes Custom at [-1]
-            _compute_lam_cb = QComboBox()
-            _compute_lam_cb.addItems([x[0] for x in _lam_opts])
-            _default_lam_idx = _lam_idx(DEFAULT_LAMBDA_NAME)
-            _compute_lam_cb.setCurrentIndex(_default_lam_idx)
-
-            self._compute_lam_le = QLineEdit()
-            self._compute_lam_le.setMaximumWidth(120)
-            self._compute_lam_le.setPlaceholderText("e.g. 5.543e-10")
-            self._compute_lam_le.setReadOnly(True)
-            self._compute_lam_le.setText(f"{_lam_opts[_default_lam_idx][1]:.6e}")
-            self._compute_lam_err_val = _lam_opts[_default_lam_idx][2]
-
-            def _on_compute_lam(idx, _le=self._compute_lam_le,
-                                _opts=_lam_opts):
-                row = _opts[idx]
-                if row[1] is None:        # Custom
-                    _le.setReadOnly(False)
-                    _le.clear()
-                    _le.setFocus()
-                    self._compute_lam_err_val = 0.0
-                else:
-                    _le.setReadOnly(True)
-                    _le.setText(f"{row[1]:.6e}")
-                    self._compute_lam_err_val = row[2]
-            _compute_lam_cb.currentIndexChanged.connect(_on_compute_lam)
-
-            _lam_row_w = QWidget()
-            _lam_row_l = QHBoxLayout(_lam_row_w)
-            _lam_row_l.setContentsMargins(0, 0, 0, 0)
-            _lam_row_l.setSpacing(4)
-            _lam_row_l.addWidget(_compute_lam_cb)
-            _lam_row_l.addWidget(self._compute_lam_le)
-            _lam_row_l.addWidget(QLabel("yr⁻¹"))
-            _lam_row_l.addStretch()
-            _cfr_form.addRow("λ:", _lam_row_w)
-
-            # ── FC monitor row (all presets + Custom, short labels) ───────────
-            def _fc_short(full):
-                # Return author-year portion before " — ", or full label
-                if ' — ' in full:
-                    return full.split(' — ')[0]
-                return full
-
-            _fc_opts = _RECALC_FC_OPTS             # includes Custom at [-1]
-            _compute_fc_cb = QComboBox()
-            _compute_fc_cb.addItems([_fc_short(x[0]) for x in _fc_opts])
-            _default_fc_idx = _fc_idx(DEFAULT_FC_NAME)
-            _compute_fc_cb.setCurrentIndex(_default_fc_idx)
-            _fcinit = _fc_opts[_default_fc_idx]
-
-            self._compute_fc_sp = QDoubleSpinBox()
-            self._compute_fc_sp.setDecimals(3)
-            self._compute_fc_sp.setRange(0.001, 99999.0)
-            self._compute_fc_sp.setValue(_fcinit[1])
-            self._compute_fc_sp.setEnabled(False)
-            self._compute_fc_sp.setMaximumWidth(90)
-
-            self._compute_fc_err_sp = QDoubleSpinBox()
-            self._compute_fc_err_sp.setDecimals(4)
-            self._compute_fc_err_sp.setRange(0.0, 99.0)
-            self._compute_fc_err_sp.setValue(_fcinit[2])
-            self._compute_fc_err_sp.setEnabled(False)
-            self._compute_fc_err_sp.setMaximumWidth(75)
-            self._compute_fc_ext = _fcinit[3]
-
-            def _on_compute_fc(idx, _sp=self._compute_fc_sp,
-                               _err=self._compute_fc_err_sp,
-                               _opts=_fc_opts):
-                row = _opts[idx]
-                is_custom = (row[1] is None)
-                _sp.setEnabled(is_custom)
-                _err.setEnabled(is_custom)
-                if not is_custom:
-                    _sp.setValue(row[1])
-                    _err.setValue(row[2])
-                    self._compute_fc_ext = row[3]
-                    # follow the λ this calibration is anchored to
-                    li = paired_lambda_index(row[0])
-                    if li is not None:
-                        _compute_lam_cb.setCurrentIndex(li)
-                else:
-                    self._compute_fc_ext = False
-            _compute_fc_cb.currentIndexChanged.connect(_on_compute_fc)
-
-            _fc_row_w = QWidget()
-            _fc_row_l = QHBoxLayout(_fc_row_w)
-            _fc_row_l.setContentsMargins(0, 0, 0, 0)
-            _fc_row_l.setSpacing(4)
-            _fc_row_l.addWidget(_compute_fc_cb)
-            _fc_row_l.addWidget(self._compute_fc_sp)
-            _fc_row_l.addWidget(QLabel("±"))
-            _fc_row_l.addWidget(self._compute_fc_err_sp)
-            _fc_row_l.addWidget(QLabel("Ma"))
-            _fc_row_l.addStretch()
-            _cfr_form.addRow("FC monitor:", _fc_row_w)
-
-            layout.addLayout(_cfr_form)
-
-            def _toggle_compute_rows(checked,
-                                     _lam=_compute_lam_cb, _fc=_compute_fc_cb):
-                _lam.setEnabled(checked)
-                _fc.setEnabled(checked)
-                if checked:
-                    _on_compute_lam(_lam.currentIndex())
-                    _on_compute_fc(_fc.currentIndex())
-                else:
-                    if self._compute_lam_le:
-                        self._compute_lam_le.setReadOnly(True)
-                    if self._compute_fc_sp:
-                        self._compute_fc_sp.setEnabled(False)
-                    if self._compute_fc_err_sp:
-                        self._compute_fc_err_sp.setEnabled(False)
-            self._cb_compute_from_r.toggled.connect(_toggle_compute_rows)
-
-            _note = QLabel("R_std auto-derived from J and FC age · ages update live")
-            _note.setStyleSheet("font-size: 9px; color: #888; margin-left: 20px;")
-            layout.addWidget(_note)
 
         btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         btns.accepted.connect(self.accept)
@@ -933,244 +788,25 @@ class ColumnMappingDialog(QDialog):
         return (self._cb_compute_from_r is not None and
                 self._cb_compute_from_r.isChecked())
 
-    @property
-    def compute_lambda(self):
-        if self._compute_lam_le is not None:
-            try:
-                return float(self._compute_lam_le.text())
-            except ValueError:
-                pass
-        return LAMBDA_DEFAULT
-
-    @property
-    def compute_lam_err(self):
-        return self._compute_lam_err_val
-
-    @property
-    def compute_fc_ma(self):
-        return self._compute_fc_sp.value() if self._compute_fc_sp is not None else STD_AGE_DEFAULT
-
-    @property
-    def compute_fc_err_ma(self):
-        return self._compute_fc_err_sp.value() if self._compute_fc_err_sp is not None else STD_AGE_ERR
-
-    @property
-    def compute_fc_external(self):
-        return self._compute_fc_ext
-
     def _open_recalc(self):
-        mapping = self.get_mapping()
-        has_ratio = 'r4039' in mapping
-        has_j     = 'j_val' in mapping
-        dlg = AgeRecalcDialog(has_ratio=has_ratio, has_j=has_j,
-                              j_default=self._j_default,
-                              j_err_default=self._j_err_default, parent=self)
+        """The shared Calibration dialog: the target calibration on top, the
+        constants the pasted ages and J were calculated with under Advanced
+        (the current calibration unless changed there)."""
+        dlg = CalibrationDialog(self._cfg, parent=self, age_source=False, stored=True)
         if dlg.exec_() == QDialog.Accepted:
-            self._recalc_params = dlg.get_params()
-            p = self._recalc_params
-            orig = f"{p['lam1']*1e10:.4f}×10⁻¹⁰, FC {p['fc1_ma']:.3f} Ma"
-            tgt  = f"{p['lam2']*1e10:.4f}×10⁻¹⁰, FC {p['fc2_ma']:.3f} Ma"
-            self._lbl_recalc.setText(f"✓  {orig}  →  {tgt}")
+            p = dlg.get_params()
+            recast = (abs(p['ing1'] / p['ing2'] - 1.0) > 1e-12
+                      or abs(p['lam1'] / p['lam2'] - 1.0) > 1e-12)
+            p['fc1_ma'] = float(self._cfg.get('stdAgeMa', STD_AGE_DEFAULT))
+            # J for steps without a J column; the recast ages do not depend on it
+            p['j1'] = self._j_default or _recast_j(self._cfg)
+            p['j1_err'] = self._j_err_default or 0.0
+            self._recalc_params = p
+            self._lbl_recalc.setText(f"✓  {route_text(p['route_keys'])}"
+                                     + ("\n   the ages and J are recast to it" if recast else ""))
         else:
             self._recalc_params = None
             self._lbl_recalc.setText("")
-
-
-# --------------------------------------------------------------------------
-# Age recalculation dialog
-# --------------------------------------------------------------------------
-
-class AgeRecalcDialog(QDialog):
-
-    def __init__(self, has_ratio=False, has_j=False, j_default=None,
-                 j_err_default=None, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Recalculate Ages: Decay Constant / FC Conversion")
-        self.setMinimumWidth(500)
-        layout = QVBoxLayout(self)
-
-        def _make_param_group(title, lam_default_idx, fc_default_idx, show_err_ext=False):
-            box = QWidget()
-            bl  = QVBoxLayout(box)
-            bl.setContentsMargins(0, 0, 0, 0)
-            lbl = QLabel(f"<b>{title}</b>")
-            bl.addWidget(lbl)
-            form = QFormLayout()
-            form.setLabelAlignment(Qt.AlignRight)
-
-            lam_cb = QComboBox()
-            lam_cb.addItems([x[0] for x in _RECALC_LAMBDA_OPTS])
-            lam_cb.setCurrentIndex(lam_default_idx)
-            lam_le = QLineEdit()
-            lam_le.setPlaceholderText("e.g. 5.543e-10")
-            lam_le.setEnabled(lam_default_idx == len(_RECALC_LAMBDA_OPTS) - 1)
-            lam_le.setText(f"{_RECALC_LAMBDA_OPTS[lam_default_idx][1] or 5.543e-10:.6e}")
-
-            def _lam_changed(idx, _le=lam_le):
-                val = _RECALC_LAMBDA_OPTS[idx][1]
-                if val is None:
-                    _le.setEnabled(True)
-                    _le.setFocus()
-                else:
-                    _le.setEnabled(False)
-                    _le.setText(f"{val:.6e}")
-            lam_cb.currentIndexChanged.connect(_lam_changed)
-
-            fc_cb = QComboBox()
-            fc_cb.addItems([x[0] for x in _RECALC_FC_OPTS])
-            fc_cb.setCurrentIndex(fc_default_idx)
-            fc_sp = QDoubleSpinBox()
-            fc_sp.setDecimals(3)
-            fc_sp.setRange(0.001, 99999.0)
-            _fc_init = _RECALC_FC_OPTS[fc_default_idx]
-            fc_sp.setValue(_fc_init[1] or 28.201)
-            _custom_fc_idx = len(_RECALC_FC_OPTS) - 1
-            fc_sp.setEnabled(fc_default_idx == _custom_fc_idx)
-
-            fc_err_sp = None
-            fc_ext_cb = None
-            if show_err_ext:
-                fc_err_sp = QDoubleSpinBox()
-                fc_err_sp.setDecimals(4)
-                fc_err_sp.setRange(0.0, 99.0)
-                fc_err_sp.setSuffix(" Ma")
-                fc_err_sp.setValue(_fc_init[2])
-                fc_err_sp.setEnabled(fc_default_idx == _custom_fc_idx)
-
-                fc_ext_cb = QCheckBox("External calibration  (FC age encodes λ uncertainty)")
-                fc_ext_cb.setChecked(_fc_init[3])
-                fc_ext_cb.setEnabled(fc_default_idx == _custom_fc_idx)
-                fc_ext_cb.setToolTip(
-                    "On for calibrations that fix how λ enters: the astronomically\n"
-                    "anchored ages (Kuiper 2008, Rivera 2011, Phillips 2022) and the\n"
-                    "joint fit of Carter et al. (2025), which comes with its own λ\n"
-                    "covariance.\n"
-                    "Off when the FC age does not carry λ (e.g. Renne 2010/2011 used\n"
-                    "as a single value), so the full σ_λ is added.\n\n"
-                    "It only sets how the calibration enters the external tier of\n"
-                    "the plateau age; the step errors stay analytical."
-                )
-
-            def _fc_changed(idx, _sp=fc_sp, _err=fc_err_sp, _ext=fc_ext_cb,
-                            _lam_cb=lam_cb):
-                row = _RECALC_FC_OPTS[idx]
-                is_custom = (idx == _custom_fc_idx)
-                if is_custom:
-                    _sp.setEnabled(True); _sp.setFocus()
-                    if _err is not None: _err.setEnabled(True)
-                    if _ext is not None: _ext.setEnabled(True)
-                else:
-                    _sp.setEnabled(False); _sp.setValue(row[1])
-                    if _err is not None: _err.setEnabled(False); _err.setValue(row[2])
-                    if _ext is not None: _ext.setEnabled(False); _ext.setChecked(row[3])
-                    # follow the λ this calibration is anchored to
-                    li = paired_lambda_index(row[0])
-                    if li is not None:
-                        _lam_cb.setCurrentIndex(li)
-            fc_cb.currentIndexChanged.connect(_fc_changed)
-
-            form.addRow("Decay constant:", lam_cb)
-            form.addRow("λ (yr⁻¹):",      lam_le)
-            form.addRow("Flux monitor:",   fc_cb)
-            form.addRow("FC age (Ma):",    fc_sp)
-            if show_err_ext:
-                form.addRow("FC age ±1σ:", fc_err_sp)
-                form.addRow("",            fc_ext_cb)
-            bl.addLayout(form)
-            return box, lam_cb, lam_le, fc_cb, fc_sp, fc_err_sp, fc_ext_cb
-
-        orig_box, self._o_lam_cb, self._o_lam_le, self._o_fc_cb, self._o_fc_sp, _, _ = \
-            _make_param_group("Original parameters  (used to compute the published ages)",
-                              _lam_idx('Min'), _fc_idx('Kuiper'))
-        tgt_box, self._t_lam_cb, self._t_lam_le, self._t_fc_cb, self._t_fc_sp, \
-            self._t_fc_err_sp, self._t_fc_ext_cb = \
-            _make_param_group("Target parameters  (convert to)",
-                              _lam_idx(DEFAULT_LAMBDA_NAME), _fc_idx(DEFAULT_FC_NAME),
-                              show_err_ext=True)
-
-        layout.addWidget(orig_box)
-
-        # J value, always editable; auto-populated from data when available
-        self._j_row = QWidget()
-        j_lay = QFormLayout(self._j_row)
-        j_lay.setLabelAlignment(Qt.AlignRight)
-        self._j_le    = QLineEdit()
-        self._j_le.setPlaceholderText("e.g. 7.234e-3")
-        if j_default is not None:
-            self._j_le.setText(f"{j_default:.10g}")
-        else:
-            self._j_le.setText("1e-3")
-        self._j_err_le = QLineEdit(
-            f"{j_err_default:.6e}" if j_err_default is not None else "1.6e-7"
-        )
-        j_unit = QLabel("(1σ)")
-        j_unit.setStyleSheet("font-size: 9px; color: #666;")
-        j_val_row = QWidget()
-        jvr = QHBoxLayout(j_val_row)
-        jvr.setContentsMargins(0,0,0,0)
-        jvr.addWidget(self._j_le, stretch=2)
-        jvr.addWidget(QLabel("±"))
-        jvr.addWidget(self._j_err_le, stretch=2)
-        jvr.addWidget(j_unit)
-        if has_j:
-            note_txt = "J column mapped, per-step values used; edit here to override all steps."
-        elif has_ratio:
-            note_txt = "⁴⁰Ar*/³⁹Ar column mapped, J used for error propagation and back-check."
-        else:
-            note_txt = "Required: no ratio or J column mapped."
-        j_note = QLabel(note_txt)
-        j_note.setStyleSheet("font-size: 9px; color: #888;")
-        j_note.setWordWrap(True)
-        j_lay.addRow("J value (1σ):", j_val_row)
-        j_lay.addRow("", j_note)
-        layout.addWidget(self._j_row)
-
-        sep = QFrame(); sep.setFrameShape(QFrame.HLine)
-        sep.setStyleSheet("color: #ddd;")
-        layout.addWidget(sep)
-        layout.addWidget(tgt_box)
-
-        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        btns.accepted.connect(self._validate_and_accept)
-        btns.rejected.connect(self.reject)
-        layout.addWidget(btns)
-
-    def _parse_lambda(self, le):
-        try:
-            v = float(le.text().strip())
-            if v > 0:
-                return v
-        except ValueError:
-            pass
-        return None
-
-    def _validate_and_accept(self):
-        if self._parse_lambda(self._o_lam_le) is None:
-            QMessageBox.warning(self, "Invalid", "Original λ value is not valid.")
-            return
-        if self._parse_lambda(self._t_lam_le) is None:
-            QMessageBox.warning(self, "Invalid", "Target λ value is not valid.")
-            return
-        self.accept()
-
-    def get_params(self):
-        j1 = 0.0; j1_err = 0.0
-        try: j1 = float(self._j_le.text())
-        except ValueError: pass
-        try: j1_err = float(self._j_err_le.text())
-        except ValueError: pass
-        lam2_err = _RECALC_LAMBDA_OPTS[self._t_lam_cb.currentIndex()][2]
-        return dict(
-            lam1         = self._parse_lambda(self._o_lam_le),
-            fc1_ma       = self._o_fc_sp.value(),
-            j1           = j1,
-            j1_err       = j1_err,
-            lam2         = self._parse_lambda(self._t_lam_le),
-            lam2_err     = lam2_err,
-            fc2_ma       = self._t_fc_sp.value(),
-            fc2_err_ma   = self._t_fc_err_sp.value() if self._t_fc_err_sp else 0.0,
-            fc2_external = self._t_fc_ext_cb.isChecked() if self._t_fc_ext_cb else True,
-        )
 
 
 # --------------------------------------------------------------------------
@@ -1195,17 +831,6 @@ def _recast_j(cfg):
     with: the flux J of an R mode, else the typed J."""
     J, _ = cfg_J(cfg)
     return J if J else (cfg.get('jVal', 0.0) or 0.0)
-
-
-def _match_calibration_name(lam, fc_ma, fc_err_ma):
-    """Name of the FC preset matching these constants (with its anchored λ),
-    or None if they do not correspond to a known calibration."""
-    for name, age, err, ext in FC_PRESETS:
-        pl = paired_lambda(name)
-        if (pl is not None and abs(fc_ma - age) < 5e-4
-                and abs(fc_err_ma - err) < 5e-5 and abs(lam - pl[1]) < 1e-14):
-            return name
-    return None
 
 
 _CalibrationDialog = CalibrationDialog        # shared with Age distribution
@@ -3261,7 +2886,7 @@ class _StatsDialog(QDialog):
 
         gathered = self._gather_stack() if mode == 'stack' else self._gather_single()
         if gathered is None:
-            root.addWidget(QLabel("No plateau is defined yet, nothing to summarise."))
+            root.addWidget(QLabel("No plateau is defined yet."))
             b = QPushButton("Close"); b.clicked.connect(self.accept)
             root.addWidget(b)
             return
@@ -3354,9 +2979,9 @@ class _StatsDialog(QDialog):
         if mode == 'stack' and nk != nv:
             note = (f"WM pools all {nk} steps in ratio space (n = steps); GLS + ML "
                     f"combines {nv} plateau ages (n = aliquots). Both use the "
-                    f"shared J / FCs-λ covariance.")
+                    f"shared J and calibration covariance.")
         else:
-            note = ("Both build the same shared-J / FCs-λ covariance. WM scales σₐₙₐ by "
+            note = ("Both build the same shared J and calibration covariance. WM scales σₐₙₐ by "
                     "√MSWD when overdispersed; GLS + ML adds ML overdispersion ω instead.")
         note_lbl = QLabel(note)
         note_lbl.setStyleSheet("color:#666; font-size:11px; padding:2px 2px 0 2px;")
@@ -3809,7 +3434,7 @@ class PlateauWindow(QMainWindow):
         mb = self.menuBar()
 
         fm = mb.addMenu('File')
-        fm.addAction(self._act('Import File…',         self._import_dispatch, 'Ctrl+O'))
+        fm.addAction(self._act('Import file…',         self._import_dispatch, 'Ctrl+O'))
         fm.addAction(self._act('Paste from Clipboard', self._paste_dispatch,  'Ctrl+V'))
         fm.addSeparator()
         fm.addAction(self._act('Save…',                self._save_dispatch,   'Ctrl+S'))
@@ -3819,12 +3444,12 @@ class PlateauWindow(QMainWindow):
         vm.addAction(self._act('Error breakdown (pie)…', self._show_error_breakdown))
 
         em = mb.addMenu('Export')
-        em.addAction(self._act('Export Figure…  (layout + preview)', self.export_figure,
+        em.addAction(self._act('Export figure…  (layout + preview)', self.export_figure,
                                'Ctrl+E'))
-        em.addAction(self._act('Export All Sessions as PDF…',    self.export_all_pdf))
-        em.addAction(self._act('Export All Samples…  (spectrum + isochrons)', self.export_all_samples))
+        em.addAction(self._act('Export all sessions as PDF…',    self.export_all_pdf))
+        em.addAction(self._act('Export all samples…  (spectrum + isochrons)', self.export_all_samples))
         em.addSeparator()
-        em.addAction(self._act('Export Data (XLSX / CSV)',              self.export_csv))
+        em.addAction(self._act('Export data (XLSX / CSV)',              self.export_csv))
 
         # ── Central widget ────────────────────────────────────────────────────
         cw = QWidget()
@@ -3906,14 +3531,14 @@ class PlateauWindow(QMainWindow):
         _itl = QHBoxLayout(self._iso_toggle_widget)
         _itl.setContentsMargins(0, 0, 0, 0)
         _itl.addStretch()
-        self._btn_iso_panel = QPushButton("Switch to Normal Isochron")
+        self._btn_iso_panel = QPushButton("Switch to normal isochron")
         self._btn_iso_panel.setFixedHeight(24)
         self._btn_iso_panel.setStyleSheet(
             "QPushButton { font-size: 11px; padding: 2px 14px; }")
         self._btn_iso_panel.clicked.connect(self._toggle_iso_panel)
         _itl.addWidget(self._btn_iso_panel)
         _itl.addSpacing(12)
-        self._btn_iso_zoom = QPushButton("Show Intercept")
+        self._btn_iso_zoom = QPushButton("Show intercept")
         self._btn_iso_zoom.setFixedHeight(24)
         self._btn_iso_zoom.setStyleSheet(
             "QPushButton { font-size: 11px; padding: 2px 14px; }")
@@ -4039,9 +3664,9 @@ class PlateauWindow(QMainWindow):
         bh = QGridLayout()
         bh.setHorizontalSpacing(4)
         bh.setVerticalSpacing(3)
-        self._btn_paste  = QPushButton("Paste Clipboard")
-        self._btn_import = QPushButton("Import File…")
-        self._btn_reset  = QPushButton("Reset All Selections")
+        self._btn_paste  = QPushButton("Paste clipboard")
+        self._btn_import = QPushButton("Import file…")
+        self._btn_reset  = QPushButton("Reset all selections")
         self._btn_reset.setToolTip(
             "Clear manual exclusions and forced steps on every loaded plateau "
             "(carousel aliquots and stack sessions included), then re-run auto "
@@ -4073,8 +3698,8 @@ class PlateauWindow(QMainWindow):
         sep1.setStyleSheet("color: #ddd;"); dv.addWidget(sep1)
 
         bh2 = QHBoxLayout()
-        self._btn_save = QPushButton("Save Session…")
-        self._btn_load = QPushButton("Load Session(s)…")
+        self._btn_save = QPushButton("Save session…")
+        self._btn_load = QPushButton("Load session(s)…")
         self._btn_save.clicked.connect(self._save_dispatch)
         self._btn_load.clicked.connect(self._load_dispatch)
         bh2.addWidget(self._btn_save)
@@ -4083,7 +3708,7 @@ class PlateauWindow(QMainWindow):
 
         # Mode toggles, Stack and Isochron (mutually exclusive)
         mode_row = QHBoxLayout()
-        self._btn_stack_mode = QPushButton("Stack Mode")
+        self._btn_stack_mode = QPushButton("Stack mode")
         self._btn_stack_mode.setCheckable(True)
         self._btn_stack_mode.setToolTip(
             "Switch to multi-aliquot overlay mode.\n"
@@ -4112,7 +3737,7 @@ class PlateauWindow(QMainWindow):
         np_lay.setContentsMargins(0, 0, 0, 0)
         np_lay.setSpacing(3)
 
-        self._btn_pick = QPushButton("Pick Plateau")
+        self._btn_pick = QPushButton("Pick plateau")
         self._btn_pick.setCheckable(True)
         self._btn_pick.setToolTip(
             "When active, click steps to add/remove them from the plateau directly")
@@ -4166,7 +3791,7 @@ class PlateauWindow(QMainWindow):
             ['#', 'Sample / Label', 'Age ±2σ (Ma)', '✕', 'J grp'])
         self.sample_tree.setToolTip(
             '✕ column: check the box to exclude an aliquot from the combined plateau age.\n'
-            'The aliquot is still displayed on the plot but grayed out.\n\n'
+            'The aliquot is still displayed on the plot but greyed out.\n\n'
             'J grp: without a loaded disk flux, sessions with the same label are\n'
             'taken to share J (ρ = 1), so their J error does not average down.\n'
             'Filled in from the disk letter of the irradiation label\n'
@@ -4194,7 +3819,7 @@ class PlateauWindow(QMainWindow):
                         ('↓', self._stack_move_down)]:
             b = QPushButton(lbl); b.clicked.connect(fn); brow.addWidget(b)
         brow.addStretch()
-        self._btn_copy_ages = QPushButton("Copy Ages")
+        self._btn_copy_ages = QPushButton("Copy ages")
         self._btn_copy_ages.setToolTip(
             "Copy plateau ages to the clipboard, tab-separated:\n"
             "label \u2502 age \u2502 \u00b12\u03c3 analytical \u2502 \u00b12\u03c3 internal (+J).\n"
@@ -4237,11 +3862,11 @@ class PlateauWindow(QMainWindow):
             bh3.addWidget(b)
         dv.addLayout(bh3)
 
-        btn_eall = QPushButton("Save All Sessions as PDF…")
+        btn_eall = QPushButton("Save all sessions as PDF…")
         btn_eall.clicked.connect(self.export_all_pdf)
         btn_eall.setStyleSheet("font-size:10px;")
         dv.addWidget(btn_eall)
-        btn_eiso = QPushButton("Export All Samples…")
+        btn_eiso = QPushButton("Export all samples…")
         btn_eiso.setToolTip("One page per sample: the age spectrum with the inverse and "
                             "normal isochron underneath. Choose panels, size and text.")
         btn_eiso.clicked.connect(self.export_all_samples)
@@ -4263,7 +3888,7 @@ class PlateauWindow(QMainWindow):
             lbl.setStyleSheet("font-weight:bold; font-size:11px; margin-top:8px; color:#333;")
             return lbl
 
-        form.addRow(_hd("Plateau Definition"))
+        form.addRow(_hd("Plateau definition"))
         self._sp_minPct = QDoubleSpinBox()
         self._sp_minPct.setRange(0,100); self._sp_minPct.setSingleStep(1); self._sp_minPct.setSuffix(' %')
         self._sp_minPct.setValue(self.cfg['minPct']); self._sp_minPct.valueChanged.connect(self._on_cfg)
@@ -4279,7 +3904,7 @@ class PlateauWindow(QMainWindow):
         self._sp_pCut.setValue(self.cfg['pCut']); self._sp_pCut.valueChanged.connect(self._on_cfg)
         form.addRow("Min. p-value (≥):", self._sp_pCut)
 
-        form.addRow(_hd("Error Calculation"))
+        form.addRow(_hd("Error calculation"))
         self._cb_errMode = QComboBox()
         self._cb_errMode.addItem("SEM\u00b7\u221aMSWD\u00b7t(n\u22121) if p < cutoff, else SEM\u00d72", 'sem_mswd')
         self._cb_errMode.addItem("SEM\u00d72, \u00d7\u221aMSWD if MSWD > 95% limit(n)", 'sem_mswd_2s')
@@ -4333,7 +3958,7 @@ class PlateauWindow(QMainWindow):
         _ratio_l.addStretch()
         form.addRow("Ratio:", _ratio_w)
 
-        self._lbl_flux_hd = _hd("Age & Flux Calibration")
+        self._lbl_flux_hd = _hd("Age & flux calibration")
         form.addRow(self._lbl_flux_hd)
         self._cb_ageFluxMode = QComboBox()
         self._cb_ageFluxMode.addItem("Imported ages",     'imported')
@@ -4360,9 +3985,9 @@ class PlateauWindow(QMainWindow):
         self._btn_sp_flux.clicked.connect(self._open_single_flux)
         self._btn_calibrate = QPushButton("Calibration…")
         self._btn_calibrate.setToolTip(
-            "Choose the age source (R mode / R mode with J / imported ages) and\n"
-            "recalculate loaded step ages to a different decay constant / FC\n"
-            "standard. Applies to every aliquot when 'Apply to all' is ticked.")
+            "Choose the age source (R mode / R mode with J / imported ages) and the\n"
+            "calibration (monitor, route and decay constant); the loaded step ages are\n"
+            "recast to it. Applies to every aliquot when 'Apply to all' is ticked.")
         self._btn_calibrate.clicked.connect(self._open_calibrate)
         self._lbl_sp_flux_state = QLabel("(none)")
         self._lbl_sp_flux_state.setStyleSheet("color:#555;")
@@ -4514,7 +4139,7 @@ class PlateauWindow(QMainWindow):
         _sfs_lay = QVBoxLayout(self._stack_flux_section)
         _sfs_lay.setContentsMargins(0, 6, 0, 0)
         _sfs_lay.setSpacing(4)
-        _lbl_fg = QLabel("Flux Calibration Groups")
+        _lbl_fg = QLabel("Flux calibration groups")
         _lbl_fg.setStyleSheet(
             "font-weight:bold; font-size:11px; margin-top:4px; color:#333;")
         _sfs_lay.addWidget(_lbl_fg)
@@ -4529,7 +4154,7 @@ class PlateauWindow(QMainWindow):
         self._rb_gls = QRadioButton("GLS + ML")
         self._rb_gls.setToolTip(
             "Generalised least squares + ML overdispersion (Vermeesch 2015 \u00a713):\n"
-            "combine per-session plateau ages using the shared-J / FCs-\u03bb covariance,\n"
+            "combine per-session plateau ages using the shared J and calibration covariance,\n"
             "with the J correlation between holes from a loaded .jflux (\u03c1 between\n"
             "0 and 1).\n"
             "Both options use the same covariance; this one changes the estimator.\n"
@@ -4571,13 +4196,13 @@ class PlateauWindow(QMainWindow):
         _brow.addWidget(self._btn_disk_flux)
         self._btn_calib_stack = QPushButton("Calibration\u2026")
         self._btn_calib_stack.setToolTip(
-            "Recalculate all loaded step ages to a different decay constant / FC standard.")
+            "Recalculate the ages of all loaded aliquots on another calibration.")
         self._btn_calib_stack.clicked.connect(self._open_calibrate)
         _brow.addWidget(self._btn_calib_stack)
         _brow.addStretch()
         _sfs_lay.addLayout(_brow)
-        self._lbl_flux_status = QLabel("No disk flux loaded, GLS + ML falls back "
-                                       "to binary disk grouping.")
+        self._lbl_flux_status = QLabel("No disk flux loaded: aliquots on the same disk share one J, "
+                                       "others are independent.")
         self._lbl_flux_status.setStyleSheet("color:#888; font-size:9px; font-style:italic;")
         self._lbl_flux_status.setWordWrap(True)
         _sfs_lay.addWidget(self._lbl_flux_status)
@@ -4680,7 +4305,7 @@ class PlateauWindow(QMainWindow):
         if data is None:
             QMessageBox.information(
                 self, 'Age breakdown',
-                'No plateau found to break down, load data or adjust settings.')
+                'No plateau to break down: load data or adjust the settings.')
             return
         age, e_ana, e_int, e_ext, r, cfg, title = data
         _age_dec = max(cfg.get('ageDec', 3), 3)
@@ -4867,7 +4492,8 @@ class PlateauWindow(QMainWindow):
             lbl.setText(f"{disk}/{hole}  ({irr})")
 
     def _open_calibrate(self):
-        """Recalibrate already-loaded step ages to a new decay constant / FC standard.
+        """Recalibrate already-loaded step ages to another calibration (monitor,
+        route and decay constant).
 
         Works in both single and stack mode.  Old constants are read from cfg;
         _recalc_ages_in_steps is applied in-place to raw_steps / session raw_steps.
@@ -5111,7 +4737,7 @@ class PlateauWindow(QMainWindow):
             orig_cfg   = getattr(self, '_orig_calib_cfg', {})
             if orig_steps is None:
                 QMessageBox.information(self, "Revert",
-                    "No original snapshot found, load a file first.")
+                    "Nothing to revert to: load a file first.")
                 return
             self.raw_steps = copy.deepcopy(orig_steps)
             self.cfg.update(orig_cfg)
@@ -5398,7 +5024,7 @@ class PlateauWindow(QMainWindow):
             parts.append(
                 f"Total-gas age: {ir['mean']:{_af}} \u00b1 {e_show:{_af}} Ma ({sig_lbl})")
         if not self.plateau and self.raw_steps:
-            parts.append("No plateau found, adjust settings or force steps manually")
+            parts.append("No plateau found: adjust the settings or force steps by hand")
 
         # Age source mode
         mode_lbl = _AGEMODE_LABEL.get(self.cfg.get('ageFluxMode', 'imported'), 'imported')
@@ -5842,7 +5468,7 @@ class PlateauWindow(QMainWindow):
     # ── Import ────────────────────────────────────────────────────────────────
     def import_file(self):
         path, _ = dfold.get_open_file_name(
-            self, "Import Data", "",
+            self, "Import data", "",
             "Excel / CSV (*.xlsx *.csv);;All files (*)")
         if not path:
             return
@@ -5851,14 +5477,14 @@ class PlateauWindow(QMainWindow):
                   if path.lower().endswith('.csv')
                   else pd.read_excel(path))
         except Exception as exc:
-            QMessageBox.critical(self, "Import Error", str(exc))
+            QMessageBox.critical(self, "Import error", str(exc))
             return
         self._process_df(df, os.path.basename(path))
 
     def paste_data(self):
         text = QApplication.clipboard().text().strip()
         if not text:
-            QMessageBox.warning(self, "Clipboard Empty",
+            QMessageBox.warning(self, "Clipboard empty",
                                 "Nothing found in clipboard.")
             return
         import io
@@ -5877,7 +5503,7 @@ class PlateauWindow(QMainWindow):
             else:
                 self._import_positional(df)
         except Exception as exc:
-            QMessageBox.critical(self, "Paste Error", str(exc))
+            QMessageBox.critical(self, "Paste error", str(exc))
 
     def _sync_j_from_steps(self, steps):
         """Update jVal / jErrPct in the settings tab from per-step J data (no recalc needed)."""
@@ -5999,50 +5625,39 @@ class PlateauWindow(QMainWindow):
             _recalc_ages_in_steps(steps,
                                   rp['lam1'], rp['fc1_ma'], rp['j1'],
                                   rp['lam2'], rp['fc2_ma'],
-                                  fc2_err_ma=rp.get('fc2_err_ma', 0.0))
+                                  fc2_err_ma=rp.get('fc2_err_ma', 0.0),
+                                  ing1=rp['ing1'], ing2=rp['ing2'])
+            prod_old = cfg_monitor(self.cfg)[1]
             self._sync_settings_after_recalc(rp, steps)
+            set_route(self.cfg, rp['route_keys'])
+            if self.cfg.get('rStd'):
+                self.cfg['rStd'] = self.cfg['rStd'] * prod_old / cfg_monitor(self.cfg)[1]
+            self._le_rStd.blockSignals(True)
+            self._le_rStd.setText(f"{from_fcs_r(self.cfg.get('rStd', 70.0), self.cfg):.11g}")
+            self._le_rStd.blockSignals(False)
+            self._show_route_line()
         if dlg.compute_from_r:
-            self._apply_compute_from_r(steps, dlg)
+            self._apply_compute_from_r(steps)
 
-    def _apply_compute_from_r(self, steps, dlg):
-        """Switch to ratio_J mode using the dialog's λ / FC inputs (the dialog's
-        "Compute ages from R and J" option).  R_std is back-computed from the
-        median J so the existing R ratios reproduce the chosen ages."""
-        _cfr_lam     = dlg.compute_lambda
-        _cfr_lam_err = dlg.compute_lam_err
-        _cfr_fc_ma   = dlg.compute_fc_ma
-        _cfr_fc_err  = dlg.compute_fc_err_ma
-        _cfr_fc_ext  = dlg.compute_fc_external
-        _j_med_list  = [s.get('j_val', 0.0) for s in steps if s.get('j_val', 0.0) > 0]
+    def _apply_compute_from_r(self, steps):
+        """Switch to R mode with J (the column dialog's "Compute ages from R and
+        J" option) on the calibration in cfg: the one set with Calibration… in
+        that dialog, else the current one.  R_std is back-computed from the
+        median J, so the R ratios reproduce the ages of that J."""
+        _j_med_list = [s.get('j_val', 0.0) for s in steps if s.get('j_val', 0.0) > 0]
         _j_med = float(np.median(_j_med_list)) if _j_med_list else self.cfg.get('jVal', 1e-3)
-        _cfr_r_std = (fc_ingrowth(_cfr_fc_ma, _cfr_lam, _cfr_fc_err) / _j_med
-                      if _j_med > 0 else 70.0)
-        self.cfg.update({
-            'ageFluxMode':   'ratio_J',
-            'lambdaYr':      _cfr_lam,
-            'lambdaErrYr':   _cfr_lam_err,
-            'stdAgeMa':      _cfr_fc_ma,
-            'stdAgeErrMa':   _cfr_fc_err,
-            'stdAgeErrType': 'external' if _cfr_fc_ext else 'internal',
-            'rStd':          _cfr_r_std,
-        })
+        if _j_med > 0:
+            self.cfg['rStd'] = cfg_ingrowth(self.cfg) / _j_med
+        self.cfg['ageFluxMode'] = 'ratio_J'
         for _i in range(self._cb_ageFluxMode.count()):
             if self._cb_ageFluxMode.itemData(_i) == 'ratio_J':
                 self._cb_ageFluxMode.blockSignals(True)
                 self._cb_ageFluxMode.setCurrentIndex(_i)
                 self._cb_ageFluxMode.blockSignals(False)
                 break
-        for _le, _txt in [
-            (self._le_lambda,    f"{_cfr_lam:.6e}"),
-            (self._le_lambdaErr, f"{_cfr_lam_err:.6e}"),
-            (self._le_stdAge,    f"{_cfr_fc_ma:.4f}"),
-            (self._le_stdAgeErr, f"{_cfr_fc_err:.4f}"),
-            (self._le_rStd,      f"{from_fcs_r(_cfr_r_std, self.cfg):.6g}"),
-        ]:
-            _le.blockSignals(True)
-            _le.setText(_txt)
-            _le.blockSignals(False)
-        self._std_age_err_type = 'external' if _cfr_fc_ext else 'internal'
+        self._le_rStd.blockSignals(True)
+        self._le_rStd.setText(f"{from_fcs_r(self.cfg.get('rStd', 70.0), self.cfg):.6g}")
+        self._le_rStd.blockSignals(False)
         self._update_flux_ui()
 
     def _process_df(self, df, source=''):
@@ -6064,7 +5679,8 @@ class PlateauWindow(QMainWindow):
         _j_default     = _col_median('j_val')
         _j_err_default = _col_median('j_err')
         dlg = ColumnMappingDialog(headers, detected, self, default_sigma=2,
-                                  j_default=_j_default, j_err_default=_j_err_default)
+                                  j_default=_j_default, j_err_default=_j_err_default,
+                                  cfg=self.cfg)
         if dlg.exec_() != QDialog.Accepted:
             return
         mapping = dlg.get_mapping()
@@ -6072,7 +5688,7 @@ class PlateauWindow(QMainWindow):
         required = ['age', 'pct39ar']
         missing  = [COLUMN_LABELS[k] for k in required if k not in mapping]
         if missing:
-            QMessageBox.critical(self, "Missing Columns",
+            QMessageBox.critical(self, "Missing columns",
                                  "Required columns not mapped:\n  " + '\n  '.join(missing))
             return
 
@@ -6128,7 +5744,7 @@ class PlateauWindow(QMainWindow):
                 continue
 
         if not steps:
-            QMessageBox.warning(self, "No Valid Data",
+            QMessageBox.warning(self, "No valid data",
                                 "No valid rows found in the imported data.")
             return
         self._finalize_parsed_steps(steps, dlg)
@@ -6160,7 +5776,7 @@ class PlateauWindow(QMainWindow):
         if len(self._carousel) >= 2:
             self._carousel_save_current()   # flush active window state to slot
             path, _ = dfold.get_save_file_name(
-                self, f"Save All {len(self._carousel)} Sessions",
+                self, f"Save all {len(self._carousel)} sessions",
                 self.title_edit.text().replace(' ', '_') or 'sessions',
                 "Ar-Ar Stack (*.ararstack);;All files (*)")
             if not path:
@@ -6209,15 +5825,15 @@ class PlateauWindow(QMainWindow):
                     self, "Saved",
                     f"Saved {len(sess_list)} sessions to:\n{path}")
             except Exception as e:
-                QMessageBox.critical(self, "Save Error", str(e))
+                QMessageBox.critical(self, "Save error", str(e))
             return
 
         # ── Single mode ───────────────────────────────────────────────────────
         if not self.raw_steps:
-            QMessageBox.warning(self, "No Data", "No data to save.")
+            QMessageBox.warning(self, "No data", "No data to save.")
             return
         path, _ = dfold.get_save_file_name(
-            self, "Save Session",
+            self, "Save session",
             self.title_edit.text().replace(' ', '_') or 'session',
             "Ar-Ar Plateau (*.arar *.ararpt);;All files (*)")
         if not path:
@@ -6243,11 +5859,11 @@ class PlateauWindow(QMainWindow):
                 json.dump(out, f, indent=2)
             QMessageBox.information(self, "Saved", f"Session saved:\n{path}")
         except Exception as e:
-            QMessageBox.critical(self, "Save Error", str(e))
+            QMessageBox.critical(self, "Save error", str(e))
 
     def load_session(self):
         paths, _ = dfold.get_open_file_names(
-            self, "Load Session(s)", "",
+            self, "Load session(s)", "",
             "All Ar-Ar files (*.arar *.ararpt *.ararstack);;"
             "Ar-Ar Plateau (*.arar *.ararpt);;"
             "Ar-Ar Stack / Carousel (*.ararstack);;"
@@ -6300,7 +5916,7 @@ class PlateauWindow(QMainWindow):
                     '_path':          path,
                 })
             except Exception as e:
-                QMessageBox.critical(self, "Load Error",
+                QMessageBox.critical(self, "Load error",
                                      f"{os.path.basename(path)}:\n{e}")
 
         if not slots:
@@ -6328,7 +5944,7 @@ class PlateauWindow(QMainWindow):
             ok, info = _check_rstd_age_consistency(self.raw_steps, self.cfg)
             if not ok:
                 QMessageBox.warning(
-                    self, "Age Mismatch: ratio_R_std",
+                    self, "Age mismatch",
                     f"The ages recomputed from the 40Ar/39Ar ratios do not match\n"
                     f"the imported ages stored in this file.\n\n"
                     f"{info}\n\n"
@@ -6467,7 +6083,7 @@ class PlateauWindow(QMainWindow):
             self._btn_flux_apply_all.setVisible(active)
         if hasattr(self, '_btn_save') and not self._stack_mode:
             self._btn_save.setText(
-                f"Save {n} Sessions…" if active else "Save Session…")
+                f"Save {n} sessions…" if active else "Save session…")
         if not active:
             return
         self._carousel_combo.blockSignals(True)
@@ -6742,7 +6358,7 @@ class PlateauWindow(QMainWindow):
                     'flux_hole':      tuple(_fh) if _fh else None,
                 })
             except Exception as e:
-                QMessageBox.critical(self, "Load Error",
+                QMessageBox.critical(self, "Load error",
                                      f"{os.path.basename(path)}:\n{e}")
         if len(self._carousel) >= 2:
             self._carousel_load_slot(len(self._carousel) - 1)
@@ -6790,12 +6406,12 @@ class PlateauWindow(QMainWindow):
             with open(path, encoding='utf-8') as f:
                 state = json.load(f)
             if state.get('format') != 'ararstack_v1':
-                QMessageBox.warning(self, 'Unknown Format',
+                QMessageBox.warning(self, 'Unknown format',
                                     'Not a valid stack/carousel file.')
                 return
             sessions_data = state.get('sessions', [])
             if not sessions_data:
-                QMessageBox.warning(self, 'Empty File',
+                QMessageBox.warning(self, 'Empty file',
                                     'No sessions found in the file.')
                 return
 
@@ -6854,7 +6470,7 @@ class PlateauWindow(QMainWindow):
                 self._carousel_refresh_ui()
 
         except Exception as e:
-            QMessageBox.critical(self, 'Load Error', str(e))
+            QMessageBox.critical(self, 'Load error', str(e))
 
     # ── Data / selection helpers ──────────────────────────────────────────────
     def _reset_selections(self):
@@ -6925,8 +6541,8 @@ class PlateauWindow(QMainWindow):
             # Reset to inverse (default) whenever isochron mode is opened
             self.isochron_canvas._showing_inverse = True
             self.isochron_canvas._iso_zoom = 'data'
-            self._btn_iso_panel.setText("Switch to Normal Isochron")
-            self._btn_iso_zoom.setText("Show Intercept")
+            self._btn_iso_panel.setText("Switch to normal isochron")
+            self._btn_iso_zoom.setText("Show intercept")
             self._iso_lims_to_fields()
         # Isochron coexists with stack or single mode, uses whichever is active.
         self._canvas_stack.setCurrentIndex(
@@ -6938,7 +6554,7 @@ class PlateauWindow(QMainWindow):
         inv = not self.isochron_canvas._showing_inverse
         self.isochron_canvas._showing_inverse = inv
         self._btn_iso_panel.setText(
-            "Switch to Normal Isochron" if inv else "Switch to Inverse Isochron")
+            "Switch to normal isochron" if inv else "Switch to inverse isochron")
         self._iso_lims_to_fields()
         self._do_redraw_isochron()
 
@@ -6946,7 +6562,7 @@ class PlateauWindow(QMainWindow):
         """Toggle between data-focused and intercept-showing zoom."""
         show_int = self.isochron_canvas._iso_zoom == 'data'
         self.isochron_canvas._iso_zoom = 'intercept' if show_int else 'data'
-        self._btn_iso_zoom.setText("Zoom to Data" if show_int else "Show Intercept")
+        self._btn_iso_zoom.setText("Zoom to data" if show_int else "Show intercept")
         self._do_redraw_isochron()
 
     @property
@@ -6968,8 +6584,8 @@ class PlateauWindow(QMainWindow):
             if self._disk_flux:
                 self._refresh_flux_status()
             else:
-                lbl.setText("No disk flux loaded, GLS + ML falls back "
-                            "to binary disk grouping.")
+                lbl.setText("No disk flux loaded: aliquots on the same disk share one J, "
+                            "others are independent.")
                 lbl.setStyleSheet("color:#888; font-size:9px; font-style:italic;")
                 lbl.setToolTip('')
         self._refresh_sp_flux_state()
@@ -6983,10 +6599,10 @@ class PlateauWindow(QMainWindow):
         self._mode_stack.setCurrentIndex(idx)
 
         # Sidebar button labels
-        self._btn_save.setText("Save Stack…"    if enabled else "Save Session…")
-        self._btn_load.setText("Load Stack…"    if enabled else "Load Session(s)…")
-        self._btn_paste.setText("Paste+ Add Aliquot" if enabled else "Paste Clipboard")
-        self._btn_import.setText("Load .ararpt file(s)…" if enabled else "Import File…")
+        self._btn_save.setText("Save stack…"    if enabled else "Save session…")
+        self._btn_load.setText("Load stack…"    if enabled else "Load session(s)…")
+        self._btn_paste.setText("Paste+ add aliquot" if enabled else "Paste clipboard")
+        self._btn_import.setText("Load .ararpt file(s)…" if enabled else "Import file…")
         # Reset works on every loaded plateau, in stack mode as in single mode
         self._btn_reset.setVisible(True)
 
@@ -7269,7 +6885,7 @@ class PlateauWindow(QMainWindow):
             iso.insert(k, export.Option(
                 'iso_legend', 'Aliquot legend on this page', 'bool', False,
                 group='Isochron', page=1,
-                tip='Off: the legend on page 1 serves, the colours are the '
+                tip='Off: the legend on page 1 serves, as the colours are the '
                     'same. Tick it for an isochron used on its own.'))
         opts += iso
         return opts
@@ -7881,7 +7497,7 @@ class PlateauWindow(QMainWindow):
         ]
 
     def _batch_options(self):
-        """Switches of the 'Export All Samples' dialog: what the spectrum shows,
+        """Switches of the 'Export all samples' dialog: what the spectrum shows,
         the isochron switches, which samples, one PDF or one file each, and the
         text size.  Axis ranges are left out: every sample uses its own."""
         n = len(self._stack_slots()) if self._stack_mode else len(self._carousel)
@@ -8083,11 +7699,11 @@ class PlateauWindow(QMainWindow):
         age spectrum and the isochrons."""
         if self._stack_mode:
             if not self._stack_slots():
-                QMessageBox.information(self, "Export All Samples",
+                QMessageBox.information(self, "Export all samples",
                                         "No sessions loaded.")
                 return
         elif not self._carousel and not self.raw_steps:
-            QMessageBox.information(self, "Export All Samples", "No sessions loaded.")
+            QMessageBox.information(self, "Export all samples", "No sessions loaded.")
             return
         dlg = export.FigureExportDialog(
             self, 'plateau_all_samples', self._batch_panels(),
@@ -8110,11 +7726,11 @@ class PlateauWindow(QMainWindow):
         n = len(self._carousel)
         if self._stack_mode or self._isochron_mode:
             QMessageBox.information(
-                self, "Export All",
-                "Export All Sessions is only available in single-session (carousel) mode.")
+                self, "Export all",
+                "Export all sessions is only available in single-session (carousel) mode.")
             return
         if n == 0 and not self.raw_steps:
-            QMessageBox.information(self, "Export All", "No sessions loaded.")
+            QMessageBox.information(self, "Export all", "No sessions loaded.")
             return
 
         # Build the list of slots to export:
@@ -8131,7 +7747,7 @@ class PlateauWindow(QMainWindow):
 
         # ── Ask for save path ────────────────────────────────────────────────
         path, _ = dfold.get_save_file_name(
-            self, "Export All Sessions as PDF",
+            self, "Export all sessions as PDF",
             first_title + '_all.pdf', 'PDF (*.pdf)')
         if not path:
             return
@@ -8186,7 +7802,7 @@ class PlateauWindow(QMainWindow):
             _success = True
 
         except Exception as exc:
-            QMessageBox.critical(self, "Export Error", str(exc))
+            QMessageBox.critical(self, "Export error", str(exc))
 
         finally:
             # ── Restore original state unconditionally ───────────────────────
@@ -8322,13 +7938,13 @@ class PlateauWindow(QMainWindow):
             self._stack_export_csv()
             return
         if not self.steps_c:
-            QMessageBox.warning(self, "No Data", "No data to export.")
+            QMessageBox.warning(self, "No data", "No data to export.")
             return
         default = self.title_edit.text().replace(' ', '_') or 'plateau'
         slots = None
         if len(self._carousel) > 1:
             box = QMessageBox(self)
-            box.setWindowTitle("Export Data")
+            box.setWindowTitle("Export data")
             box.setText(f"Export all {len(self._carousel)} samples, or only the open one?")
             b_all = box.addButton("All samples", QMessageBox.AcceptRole)
             b_one = box.addButton("This sample", QMessageBox.AcceptRole)
@@ -8342,7 +7958,7 @@ class PlateauWindow(QMainWindow):
             elif box.clickedButton() is not b_one:
                 return
         path, _flt = dfold.get_save_file_name(
-            self, "Export Data", default + '.xlsx', export.save_filter())
+            self, "Export data", default + '.xlsx', export.save_filter())
         if not path:
             return
         path = export.ensure_ext(path, _flt)
@@ -8384,7 +8000,7 @@ class PlateauWindow(QMainWindow):
                 _sink.set_raw_items(_raw_items)
             QMessageBox.information(self, "Export OK", f"Saved:\n{path}")
         except Exception as exc:
-            QMessageBox.critical(self, "Export Error", str(exc))
+            QMessageBox.critical(self, "Export error", str(exc))
 
     def _csv_write_sample(self, w):
         """Step table, plateau, integrated age and isochron results of the
@@ -8591,7 +8207,7 @@ class PlateauWindow(QMainWindow):
         Aliquots that have no plateau are skipped.
         """
         if not self._sessions:
-            QMessageBox.information(self, 'Copy Ages',
+            QMessageBox.information(self, 'Copy ages',
                                     'No sessions in stack.')
             return
 
@@ -8609,7 +8225,7 @@ class PlateauWindow(QMainWindow):
             rows.append(f"{title}\t{age:.4f}\t{e_ana * 2:.4f}\t{e_int * 2:.4f}")
 
         if not rows:
-            QMessageBox.information(self, 'Copy Ages',
+            QMessageBox.information(self, 'Copy ages',
                                     'No plateau ages available to copy.')
             return
 
@@ -8618,7 +8234,7 @@ class PlateauWindow(QMainWindow):
                '(columns: label, age, 2σ analytical, 2σ internal).')
         if skipped:
             msg += f'\n({skipped} aliquot(s) skipped, no plateau defined.)'
-        QMessageBox.information(self, 'Copy Ages', msg)
+        QMessageBox.information(self, 'Copy ages', msg)
 
     def _open_stack_stats(self):
         """Open the read-only statistics dialog comparing the two combination
@@ -8679,8 +8295,8 @@ class PlateauWindow(QMainWindow):
                 "ω then captures additional between-aliquot scatter by ML."
                 if is_v else
                 "WM + √MSWD: scales the SEM of the combined mean.\n"
-                "sem_mswd applies √MSWD·t(n−1) when p < cutoff, else SEM×2;\n"
-                "sem_mswd_2s applies √MSWD when the MSWD is above the\n"
+                "SEM·√MSWD·t(n−1): when p is below the cutoff, else SEM×2.\n"
+                "SEM×2, ×√MSWD: √MSWD when the MSWD is above the\n"
                 "Wendt & Carl 95% limit for n.")
         self._cb_errMode.setToolTip(_tip)
 
@@ -9239,7 +8855,7 @@ class PlateauWindow(QMainWindow):
                     else:
                         panel.le_rStd.setText("(per-hole flux)")
                         panel.le_rStdErr.setText("(per-hole flux)")
-                        tip = "This group spans several flux holes, R is applied per session."
+                        tip = "This group spans several flux holes; R is applied per session."
                 else:                                   # legacy flux: hole J
                     vals = {round(ov['jVal'], 12) for ov in ovs}
                     fields = (panel.le_jVal, panel.le_jErrPct)
@@ -9249,7 +8865,7 @@ class PlateauWindow(QMainWindow):
                         tip = "Locked to the J of the disk-flux hole these sessions are on."
                     else:
                         panel.le_jVal.setText("(per-hole flux)")
-                        tip = "This group spans several flux holes, J is applied per session."
+                        tip = "This group spans several flux holes; J is applied per session."
                 for le in fields:
                     le.setReadOnly(True); le.setToolTip(tip)
                     le.setStyleSheet("background:#eef7ee;")
@@ -9859,7 +9475,7 @@ class PlateauWindow(QMainWindow):
     def _stack_paste_add(self):
         text = QApplication.clipboard().text().strip()
         if not text:
-            QMessageBox.warning(self, "Clipboard Empty",
+            QMessageBox.warning(self, "Clipboard empty",
                                 "Nothing in clipboard.")
             return
         import io
@@ -9894,14 +9510,15 @@ class PlateauWindow(QMainWindow):
             default_sigma = 1 if self._cb_1sigma.isChecked() else 2
             dlg = ColumnMappingDialog(headers, detected, self, default_sigma=default_sigma,
                                       j_default=_j_default_stk,
-                                      j_err_default=_j_err_default_stk)
+                                      j_err_default=_j_err_default_stk,
+                                      cfg=_SESSION_CFG_DEFAULTS, compute_option=False)
             if dlg.exec_() != QDialog.Accepted:
                 return
             mapping = dlg.get_mapping()
 
             has_ratio = 'r4039' in mapping
             if 'pct39ar' not in mapping:
-                QMessageBox.critical(self, "Missing Column",
+                QMessageBox.critical(self, "Missing column",
                                      "Column %³⁹Ar (cumulative) is required.")
                 return
 
@@ -9967,7 +9584,7 @@ class PlateauWindow(QMainWindow):
                         if ekca > 0:
                             s['err_cak'] = ekca / (kca * kca)
             if not steps:
-                QMessageBox.warning(self, "No Valid Data",
+                QMessageBox.warning(self, "No valid data",
                                     "No valid rows found in the pasted data.")
                 return
             if dlg.err_sigma == 2:
@@ -9981,7 +9598,8 @@ class PlateauWindow(QMainWindow):
                 _recalc_ages_in_steps(steps,
                                       rp['lam1'], rp['fc1_ma'], rp['j1'],
                                       rp['lam2'], rp['fc2_ma'],
-                                      fc2_err_ma=rp.get('fc2_err_ma', 0.0))
+                                      fc2_err_ma=rp.get('fc2_err_ma', 0.0),
+                                      ing1=rp['ing1'], ing2=rp['ing2'])
 
             dlg2 = _PasteAliquotDialog(
                 default_name=f"Aliquot {len(self._sessions) + 1}",
@@ -9996,6 +9614,9 @@ class PlateauWindow(QMainWindow):
                 sess_cfg['stdAgeMa']    = rp['fc2_ma']
                 sess_cfg['stdAgeErrMa'] = rp.get('fc2_err_ma', 0.0)
                 sess_cfg['stdAgeErrType'] = 'external' if rp.get('fc2_external', True) else 'internal'
+                prod_old = cfg_monitor(sess_cfg)[1]
+                set_route(sess_cfg, rp['route_keys'])
+                sess_cfg['rStd'] = sess_cfg['rStd'] * prod_old / cfg_monitor(sess_cfg)[1]
             if dlg2.use_j():
                 sess_cfg['ageFluxMode'] = 'ratio_J'
                 _j2v_stk = [s.get('j_val', 0.0) for s in steps if s.get('j_val', 0.0) > 0]
@@ -10006,13 +9627,13 @@ class PlateauWindow(QMainWindow):
             self._stack_add_session(sess)
 
         except Exception as e:
-            QMessageBox.critical(self, "Paste Error", str(e))
+            QMessageBox.critical(self, "Paste error", str(e))
 
     # ── Load .ararpt / .arar files ────────────────────────────────────────────
     def _stack_load_files(self, paths=None):
         if paths is None:
             paths, _ = dfold.get_open_file_names(
-                self, 'Load Sessions', '',
+                self, 'Load sessions', '',
                 'Ar-Ar Plateau (*.arar *.ararpt);;All files (*)')
         if not paths:
             return
@@ -10058,7 +9679,7 @@ class PlateauWindow(QMainWindow):
                 if not ok:
                     deferred_warnings.append((fname, info))
             except Exception as e:
-                QMessageBox.warning(self, 'Load Error',
+                QMessageBox.warning(self, 'Load error',
                                     f'{os.path.basename(path)}:\n{e}')
 
         # Single UI rebuild + recompute for all sessions at once
@@ -10084,7 +9705,7 @@ class PlateauWindow(QMainWindow):
     # ── Stack save / load ─────────────────────────────────────────────────────
     def _stack_save(self):
         if not self._sessions:
-            QMessageBox.warning(self, 'No Data', 'No aliquots loaded.')
+            QMessageBox.warning(self, 'No data', 'No aliquots loaded.')
             return
         path, _ = dfold.get_save_file_name(
             self, 'Save Stack', 'stack_session.ararstack',
@@ -10137,7 +9758,7 @@ class PlateauWindow(QMainWindow):
                 json.dump(state, f, indent=2)
             QMessageBox.information(self, 'Saved', f'Stack saved:\n{path}')
         except Exception as e:
-            QMessageBox.critical(self, 'Save Error', str(e))
+            QMessageBox.critical(self, 'Save error', str(e))
 
     def _stack_load(self):
         paths, _ = dfold.get_open_file_names(
@@ -10164,7 +9785,7 @@ class PlateauWindow(QMainWindow):
             with open(path, encoding='utf-8') as f:
                 state = json.load(f)
             if state.get('format') != 'ararstack_v1':
-                QMessageBox.warning(self, 'Unknown Format',
+                QMessageBox.warning(self, 'Unknown format',
                                     'Not a valid stack session file.')
                 return
             # Always append, never replace the existing stack.
@@ -10257,15 +9878,15 @@ class PlateauWindow(QMainWindow):
                 msg += f"\n(Stack total: {total} aliquots)"
             QMessageBox.information(self, 'Loaded', msg)
         except Exception as e:
-            QMessageBox.critical(self, 'Load Error', str(e))
+            QMessageBox.critical(self, 'Load error', str(e))
 
     # ── Stack CSV export ──────────────────────────────────────────────────────
     def _stack_export_csv(self):
         if not self._sessions:
-            QMessageBox.warning(self, 'No Data', 'No aliquots loaded.')
+            QMessageBox.warning(self, 'No data', 'No aliquots loaded.')
             return
         path, _flt = dfold.get_save_file_name(
-            self, 'Export Data', 'stacked_data.xlsx', export.save_filter())
+            self, 'Export data', 'stacked_data.xlsx', export.save_filter())
         if not path:
             return
         path = export.ensure_ext(path, _flt)
@@ -10276,7 +9897,7 @@ class PlateauWindow(QMainWindow):
             _inc = [(si, sess) for si, sess in enumerate(self._sessions)
                     if not sess.get('excluded', False)]
             if not _inc:
-                QMessageBox.warning(self, 'No Data', 'No aliquots are included in the stack.')
+                QMessageBox.warning(self, 'No data', 'No aliquots are included in the stack.')
                 return
             _sink = export.TableSink(path)
             with _sink as f:
@@ -10620,7 +10241,7 @@ class PlateauWindow(QMainWindow):
                 w.writerow([])
             QMessageBox.information(self, 'Export OK', f'Saved:\n{path}')
         except Exception as e:
-            QMessageBox.critical(self, 'Export Error', str(e))
+            QMessageBox.critical(self, 'Export error', str(e))
 
 
 # --------------------------------------------------------------------------
@@ -10631,7 +10252,7 @@ class _PasteAliquotDialog(QDialog):
 
     def __init__(self, default_name='', has_ratio=False, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Add Aliquot")
+        self.setWindowTitle("Add aliquot")
         self.setMinimumWidth(340)
         layout = QVBoxLayout(self)
         layout.setSpacing(8)
@@ -10646,7 +10267,7 @@ class _PasteAliquotDialog(QDialog):
         sep = QFrame(); sep.setFrameShape(QFrame.HLine); sep.setFrameShadow(QFrame.Sunken)
         layout.addWidget(sep)
 
-        hdr = QLabel("Flux / Age calibration (optional)")
+        hdr = QLabel("Flux / age calibration (optional)")
         hdr.setStyleSheet("font-weight:bold; font-size:10px; color:#444;")
         layout.addWidget(hdr)
 

@@ -882,7 +882,7 @@ class ConvertDialog(QDialog):
         det_label = {
             "ararcalc": "  (auto-detected: ArArCALC)",
             "massspec":  "  (auto-detected: Mass Spec)",
-            "":          "  (format not recognised, please select)",
+            "":          "  (format not recognised: select it)",
         }.get(detected_fmt, "")
         if det_label:
             fl.addWidget(QLabel(det_label))

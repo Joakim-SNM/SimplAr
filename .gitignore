@@ -8,15 +8,12 @@ __pycache__/
 .Rhistory
 .RData
 
-# generated at run time
-docs/eqcache/
-figure_export_presets.json
-
 # data and session files stay out of the repository
 *.arar
 *.ararpt
 *.ararstack
 *.arprob
+*.arrc
 *.jflux
 *.xlsx
 *.xls
