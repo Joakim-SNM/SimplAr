@@ -3039,7 +3039,8 @@ def mixture_membership(fit):
 
 
 def mixture_legend_label(fit, i, tier, ds=2, dec=3, tiers_mode='all', with_n=True):
-    """'C1  56.794  ±2σ 0.107/0.109/0.118  (47 %, n = 41)' and its variants."""
+    """'C1  56.794 ± 0.107/0.109/0.118  (47 %, n = 41)' and its variants; the
+    σ and the tiers go in the legend heading."""
     af = f'.{dec}f'
     name = 'Minimum' if fit['model'] == 'mam' else f'C{i + 1}'
     a = tier['age']
@@ -3048,7 +3049,7 @@ def mixture_legend_label(fit, i, tier, ds=2, dec=3, tiers_mode='all', with_n=Tru
     elif tiers_mode in ('ana', 'int', 'ext'):
         lab = f'{name}  {a:{af}} ± {tier[tiers_mode] * ds:{af}}'
     else:
-        lab = (f'{name}  {a:{af}}  ±{ds}σ {tier["ana"] * ds:{af}}/'
+        lab = (f'{name}  {a:{af}} ± {tier["ana"] * ds:{af}}/'
                f'{tier["int"] * ds:{af}}/{tier["ext"] * ds:{af}}')
     if with_n and tiers_mode != 'off':
         if fit['model'] == 'fmm':
@@ -3059,13 +3060,17 @@ def mixture_legend_label(fit, i, tier, ds=2, dec=3, tiers_mode='all', with_n=Tru
 
 
 def draw_components(ax, t, s, fit, xlim, tiers, ds=2, dec=3, title=None, show=None,
-                    tiers_mode='all', with_n=True, lw=1.0, max_rows=None):
+                    tiers_mode='all', with_n=True, lw=1.0, max_rows=None, da=None):
     """The ranked analyses and their summed-Gaussian curve (from the 1σ errors), as
     in the main plot, with the curve split into the membership-weighted curves of
     the components, which add up to it.  Each analysis is coloured by its
     most likely component, faded when its membership is uncertain.
-    max_rows: list only the first that many components in the legend (in the
-    plot, in age order); the others are summed up in one line."""
+    max_rows: list the first that many components in the legend, in age order,
+    also ones outside the age range; the others are summed up in one line.
+    None: the components in the age range, and one line for the others.
+    ds: σ of the error bars of the analyses; da: σ of the component ages in
+    the legend and their bands (default ds)."""
+    da = ds if da is None else da
     show = {} if show is None else show
     on = lambda k: show.get(k, True)
     t = np.asarray(t, float)
@@ -3097,34 +3102,31 @@ def draw_components(ax, t, s, fit, xlim, tiers, ds=2, dec=3, title=None, show=No
             ax.errorbar(t[j], rank[j], xerr=ds * s[j], fmt='o', ms=3.5 * lw, color=col,
                         mfc=col if ci >= 0 else 'none', alpha=alpha, lw=0.9 * lw,
                         capsize=0, zorder=4)
+    inr = [lo <= tr['age'] <= hi for tr in tiers]
     listed, unlisted = 0, []
     for i, tr in enumerate(tiers):
         a = tr['age']
-        if not (lo <= a <= hi):
-            continue
         col = _colour(fit, i) if fit['model'] == 'fmm' else MIXTURE_COLORS[0]
-        if on('bands'):
-            ax.axvspan(a - ds * tr['ana'], a + ds * tr['ana'], color=col, alpha=0.25,
+        if inr[i] and on('bands'):
+            ax.axvspan(a - da * tr['ana'], a + da * tr['ana'], color=col, alpha=0.25,
                        lw=0, zorder=2)
             ax.axvline(a, color=col, lw=1.3 * lw, ls='--', zorder=5)
+        if max_rows is None and not inr[i]:
+            continue                    # summed up below, outside the age range
         if max_rows is not None and listed >= max_rows:
             unlisted.append(i)
             continue
         listed += 1
         ax.plot([], [], color=col, lw=6, alpha=0.6,
-                label=mixture_legend_label(fit, i, tr, ds, dec, tiers_mode, with_n))
-    off = [tr['age'] for tr in tiers if not (lo <= tr['age'] <= hi)]
-    if unlisted:
-        # one line for every component not listed, in the plot or not
-        rest = sorted([tiers[i]['age'] for i in unlisted] + off)
+                label=mixture_legend_label(fit, i, tr, da, dec, tiers_mode, with_n))
+    rest = sorted(tiers[i]['age'] for i in (
+        unlisted if max_rows is not None else [i for i in range(len(tiers)) if not inr[i]]))
+    if rest:
+        # one wording whether the others are in the age range or not; two
+        # rows, so this line does not set the width of the legend
         m = len(rest)
-        lab = (f'+1 other component\n({rest[0]:.{dec}f} Ma)' if m == 1 else
+        lab = (f'+1 other component\n({rest[0]:.4g} Ma)' if m == 1 else
                f'+{m} other components\n({rest[0]:.4g}–{rest[-1]:.4g} Ma)')
-        ax.plot([], [], color='none', label=lab)
-    elif off:
-        # two rows, so this line does not set the width of the legend
-        lab = (f'+1 component outside\nthe age range ({off[0]:.{dec}f} Ma)' if len(off) == 1 else
-               f'+{len(off)} components outside\nthe age range ({min(off):.0f}–{max(off):.0f} Ma)')
         ax.plot([], [], color='none', label=lab)
     ax.set_xlim(lo, hi)
     ax.set_ylim(0, n * 1.08)

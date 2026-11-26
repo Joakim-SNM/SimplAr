@@ -873,7 +873,30 @@ def test_age_distribution_normalised():
     assert sum(l.lstrip().startswith('Pooled') for l in labels) == 1, labels
     assert labels[-1].lstrip().startswith('Pooled'), labels
     assert 'n=22/22' in labels[-1], labels[-1]          # included / all analyses
-    ok('samples share a panel when asked; a legend below the stack is drawn once')
+    # σ of the ages and of the error bars in the heading, as in Plateau & isochron
+    assert legs[0].get_title().get_text() == ('Weighted mean ± 2σ (analytical / internal / '
+                                              'external)\nError bars ± 1σ')
+    # the export sets its own σ for the ages and the error bars
+    spec['options'].update(age_sig='1', bar_sig='2')
+    fig = Figure(figsize=(6, 6))
+    win._export_render(fig, spec)
+    lg = [a.get_legend() for a in fig.axes if a.get_legend() is not None][0]
+    assert lg.get_title().get_text() == ('Weighted mean ± 1σ (analytical / internal / '
+                                         'external)\nError bars ± 2σ')
+    assert (win.age_sigma, win.display_sigma) == (2, 1), 'the window keeps its own'
+    spec['options'].update(age_sig='window', bar_sig='window')
+    # in two columns the pooled entry, alone in its column, is at mid height
+    spec['legend_cols'] = 2
+    fig = Figure(figsize=(6, 6))
+    win._export_render(fig, spec)
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    FigureCanvasAgg(fig).draw()
+    r = fig.canvas.get_renderer()
+    lg = fig.axes[-1].get_legend()
+    mid = [(b.y0 + b.y1) / 2 for b in (t.get_window_extent(r) for t in lg.get_texts())]
+    assert abs(mid[-1] - (mid[0] + mid[1]) / 2) < 1.0, mid
+    ok('samples share a panel when asked; a legend below the stack is drawn once, '
+       'the pooled entry centred beside the samples')
 
 
 def test_plateau_calibration_dialog():

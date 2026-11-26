@@ -268,6 +268,19 @@ def test_window():
     st = w._mix_state
     assert st is not None and st['fit']['k'] >= 2, 'the xenocryst should be its own component'
     assert 'MIXTURE MODEL' in w.report.toPlainText()
+    # error bars at 1σ, ages at 2σ (two settings)
+    assert (w.display_sigma, w.age_sigma) == (1, 2)
+    assert '±2σ' in w.report.toPlainText()
+    leg = w._mix_ax.get_legend()
+    assert leg.get_title().get_text().split('\n')[1:] == [
+        'Component ages ± 2σ (analytical / internal / external)', 'Error bars ± 1σ'], leg.get_title().get_text()
+    assert 'σ' not in leg.get_texts()[0].get_text()      # the heading gives it
+    # the legend above the diagram stays in the figure at a small window size
+    w.mix_fig.set_size_inches(6, 3.2)
+    w._mix_fit_top()
+    w.mix_canvas.draw()
+    fb = w.mix_fig.bbox
+    assert leg.get_window_extent().y1 <= fb.y1 + 1, (leg.get_window_extent(), fb)
     print(f"  ok  view on: k = {st['fit']['k']}, youngest {st['tiers'][0]['age']:.3f} Ma")
     # figure export: all three panels
     spec = export.default_spec(w._mix_export_panels(), w._mix_export_options())
@@ -298,7 +311,15 @@ def test_window():
     spec['options'].update(legend_title='name_n', legend_k=False)
     fig = Figure(figsize=export.figsize(spec), facecolor='white')
     w._mix_export_render(fig, spec)
-    assert fig.axes[0].get_legend().get_title().get_text() == f"Sample A  ({st['fit']['n']} analyses)"
+    assert fig.axes[0].get_legend().get_title().get_text() == \
+        f"Sample A  ({st['fit']['n']} analyses)\nComponent ages ± 2σ (analytical / internal / external)\nError bars ± 1σ"
+    # one tier in the legend: its σ in the heading; no error-bar line when asked
+    spec['options'].update(legend_ages='int', legend_sigma=False)
+    fig = Figure(figsize=export.figsize(spec), facecolor='white')
+    w._mix_export_render(fig, spec)
+    assert fig.axes[0].get_legend().get_title().get_text().split('\n')[1:] == \
+        ['Component ages ± 2σ (internal)']
+    spec['options'].update(legend_ages='all', legend_sigma=True)
     # every sample stacked, each with its own model and legend
     spec2 = export.default_spec(w._mix_export_panels(), w._mix_export_options())
     spec2['options'].update(stack=True, legend_title='name_n', mixk_1='1')
@@ -309,7 +330,9 @@ def test_window():
     export.finish_figure(fig, spec2)
     assert len(fig.axes) == 2, len(fig.axes)
     heads = [a.get_legend().get_title().get_text() for a in fig.axes]
-    assert heads[0].startswith('Sample A') and heads[1] == 'Other sample: 1 component  (10 analyses)', heads
+    assert heads[0].startswith('Sample A'), heads
+    assert heads[1] == ('Other sample: 1 component  (10 analyses)\n'
+                        'Component ages ± 2σ (analytical / internal / external)\nError bars ± 1σ'), heads
     assert fig.axes[0].get_xlim() == fig.axes[1].get_xlim()
     assert [t.get_text() for a in fig.axes for t in a.texts] == ['A', 'B']
     # only C1 listed: one line for it, one for the rest
@@ -319,8 +342,15 @@ def test_window():
     labs = [t.get_text() for t in fig.axes[0].get_legend().get_texts()]
     k = st['fit']['k']
     assert len(labs) == 2 and labs[0].startswith('C1'), labs
-    assert labs[1].startswith(f'+{k - 1} '), labs   # 'other' or 'outside'
-    spec['options']['legend_max'] = 0
+    assert labs[1].startswith(f'+{k - 1} other component'), labs
+    # every component asked for is listed, also one outside the age range
+    spec['options'].update(legend_max=k, x_min=str(st['tiers'][0]['age'] - 1),
+                           x_max=str(st['tiers'][0]['age'] + 1))
+    fig = Figure(figsize=export.figsize(spec), facecolor='white')
+    w._mix_export_render(fig, spec)
+    labs = [t.get_text() for t in fig.axes[0].get_legend().get_texts()]
+    assert [l[:2] for l in labs] == [f'C{i + 1}' for i in range(k)], labs
+    spec['options'].update(legend_max=0, x_min='', x_max='')
     QDialog.exec_ = lambda self: 0
     w.export_figure()
     print('  ok  figure export: window layout and stacked layout; components in legend; dialog opens')
@@ -350,6 +380,7 @@ def test_window():
         print('  ok  with the view off: the normal export, every sample, no mixture')
         w.mix_btn.setChecked(True)
         w.mix_k.setCurrentText('2'); w.mix_space.setCurrentText('log'); w._redraw_mixture()
+        w.age_sig_sel.setCurrentIndex(0)
         QFileDialog.getSaveFileName = staticmethod(lambda *a, **k: (os.path.join(d, 's.arprob'), ''))
         w.save_session()
         assert json.load(open(os.path.join(d, 's.arprob'), encoding='utf-8'))['mixture']['components'] == '2'
@@ -358,7 +389,15 @@ def test_window():
         w2.load_session()
         assert w2.mix_on and w2.mix_k.currentText() == '2' and w2.mix_space.currentText() == 'log'
         assert w2._mix_state['fit']['k'] == 2
-        print('  ok  session keeps the Mixture settings')
+        assert (w2.display_sigma, w2.age_sigma) == (1, 1)
+        # a session from before the two settings: its σ was the ages'
+        doc = json.load(open(os.path.join(d, 's.arprob'), encoding='utf-8'))
+        doc.pop('age_sigma'); doc['display_sigma'] = 2
+        json.dump(doc, open(os.path.join(d, 's.arprob'), 'w', encoding='utf-8'))
+        w2.load_session()
+        assert (w2.display_sigma, w2.age_sigma) == (1, 2)
+        w.age_sig_sel.setCurrentIndex(1)
+        print('  ok  session keeps the Mixture settings and both σ settings')
     w.mix_btn.setChecked(False)
     assert not w.mix_on and w._plot_stack.currentIndex() == 0
     print('  ok  view off: back to the plot')

@@ -26,6 +26,7 @@ Layout of this file, top to bottom:
     disk flux, pooling, redraw, Mixture view, session save/load, export
 
 """
+import contextlib
 import sys
 import os
 import json
@@ -1483,7 +1484,7 @@ class SamplePanel(QFrame):
             return
         m = self.s.mask()
         r = self.s.wm()
-        ds = self.app.display_sigma
+        ds = self.app.age_sigma
         sl = f'{ds}σ'
         if r:
             self.info.setText(
@@ -1706,6 +1707,12 @@ class _ProbFluxHost(FluxHost):
         self.app._apply_flux_to_samples()
 
 
+# the age tiers as the legend headings name them
+_TIER_NAMES = {'ana': 'analytical', 'int': 'internal', 'ext': 'external',
+               'all': 'analytical / internal / external'}
+_TIER_SHORT = dict(_TIER_NAMES, all='ana/int/ext')
+
+
 class ProbabilityWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -1713,7 +1720,8 @@ class ProbabilityWindow(QMainWindow):
         self.resize(1280, 760)
         self.samples = []
         self.panels = []
-        self.display_sigma = 2
+        self.display_sigma = 1        # error bars of the analyses on the plots
+        self.age_sigma = 2            # ages and their uncertainties: legends, reports, exports
         self.age_dec = 3              # decimal places for ages/uncertainties in the legend
         self.input_sigma = 1          # interpret incoming (paste/import/load) uncertainty as 1 or 2 sigma; converter writes 1-sigma
         self.pool_on = False
@@ -1847,29 +1855,27 @@ class ProbabilityWindow(QMainWindow):
         bar.addWidget(self.mix_btn)
         right.addLayout(bar)
 
-        opt = QHBoxLayout()
         self.cb_corr = QCheckBox('Force corr. J')
         self.cb_corr.setToolTip('Treat every sample as sharing one irradiation position '
                                 '(J fully correlated). Off = group by J-flux key.')
         self.cb_corr.toggled.connect(self._on_corr)
-        opt.addWidget(self.cb_corr)
-        opt.addWidget(QLabel('Display:'))
         self.sig_sel = QComboBox()
         self.sig_sel.addItems(['1σ', '2σ'])
-        self.sig_sel.setCurrentIndex(1)
+        self.sig_sel.setCurrentIndex(self.display_sigma - 1)
+        self.sig_sel.setToolTip('σ of the error bars of the analyses on the plots.')
         self.sig_sel.currentIndexChanged.connect(self._on_sigma)
-        opt.addWidget(self.sig_sel)
-        opt.addSpacing(10)
-        opt.addWidget(QLabel('Decimal:'))
+        self.age_sig_sel = QComboBox()
+        self.age_sig_sel.addItems(['1σ', '2σ'])
+        self.age_sig_sel.setCurrentIndex(self.age_sigma - 1)
+        self.age_sig_sel.setToolTip('σ of the ages: legends, age bands, the report and the '
+                                    'XLSX / CSV exports.')
+        self.age_sig_sel.currentIndexChanged.connect(self._on_age_sigma)
         self.dec_sel = QSpinBox()
         self.dec_sel.setRange(0, 6)
         self.dec_sel.setValue(self.age_dec)
         self.dec_sel.setToolTip('Decimal places for the ages and uncertainties in the '
                                 'legend (and image exports).')
         self.dec_sel.valueChanged.connect(self._on_decimals)
-        opt.addWidget(self.dec_sel)
-        opt.addSpacing(10)
-        opt.addWidget(QLabel('Import σ:'))
         self.in_sig_sel = QComboBox()
         self.in_sig_sel.addItems(['1σ', '2σ'])
         self.in_sig_sel.setCurrentIndex(0)   # converter writes raw 1-sigma
@@ -1879,9 +1885,6 @@ class ProbabilityWindow(QMainWindow):
                                    'Each sample has its own σ in selector, which can be changed '
                                    'after loading.')
         self.in_sig_sel.currentIndexChanged.connect(self._on_input_sigma)
-        opt.addWidget(self.in_sig_sel)
-        opt.addSpacing(10)
-        opt.addWidget(QLabel('Stats:'))
         self.method_sel = QComboBox()
         self.method_sel.addItems(['WM + √MSWD', 'GLS + ML'])
         self.method_sel.setCurrentIndex(0)
@@ -1898,9 +1901,24 @@ class ProbabilityWindow(QMainWindow):
             'Preferable when the ages scatter beyond their errors and those errors\n'
             'differ widely: ω evens out the weights.')
         self.method_sel.currentIndexChanged.connect(self._on_stat_method)
-        opt.addWidget(self.method_sel)
-        opt.addStretch()
-        right.addLayout(opt)
+
+        # two rows: the σ settings and decimals, then statistics and calibration
+        row1 = QHBoxLayout()
+        for k, (lbl, w) in enumerate((('Import σ:', self.in_sig_sel), ('Ages:', self.age_sig_sel),
+                                      ('Error bars:', self.sig_sel), ('Decimal:', self.dec_sel))):
+            if k:
+                row1.addSpacing(10)
+            row1.addWidget(QLabel(lbl))
+            row1.addWidget(w)
+        row1.addStretch()
+        right.addLayout(row1)
+        row2 = QHBoxLayout()
+        row2.addWidget(QLabel('Stats:'))
+        row2.addWidget(self.method_sel)
+        row2.addSpacing(10)
+        row2.addWidget(self.cb_corr)
+        row2.addSpacing(10)
+        right.addLayout(row2)
 
         # calibration bar: one calibration for the whole session (two rows)
         cal1 = QHBoxLayout()
@@ -1972,7 +1990,6 @@ class ProbabilityWindow(QMainWindow):
         _old.setVisible(False)
         right.addWidget(_old)
         cal1.removeWidget(self.cal_external)
-        bar = QHBoxLayout()
         self.route_lbl = QLabel('')
         self.route_lbl.setWordWrap(True)
         self.route_lbl.setStyleSheet('color:#555; font-size:10px;')
@@ -1980,10 +1997,9 @@ class ProbabilityWindow(QMainWindow):
         b_cal.setToolTip('Monitor and calibration of the samples. Under Advanced: typed values, '
                          'a route built in Standards, and which samples it goes to.')
         b_cal.clicked.connect(self._open_calibrate)
-        bar.addWidget(b_cal)
+        row2.addWidget(b_cal)
         self.cal_external.setVisible(False)      # set in Calibration… (Advanced)
-        bar.addStretch()
-        right.addLayout(bar)
+        row2.addStretch()
         right.addWidget(self.route_lbl)
         self.mon_info = QLabel('')
         self.mon_info.setStyleSheet('color:#555; font-size:10px;')
@@ -2844,6 +2860,12 @@ class ProbabilityWindow(QMainWindow):
             p.refresh_info()
         self.redraw()
 
+    def _on_age_sigma(self, _):
+        self.age_sigma = self.age_sig_sel.currentIndex() + 1
+        for p in self.panels:
+            p.refresh_info()
+        self.redraw()
+
     def _on_decimals(self, val):
         self.age_dec = int(val)
         self.redraw()
@@ -3132,7 +3154,7 @@ class ProbabilityWindow(QMainWindow):
             return
         budget = age_error_budget(r['sigma_ana'], r['sigma_int'],
                                   r['sigma_ext'], r['wm'], cfg)
-        ds = self.display_sigma
+        ds = self.age_sigma
 
         dlg = QDialog(self)
         dlg.setWindowTitle('Where the age uncertainty comes from')
@@ -3189,11 +3211,12 @@ class ProbabilityWindow(QMainWindow):
     # --- drawing ------------------------------------------------------------
     @staticmethod
     def _legend_ages(r, tier, ds, af):
-        """The age part of a legend entry: '  WM  ±2σ ana/int/ext' (all
-        three, as in the window) or '  WM ± one tier'."""
+        """The age part of a legend entry: '  WM ± ana/int/ext' (all three,
+        as in the window) or '  WM ± one tier'.  The σ and the tiers are in
+        the legend heading, as in the Plateau & isochron tool."""
         if tier in ('ana', 'int', 'ext'):
             return f"  {r['wm']:{af}} ± {r['sigma_' + tier] * ds:{af}}"
-        return (f"  {r['wm']:{af}}  ±{ds}σ "
+        return (f"  {r['wm']:{af}} ± "
                 f"{r['sigma_ana']*ds:{af}}/{r['sigma_int']*ds:{af}}/"
                 f"{r['sigma_ext']*ds:{af}}")
 
@@ -3208,7 +3231,8 @@ class ProbabilityWindow(QMainWindow):
         self.ax.clear()
         self._click_pts = []
         act = self._active_all()        # active = enabled with data (incl. fully-excluded)
-        ds = self.display_sigma
+        ds = self.display_sigma          # error bars of the analyses
+        da = self.age_sigma             # ages: legends and age bands
         _ps      = getattr(self, '_pub_scale',    1.0)  # font size scale
         _ps_line = getattr(self, '_pub_lw_scale', 1.0)  # curve/vline linewidth scale
         _ps_ms   = getattr(self, '_pub_ms_scale', 1.0)  # marker & error-bar scale
@@ -3363,7 +3387,7 @@ class ProbabilityWindow(QMainWindow):
                 # WM marker line
                 r = s.wm()
                 if r:
-                    band = r['sigma_int'] * ds
+                    band = r['sigma_int'] * da
                     if self._ex('wm'):
                         self.ax.axvline(r['wm'], color=s.color, lw=1.4 * _ps_line,
                                         ls='--', zorder=4)
@@ -3421,7 +3445,7 @@ class ProbabilityWindow(QMainWindow):
             lab = _padded[_tn(s.name)] if _lg_tier != 'off' else _tn(s.name)
             r = s.wm()
             if r and _lg_tier != 'off':
-                lab += self._legend_ages(r, _lg_tier, ds, _af)
+                lab += self._legend_ages(r, _lg_tier, da, _af)
                 # second line: MSWD and p (one sample), then n (pooled: only on
                 # the pooled entry), then ω
                 _l2 = []
@@ -3431,7 +3455,7 @@ class ProbabilityWindow(QMainWindow):
                 if not pooling and self._ex('legend_n'):
                     _l2.append(f"n={int(s.mask().sum())}/{len(s.ages)}")
                 if len(act) == 1 and 'overdispersion' in r:
-                    _l2.append(f"ω={r['overdispersion']*ds:{_af}}")
+                    _l2.append(f"ω={r['overdispersion']*da:{_af}}")
                 if _l2:
                     lab += "\n" + "  ".join(_l2)
             legend.append(Line2D([0], [0], color=s.color, lw=2, label=lab))
@@ -3478,7 +3502,7 @@ class ProbabilityWindow(QMainWindow):
                         self.ax.plot(axis, scaled, color=_POOL_COLOR,
                                      lw=2.0 * _ps_line, zorder=6.5)
             if pr:
-                band = pr['sigma_int'] * ds
+                band = pr['sigma_int'] * da
                 if self._ex('wm'):
                     self.ax.axvline(pr['wm'], color=_POOL_COLOR, lw=1.6 * _ps_line,
                                     ls='--', zorder=4)
@@ -3493,16 +3517,16 @@ class ProbabilityWindow(QMainWindow):
                 if _pl_tier != 'off':
                     if _lg_tier != 'off':          # line up with the samples
                         _plab = _padded['Pooled']
-                        _pa = self._legend_ages(pr, _pl_tier, ds, _af)
-                        if _pl_tier != _lg_tier and _pl_tier in ('ana', 'int', 'ext'):
-                            # not the tier the legend heading names
-                            _pa += (f" ({ds}σ " + dict(ana='analytical', int='internal',
-                                                      ext='external')[_pl_tier] + ")")
+                        _pa = self._legend_ages(pr, _pl_tier, da, _af)
+                        if _pl_tier != _lg_tier:
+                            # not the tiers the legend heading names
+                            _pa += f" ({da}σ {_TIER_SHORT[_pl_tier]})"
                     elif _pl_tier == 'all':
-                        _pa = self._legend_ages(pr, 'all', ds, _af)
+                        _pa = (self._legend_ages(pr, 'all', da, _af)
+                               + f" Ma ({da}σ {_TIER_SHORT['all']})")
                     else:                          # names-only samples: say which σ
-                        _pa = (f"  {pr['wm']:{_af}} ± {pr['sigma_' + _pl_tier] * ds:{_af}} Ma"
-                               f" ({ds}σ {dict(ana='analytical', int='internal', ext='external')[_pl_tier]})")
+                        _pa = (f"  {pr['wm']:{_af}} ± {pr['sigma_' + _pl_tier] * da:{_af}} Ma"
+                               f" ({da}σ {dict(ana='analytical', int='internal', ext='external')[_pl_tier]})")
                     _plab += (_pa + "\n"
                               f"MSWD={pr['mswd']:.2f}"
                               f"  p={pr.get('prob', float('nan')):.2f}"
@@ -3510,7 +3534,7 @@ class ProbabilityWindow(QMainWindow):
                                  + str(sum(1 if sm.is_plateau else len(sm.ages)
                                            for sm in act))
                                  if self._ex('legend_n') else "")
-                              + (f"  ω={pr['overdispersion']*ds:{_af}}"
+                              + (f"  ω={pr['overdispersion']*da:{_af}}"
                                  if 'overdispersion' in pr else ""))
                 legend.append(Line2D([0], [0], color=_POOL_COLOR, lw=2.2 * _ps_line,
                                      ls='-', label=_plab))
@@ -3545,11 +3569,13 @@ class ProbabilityWindow(QMainWindow):
             # the normal font: the ages line up through the measured padding
             # above (export.pad_names), not a typewriter font
             _prop = {'size': 8 * _ps}
-            # one tier chosen in the export: say which in the legend heading
-            _tn_ = {'ana': 'analytical', 'int': 'internal',
-                    'ext': 'external'}.get(_lg_tier)
-            _lt = dict(title=f'Weighted mean ± {ds}σ ({_tn_})',
-                       title_fontsize=8 * _ps) if _tn_ else {}
+            # the σ and tiers of the ages in the legend heading
+            _tn_ = _TIER_NAMES.get(_lg_tier)
+            _tl = [f'Weighted mean ± {da}σ ({_tn_})'] if _tn_ else []
+            if self._ex('points') and self._ex('legend_sigma'):
+                _tl.append(f'Error bars ± {ds}σ')
+            _lt = dict(title='\n'.join(_tl), title_fontsize=8 * _ps,
+                       alignment='left') if _tl else {}
             if getattr(self, '_pub_scale', 1.0) > 1.0:
                 # publication export: legend above the axes so it never overlaps the data
                 self.ax.legend(handles=legend, loc='lower left',
@@ -3629,6 +3655,7 @@ class ProbabilityWindow(QMainWindow):
         v.addLayout(row)
         self.mix_fig = Figure(figsize=(7, 6), dpi=100)
         self.mix_canvas = FigureCanvas(self.mix_fig)
+        self.mix_canvas.mpl_connect('resize_event', self._mix_fit_top)
         self.mix_canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         v.addWidget(NavigationToolbar(self.mix_canvas, self), 0)
         v.addWidget(self.mix_canvas, 1)
@@ -3691,6 +3718,7 @@ class ProbabilityWindow(QMainWindow):
         return f, fits, kb
 
     def _mix_message(self, text):
+        self._mix_ax = None
         self.mix_fig.clear()
         ax = self.mix_fig.add_subplot(111)
         ax.axis('off')
@@ -3734,15 +3762,44 @@ class ProbabilityWindow(QMainWindow):
         axr = self.mix_fig.add_subplot(gs[0, 1] if fits else gs[:, 1])
         axb = self.mix_fig.add_subplot(gs[1, 1]) if fits else None
         self.mix_fig.subplots_adjust(left=0.07, right=0.97, top=0.80, bottom=0.1)
-        am.draw_components(ax, t, sig, fit, xl, tiers, ds=self.display_sigma,
+        self._mix_ax = ax
+        am.draw_components(ax, t, sig, fit, xl, tiers, ds=self.display_sigma, da=self.age_sigma,
                              dec=int(self.age_dec), title=self._mix_title())
         am.draw_radial(axr, t, sig, fit, xl, space)
         if axb is not None:
             am.draw_bic(axb, fits, fit['k'], kb)
+        self._mix_fit_top()
         self.mix_canvas.draw_idle()
         self.report.setPlainText('\n'.join(self._mixture_report()))
 
-    def _mix_title(self, mode='model', with_k=True, s=None, fit=None):
+    def _mix_fit_top(self, _event=None):
+        """Room above the diagrams for its legend, at any window size."""
+        ax = getattr(self, '_mix_ax', None)
+        lg = ax.get_legend() if ax is not None and ax.figure is self.mix_fig else None
+        if lg is None:
+            return
+        h = self.mix_fig.get_figheight() * self.mix_fig.dpi
+        if h <= 0:
+            return
+        lh = lg.get_window_extent(self.mix_canvas.get_renderer()).height
+        top = min(0.95, max(0.3, 1 - (lh + 10) / h - 0.01))
+        self.mix_fig.subplots_adjust(top=top)
+        if _event is not None:
+            self.mix_canvas.draw_idle()
+
+    def _mix_title(self, mode='model', with_k=True, s=None, fit=None, opts=None):
+        """The legend heading: the sample line, then the σ and tiers of the
+        component ages (as in the Plateau & isochron tool) and of the error bars."""
+        opts = opts or {}
+        lines = [self._mix_heading(mode, with_k, s, fit)]
+        tier = opts.get('legend_ages', 'all')
+        if tier in _TIER_NAMES:
+            lines.append(f"Component ages ± {self.age_sigma}σ ({_TIER_NAMES[tier]})")
+        if opts.get('points', True) and opts.get('legend_sigma', True):
+            lines.append(f'Error bars ± {self.display_sigma}σ')
+        return '\n'.join(l for l in lines if l) or None
+
+    def _mix_heading(self, mode, with_k, s, fit):
         st = self._mix_state
         s, fit = s or st['sample'], fit or st['fit']
         what = (f"{fit['k']} component{'s' if fit['k'] > 1 else ''}"
@@ -3761,7 +3818,7 @@ class ProbabilityWindow(QMainWindow):
     def _mixture_report(self):
         st = self._mix_state
         s, fit, tiers = st['sample'], st['fit'], st['tiers']
-        ds, d = self.display_sigma, int(self.age_dec)
+        ds, d = self.age_sigma, int(self.age_dec)
         L = ['-' * 64,
              f"MIXTURE MODEL: {s.name}   ({fit['n']} analyses, "
              f"{'all' if st['all_data'] else 'included only'}, {st['space']} scale)",
@@ -3856,11 +3913,14 @@ class ProbabilityWindow(QMainWindow):
                           tip='What follows each component in the legend, at the 1σ/2σ '
                               'level and decimals set in the window.'),
             export.Option('legend_n', 'Proportion and n in legend', 'bool', True),
+            *self._sigma_options(),
             export.Option('legend_max', 'Components in legend', 'int', default=0,
-                          lo=0, hi=10, placeholder='All',
-                          tip='Lists only the first components in the plot (youngest '
-                              'first), each with its colour; the others are summed up in '
-                              'one line. All lists every component.'),
+                          lo=0, hi=10, placeholder='In range',
+                          tip='How many components the legend lists, youngest first, '
+                              'each with its colour, also ones outside the age range; '
+                              'the others are summed up in one line.\n'
+                              'In range: the components in the age range, and one line '
+                              'for those outside it.'),
             export.Option('legend_title', 'Legend heading', 'choice', group='Names',
                           values=[('model', 'Sample, model and number of analyses'),
                                   ('name_n', 'Sample and number of analyses'),
@@ -3923,9 +3983,10 @@ class ProbabilityWindow(QMainWindow):
         mx = opts.get('legend_max')
         for ax, (sm, t, sig, fit, tiers) in zip(axes, rows):
             title = self._mix_title(opts.get('legend_title', 'model'),
-                                    opts.get('legend_k', True), s=sm, fit=fit)
+                                    opts.get('legend_k', True), s=sm, fit=fit, opts=opts)
             am.draw_components(
-                ax, t, sig, fit, xl, tiers, ds=self.display_sigma, dec=int(self.age_dec),
+                ax, t, sig, fit, xl, tiers, ds=self.display_sigma, da=self.age_sigma,
+                dec=int(self.age_dec),
                 title=title, show=opts, tiers_mode=opts.get('legend_ages', 'all'),
                 with_n=opts.get('legend_n', True),
                 max_rows=(int(mx) if str(mx).isdigit() else 0) or None).remove()
@@ -3944,7 +4005,40 @@ class ProbabilityWindow(QMainWindow):
                           spec.get('line_scale', 1.0), spec.get('marker_scale', 1.0))
         fig.subplots_adjust(hspace=0.08)
 
+    def _sigma_options(self):
+        """σ of the ages and of the error bars in an exported figure."""
+        def vals(cur):
+            return [('window', f'As in the window ({cur}σ)'), ('1', '1σ'), ('2', '2σ')]
+        return [
+            export.Option('age_sig', 'Ages at', 'choice', values=vals(self.age_sigma),
+                          tip='σ of the ages in the legend and of the age bands.'),
+            export.Option('bar_sig', 'Error bars at', 'choice',
+                          values=vals(self.display_sigma),
+                          tip='σ of the error bars of the analyses.'),
+            export.Option('legend_sigma', 'Error-bar σ in legend', 'bool', True,
+                          tip='"Error bars ± 1σ" in the legend heading (the ages give '
+                              'their σ in the line above it).'),
+        ]
+
+    @contextlib.contextmanager
+    def _export_sigmas(self, spec):
+        """The σ of the ages and error bars the export asks for, while it draws."""
+        opts = spec.get('options', {})
+        keep = self.age_sigma, self.display_sigma
+        try:
+            if str(opts.get('age_sig')) in ('1', '2'):
+                self.age_sigma = int(opts['age_sig'])
+            if str(opts.get('bar_sig')) in ('1', '2'):
+                self.display_sigma = int(opts['bar_sig'])
+            yield
+        finally:
+            self.age_sigma, self.display_sigma = keep
+
     def _mix_export_render(self, fig, spec):
+        with self._export_sigmas(spec):
+            self._mix_export_draw(fig, spec)
+
+    def _mix_export_draw(self, fig, spec):
         st = self._mix_state
         opts = spec.get('options', {})
         fig.clear()
@@ -3973,9 +4067,9 @@ class ProbabilityWindow(QMainWindow):
             if pid == 'components':
                 leg = am.draw_components(
                     ax, st['t'], st['sig'], st['fit'], xl, st['tiers'],
-                    ds=self.display_sigma, dec=int(self.age_dec),
+                    ds=self.display_sigma, da=self.age_sigma, dec=int(self.age_dec),
                     title=self._mix_title(opts.get('legend_title', 'model'),
-                                    opts.get('legend_k', True)),
+                                          opts.get('legend_k', True), opts=opts),
                     show=opts, tiers_mode=opts.get('legend_ages', 'all'),
                     with_n=opts.get('legend_n', True),
                     max_rows=(int(opts['legend_max'])
@@ -3985,7 +4079,7 @@ class ProbabilityWindow(QMainWindow):
                     leg.remove()
                     ax.legend(loc='upper left', framealpha=0.92, prop={'size': 8},
                               title=self._mix_title(opts.get('legend_title', 'model'),
-                                    opts.get('legend_k', True)),
+                                                    opts.get('legend_k', True), opts=opts),
                               title_fontproperties={'size': 9, 'weight': 'bold'},
                               alignment='left').set_zorder(20)
                 export.place_legend(ax, spec)
@@ -4055,7 +4149,7 @@ class ProbabilityWindow(QMainWindow):
         if not path:
             return
         path = export.ensure_ext(path, _flt)
-        ds = self.display_sigma
+        ds = self.age_sigma
         idx = list(st['idx'])
         n = len(s.ages)
         ms = list(s.metas) if len(s.metas) == n else [export.step_meta({}) for _ in range(n)]
@@ -4090,7 +4184,7 @@ class ProbabilityWindow(QMainWindow):
 
     def _sample_report_text(self, s):
         """Detailed single-sample report for the bottom box."""
-        ds = self.display_sigma
+        ds = self.age_sigma
         r = s.wm()
         if r is None:
             return [f'{s.name}: no included data.']
@@ -4174,7 +4268,7 @@ class ProbabilityWindow(QMainWindow):
         return res
 
     def _pool_text(self, pr, act):
-        ds = self.display_sigma
+        ds = self.age_sigma
         method_label = ('GLS + ML random-effects (after Vermeesch 2015 §13)'
                         if _STAT_METHOD == METHOD_GLS
                         else 'WM + √MSWD')
@@ -4288,6 +4382,7 @@ class ProbabilityWindow(QMainWindow):
         data = dict(
             version=3,
             display_sigma=self.display_sigma,
+            age_sigma=self.age_sigma,
             age_dec=self.age_dec,
             input_sigma=self.input_sigma,
             pool_on=self.pool_on,
@@ -4339,7 +4434,12 @@ class ProbabilityWindow(QMainWindow):
             p.deleteLater()
         self.panels.clear()
         self.samples.clear()
-        self.display_sigma = data.get('display_sigma', 2)
+        if 'age_sigma' in data:
+            self.display_sigma, self.age_sigma = data['display_sigma'], data['age_sigma']
+        else:
+            # sessions from before the two settings had one σ, for the ages;
+            # the error bars take the default
+            self.age_sigma, self.display_sigma = data.get('display_sigma', 2), 1
         self.age_dec = int(data.get('age_dec', 3))
         if hasattr(self, 'dec_sel'):
             self.dec_sel.blockSignals(True)
@@ -4374,6 +4474,7 @@ class ProbabilityWindow(QMainWindow):
 
         self.cb_corr.setChecked(self.corr_j)
         self.sig_sel.setCurrentIndex(self.display_sigma - 1)
+        self.age_sig_sel.setCurrentIndex(self.age_sigma - 1)
         self.in_sig_sel.setCurrentIndex(0 if self.input_sigma == 1 else 1)
         self.method_sel.setCurrentIndex(1 if _STAT_METHOD == METHOD_GLS else 0)
         self.ymode_sel.setCurrentIndex(
@@ -4426,6 +4527,7 @@ class ProbabilityWindow(QMainWindow):
                           tip='What follows each name in the legend, at the 1σ/2σ '
                               'level and decimals set in the window. Internal = '
                               'analytical + J. MSWD and p stay with the ages.'),
+            *self._sigma_options(),
             export.Option('legend_n', 'n in legend', 'bool', True,
                           tip='Included analyses out of all, e.g. n = 46/56: after each sample '
                               'when Pool is off, on the pooled entry only when '
@@ -4500,6 +4602,10 @@ class ProbabilityWindow(QMainWindow):
 
     def _export_render(self, fig, spec):
         """Draw the plot into *fig* exactly as the dialog asks."""
+        with self._export_sigmas(spec):
+            self._export_draw(fig, spec)
+
+    def _export_draw(self, fig, spec):
         opts = spec.get('options', {})
         fig.clear()
         act = self._active_all()
@@ -4579,11 +4685,24 @@ class ProbabilityWindow(QMainWindow):
         else:
             for a in axes:
                 export.place_legend(a, spec)
+        for a in axes:
+            self._centre_pooled(a)
         export.scale_text(fig, spec.get('font_scale', 1.0),
                           spec.get('line_scale', 1.0), spec.get('marker_scale', 1.0))
         self._fixed_frame(fig, spec, has_title=bool(opts.get('title')))
         if split:
             fig.subplots_adjust(hspace=0.08)
+
+    @staticmethod
+    def _centre_pooled(ax):
+        """In a legend set in columns, the pooled entry alone in the last
+        column sits at mid height beside the samples, not on the top row."""
+        lg = ax.get_legend()
+        box = getattr(lg, '_legend_handle_box', None)
+        cols = box.get_children() if box is not None else []
+        if (len(cols) > 1 and len(cols[-1].get_children()) == 1
+                and lg.get_texts()[-1].get_text().lstrip().startswith('Pooled')):
+            box.align = 'center'
 
     @staticmethod
     def _merge_legends(axes, target):
@@ -4780,7 +4899,7 @@ class ProbabilityWindow(QMainWindow):
         if not path:
             return
         path = export.ensure_ext(path, _flt)
-        ds = self.display_sigma
+        ds = self.age_sigma
         sig_lbl = f'{ds}σ'
         method_label = ('GLS + ML random-effects (after Vermeesch 2015 §13)'
                         if _STAT_METHOD == METHOD_GLS
