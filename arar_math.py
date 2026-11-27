@@ -27,6 +27,20 @@ from scipy.special import logsumexp
 from scipy.stats import chi2 as _chi2, t as _t
 
 
+# The release, as in CITATION.cff (tests/test_tools.py checks they agree), and
+# the Zenodo concept DOI, which resolves to the newest release.
+SIMPLAR_VERSION = '1.0.0'
+SIMPLAR_DOI = '10.5281/zenodo.24591894'
+
+
+def simplar_citation():
+    """How to cite SimplAr, as one line of plain text."""
+    where = (f'Zenodo. https://doi.org/{SIMPLAR_DOI}' if SIMPLAR_DOI
+             else 'https://github.com/Joakim-SNM/SimplAr')
+    return (f'Hansen, J. G. (2026). SimplAr: desktop tools for 40Ar/39Ar geochronology '
+            f'(Version {SIMPLAR_VERSION}) [Computer software]. {where}')
+
+
 def chi2_cdf(x, df):
     return float(_chi2.cdf(max(float(x), 0.0), float(df)))
 

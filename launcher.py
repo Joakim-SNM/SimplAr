@@ -25,6 +25,7 @@ from PyQt5.QtGui import QFont, QColor, QPalette, QDesktopServices
 
 import data_folders as dfold
 import standards as stdlib
+from arar_math import SIMPLAR_VERSION, simplar_citation
 
 
 # (button label, script path relative to this folder), in workflow order
@@ -59,6 +60,10 @@ class ToolLauncher(QMainWindow):
         heading.setFont(QFont("Georgia", 30))
         heading.setObjectName("heading")
         layout.addWidget(heading)
+        version = QLabel(f"version {SIMPLAR_VERSION}")
+        version.setAlignment(Qt.AlignCenter)
+        version.setStyleSheet("color:#8a7a60;")
+        layout.addWidget(version)
 
         rule = QLabel()
         rule.setObjectName("rule")
@@ -482,7 +487,9 @@ def build_about_html(base_dir):
     toc = """
     <a name="top"></a>
     <h1>SimplAr: Methods &amp; Reference</h1>
-    <p class="lede">The methods and equations used by the six tools.</p>
+    <p class="lede">The methods and equations used by the six tools.
+       SimplAr version """ + SIMPLAR_VERSION + """.</p>
+    <p><b>Citing SimplAr:</b> """ + simplar_citation() + """</p>
 
     <div class="toc">
       <b>Contents</b>
@@ -1235,6 +1242,7 @@ def build_about_html(base_dir):
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName("SimplAr")
+    app.setApplicationVersion(SIMPLAR_VERSION)
     from arar_math import no_wheel_on_dropdowns, force_light, report_errors
     force_light(app)
     no_wheel_on_dropdowns(app)

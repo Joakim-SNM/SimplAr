@@ -107,8 +107,16 @@ All tools refer back a the standards library and they are defined by whether the
 
 ## Citing
 
-Cite the archived release on Zenodo; GitHub's **Cite this repository** button (from
-`CITATION.cff`) gives the reference. The DOI is added here with the first release.
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.24591894.svg)](https://doi.org/10.5281/zenodo.24591894)
+
+If you use SimplAr, please cite it:
+
+> Hansen, J. G. (2026). SimplAr: desktop tools for ⁴⁰Ar/³⁹Ar geochronology
+> (Version 1.0.0) [Computer software]. Zenodo. https://doi.org/10.5281/zenodo.24591894
+
+Give the version you used; the launcher shows it under the SimplAr heading, and the
+**About** window and the Notes sheet of every XLSX export give the full reference.
+GitHub's **Cite this repository** button gives the same reference in other formats.
 
 ## Licence
 

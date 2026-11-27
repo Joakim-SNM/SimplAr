@@ -2,6 +2,9 @@ cff-version: 1.2.0
 message: If you use SimplAr in your work, please cite it as below.
 type: software
 title: "SimplAr: desktop tools for 40Ar/39Ar geochronology"
+version: "1.0.0"
+date-released: "2026-11-27"
+doi: 10.5281/zenodo.24591894
 abstract: >-
   Desktop tools for 40Ar/39Ar geochronology, from the laboratory's data export
   to plateau, isochron and combined ages: data conversion, flux-monitor

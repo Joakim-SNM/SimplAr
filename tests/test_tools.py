@@ -73,6 +73,12 @@ def test_launcher_and_about():
     ok('About document builds, equations rendered to the cache folder')
     assert DATA in w.data_lbl.text()
     ok('launcher shows the data folder')
+    cff = open(os.path.join(ROOT, 'CITATION.cff'), encoding='utf-8').read()
+    ver = next(l.split(':', 1)[1].strip().strip('"') for l in cff.splitlines()
+               if l.startswith('version:'))
+    assert ver == am.SIMPLAR_VERSION, (ver, am.SIMPLAR_VERSION)
+    assert f'version {am.SIMPLAR_VERSION}' in html and 'Citing SimplAr' in html
+    ok(f'version {ver} the same in CITATION.cff and the tools; About says how to cite')
 
 
 def test_every_window_opens():

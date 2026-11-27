@@ -63,7 +63,7 @@ import matplotlib
 import matplotlib.lines as _mlines
 import matplotlib.text as _mtext
 
-from arar_math import (cfg_J, cfg_monitor, monitor_age, calibration_notes, route_text,
+from arar_math import (SIMPLAR_VERSION, simplar_citation, cfg_J, cfg_monitor, monitor_age, calibration_notes, route_text,
                        edited_standards_note)
 import data_folders as dfold
 
@@ -619,6 +619,7 @@ def notes_rows(raws=None, results_note=None):
         ['Sheet "Results"', results_note or RESULTS_NOTE],
         ['Sheet "Constants"', 'Every constant behind the numbers (atmospheric argon, decay constants, '
                               'FC age, interferences, irradiation time, data source and signal unit).'],
+        ['Made with', f'SimplAr {SIMPLAR_VERSION}. Cite as: {simplar_citation()}'],
     ]
     for g in raws:
         rows.append([f'Sheet "{g["sheet"]}"',
