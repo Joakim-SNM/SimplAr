@@ -83,7 +83,7 @@ from flux_dialog import FluxAssignDialog, FluxHost
 from standards import MonitorCombo, monitor_text, route_line
 from calibration_dialog import CalibrationDialog
 from arar_math import (route_cfg, route_from_cfg, route_text, set_route, ROUTE_KEYS,
-                       CALIB_KEYS)
+                       CALIB_KEYS, release_figures, window_shortcuts, report_errors)
 import export
 import data_folders as dfold
 
@@ -2026,8 +2026,8 @@ class ProbabilityWindow(QMainWindow):
 
         io1 = QHBoxLayout()
         io1.setSpacing(4)
-        for txt, fn in [('Save session', self.save_session),
-                        ('Load session', self.load_session),
+        for txt, fn in [('Save session…', self.save_session),
+                        ('Load session…', self.load_session),
                         ('Load disk flux…', self.load_disk_flux)]:
             io1.addWidget(_io_btn(txt, fn))
         right.addLayout(io1)
@@ -2036,7 +2036,7 @@ class ProbabilityWindow(QMainWindow):
         io2.setSpacing(4)
         for txt, fn in [('Load stack…', self.load_stack),
                         ('Export figure…', self.export_figure),
-                        ('Export XLSX / CSV', self.export_csv)]:
+                        ('Export XLSX / CSV…', self.export_csv)]:
             io2.addWidget(_io_btn(txt, fn))
         # the two export buttons, relabelled while the Mixture view is on
         self._btn_export_fig, self._btn_export_data = (
@@ -2048,6 +2048,8 @@ class ProbabilityWindow(QMainWindow):
         right_w.setLayout(right)
         right_w.setMaximumWidth(660)
         root.addWidget(right_w, 0)
+        window_shortcuts(self, save=self.save_session, load=self.load_session,
+                         export_figure=self.export_figure, export_data=self.export_csv)
 
     # --- sample management --------------------------------------------------
     def _calib_bar_values(self):
@@ -3672,8 +3674,8 @@ class ProbabilityWindow(QMainWindow):
         self._main_toolbar.setVisible(not self.mix_on)
         # with the view on, both exports are of the mixture model of the sample shown
         self._btn_export_fig.setText('Export mixture figure…' if self.mix_on else 'Export figure…')
-        self._btn_export_data.setText('Export mixture XLSX / CSV' if self.mix_on
-                                      else 'Export XLSX / CSV')
+        self._btn_export_data.setText('Export mixture XLSX / CSV…' if self.mix_on
+                                      else 'Export XLSX / CSV…')
 
     def _on_mixture(self, on):
         self._show_mixture(on)
@@ -4181,6 +4183,7 @@ class ProbabilityWindow(QMainWindow):
                     most = 'Minimum' if comp[j] == 0 else 'Older'
                 w.writerow([*rows[i], most, *['' if v != v else f'{v:.4f}' for v in P[j]]])
             w.writerow([])
+        QMessageBox.information(self, 'Export', f'Saved:\n{path}')
 
     def _sample_report_text(self, s):
         """Detailed single-sample report for the bottom box."""
@@ -4591,14 +4594,7 @@ class ProbabilityWindow(QMainWindow):
         ]
         return opts
 
-    @staticmethod
-    def _opt_float(spec, key):
-        """A numeric export option, or None when the field is blank."""
-        try:
-            txt = str(spec['options'].get(key, '')).strip().replace(',', '.')
-            return float(txt) if txt else None
-        except (TypeError, ValueError):
-            return None
+    _opt_float = staticmethod(export.opt_float)
 
     def _export_render(self, fig, spec):
         """Draw the plot into *fig* exactly as the dialog asks."""
@@ -4678,8 +4674,10 @@ class ProbabilityWindow(QMainWindow):
                            cur[1] if y1 is None else y1)
         if len(axes) > 1 and spec.get('legend') in ('below', 'above', 'outside'):
             # outside the panels: one legend for the stack, each entry once
-            self._merge_legends(axes, axes[-1] if spec.get('legend') == 'below'
-                                else axes[0])
+            # (the pooled entry is in every panel; it goes last, after the samples)
+            export.merge_legends(axes, axes[-1] if spec.get('legend') == 'below'
+                                 else axes[0],
+                                 last=lambda lab: lab.lstrip().startswith('Pooled'))
             export.place_legend(axes[-1] if spec.get('legend') == 'below'
                                 else axes[0], spec)
         else:
@@ -4704,61 +4702,11 @@ class ProbabilityWindow(QMainWindow):
                 and lg.get_texts()[-1].get_text().lstrip().startswith('Pooled')):
             box.align = 'center'
 
-    @staticmethod
-    def _merge_legends(axes, target):
-        """Move the legends of *axes* into one on *target*, keeping each
-        entry once (the pooled entry is in every panel)."""
-        handles, labels, first = [], [], None
-        for a in axes:
-            lg = a.get_legend()
-            if lg is None:
-                continue
-            first = first or lg
-            hs = list(getattr(lg, 'legend_handles', None)
-                      or getattr(lg, 'legendHandles', []))
-            for h, t in zip(hs, lg.get_texts()):
-                if t.get_text() not in labels:
-                    handles.append(h)
-                    labels.append(t.get_text())
-        if first is None:
-            return
-        # the pooled entry last, after every sample
-        order = sorted(range(len(labels)),
-                       key=lambda i: labels[i].lstrip().startswith('Pooled'))
-        handles = [handles[i] for i in order]
-        labels = [labels[i] for i in order]
-        kw = {}
-        if first.get_texts():
-            kw['prop'] = first.get_texts()[0].get_fontproperties()
-        if first.get_title().get_text():
-            kw['title'] = first.get_title().get_text()
-            kw['title_fontsize'] = first.get_title().get_fontsize()
-        for a in axes:
-            if a.get_legend() is not None:
-                a.get_legend().remove()
-        target.legend(handles=handles, labels=labels, **kw)
+    _fixed_frame = staticmethod(export.fixed_frame)
 
-    @staticmethod
-    def _fixed_frame(fig, spec, has_title=False):
-        """Place the plot frame from the page size, text size and title only.
-
-        tight_layout() fitted the frame around whatever surrounded it, so a
-        longer legend (below or beside the plot) or wider tick labels shrank
-        the diagram.  These margins (points, grown with the text size) depend
-        on the settings alone, so two figures with the same settings get
-        frames of exactly the same size.  A legend outside the frame, or a
-        label that needs more room, still goes in the file: the export crops
-        to the drawing, so it extends the file instead of squeezing the plot."""
-        fs = float(spec.get('font_scale', 1.0) or 1.0)
-        w_pt, h_pt = (float(v) * 72.0 for v in fig.get_size_inches())
-        left, bottom = 20.0 + 26.0 * fs, 19.0 + 21.0 * fs
-        right = 10.0 + 7.0 * fs
-        top = (16.0 + 10.0 * fs) if has_title else (8.0 + 6.0 * fs)
-        l, r = left / w_pt, 1.0 - right / w_pt
-        b, t = bottom / h_pt, 1.0 - top / h_pt
-        if r - l < 0.2 or t - b < 0.2:          # a tiny page: keep some plot
-            l, r, b, t = 0.15, 0.97, 0.15, 0.92
-        fig.subplots_adjust(left=l, right=r, bottom=b, top=t)
+    def closeEvent(self, event):
+        release_figures(self)       # before Qt deletes the canvases (macOS)
+        super().closeEvent(event)
 
     def export_figure(self):
         """Open the shared export dialog (panels, page size, text, legend)."""
@@ -5056,6 +5004,7 @@ class ProbabilityWindow(QMainWindow):
                                         f'irr "{_km[0]}"', f'disk "{_km[1]}"',
                                         f'hole {_hole}',
                                         f'R={self._flux_desc_R(_km, _im)}'])
+        QMessageBox.information(self, 'Export', f'Saved:\n{path}')
 
 
 def main():
@@ -5064,6 +5013,7 @@ def main():
     dfold.use_tool('age_distribution')
     force_light(app)
     no_wheel_on_dropdowns(app)
+    report_errors()
     win = ProbabilityWindow()
     win.show()
     sys.exit(app.exec_())

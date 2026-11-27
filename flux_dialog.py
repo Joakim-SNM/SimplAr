@@ -24,7 +24,7 @@ from PyQt5.QtGui import QColor
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 
-from arar_math import render_disk, force_light, mono_font
+from arar_math import render_disk, force_light, mono_font, enable_table_copy
 
 
 def flux_choices(disk_flux):
@@ -163,6 +163,7 @@ class FluxAssignDialog(QDialog):
         self.hole_tbl.setHorizontalHeaderLabels(['Hole', 'R', '±R%'])
         self.hole_tbl.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.hole_tbl.setFont(mono_font(9))
+        enable_table_copy(self.hole_tbl)
         lv.addWidget(self.hole_tbl, 2)
         split.addWidget(left)
 
@@ -186,6 +187,7 @@ class FluxAssignDialog(QDialog):
         self.tbl.setHorizontalHeaderLabels(heads)
         self.tbl.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
         self.tbl.setFont(mono_font(9))
+        enable_table_copy(self.tbl, read_only=False)
         rv.addWidget(self.tbl)
         split.addWidget(right)
         split.setSizes([400, 780])

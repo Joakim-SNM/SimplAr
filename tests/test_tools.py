@@ -92,6 +92,23 @@ def test_every_window_opens():
     app.processEvents()
     ok(', '.join(names))
 
+    # the same keys in every tool: Ctrl+S / Ctrl+O sessions, Ctrl+E figure,
+    # Ctrl+Shift+E data; on the menu where a tool has one
+    from PyQt5.QtWidgets import QShortcut, QAction
+    want = {'Flux monitors': {'Ctrl+S', 'Ctrl+O', 'Ctrl+E', 'Ctrl+Shift+E'},
+            'Flux regression': {'Ctrl+S', 'Ctrl+O', 'Ctrl+E', 'Ctrl+Shift+E'},
+            'Plateau & isochron': {'Ctrl+S', 'Ctrl+O', 'Ctrl+E', 'Ctrl+Shift+E'},
+            'Age distribution': {'Ctrl+S', 'Ctrl+O', 'Ctrl+E', 'Ctrl+Shift+E'},
+            'Recalculator and age combiner': {'Ctrl+S', 'Ctrl+O', 'Ctrl+Shift+E'}}
+    for title, keys in want.items():
+        w = names[title]
+        have = {sc.key().toString() for sc in w.findChildren(QShortcut)}
+        have |= {a.shortcut().toString() for a in w.findChildren(QAction)}
+        assert keys <= have, (title, keys - have)
+        for m in w.menuBar().actions():          # no empty menus
+            assert [a for a in m.menu().actions() if a.text()], (title, m.text())
+    ok('shortcuts for sessions and exports in every tool; menus hold their items')
+
 
 def test_isochron_atmospheric_in_view():
     print('Isochron, atmospheric reference:')

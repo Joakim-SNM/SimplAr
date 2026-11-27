@@ -35,6 +35,7 @@ from PyQt5.QtGui import QColor
 import matplotlib
 matplotlib.use('Qt5Agg')
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT
 from matplotlib.figure import Figure
 
 # shared math/constants live one folder up, next to the launcher
@@ -43,12 +44,14 @@ from arar_math import (
     FC_PRESETS, FC_PAIRED_LAMBDA, LAMBDA_PRESETS, fc_ingrowth, file_err_div,
     mswd_critical, DEFAULT_FC_NAME, STD_AGE_DEFAULT, STD_AGE_ERR,
     LAMBDA_DEFAULT, LAMBDA_ERR, force_light, no_wheel_on_dropdowns, mono_font, monitor_keys,
-    calibration_notes, edited_standards_note,
+    calibration_notes, edited_standards_note, ml_overdispersion,
 )
 from standards import MonitorCombo, monitor_text, route_line
 from calibration_dialog import CalibrationDialog
-from arar_math import (route_cfg, route_from_cfg, route_text, monitor_ingrowth, STANDARD_IDS)
+from arar_math import (route_cfg, route_from_cfg, route_text, monitor_ingrowth, STANDARD_IDS,
+                       note_label, window_shortcuts, release_figures, report_errors)
 import data_folders as dfold
+import export
 
 
 def _finite(x):
@@ -359,11 +362,7 @@ def _spin(lo, hi, step, decimals=2, width=70):
 
 def _note(text, color='gray', size=8, italic=False):
     """A small wrapped explanatory label."""
-    lbl = QLabel(text)
-    lbl.setWordWrap(True)
-    lbl.setStyleSheet(f"color: {color}; font-size: {size + 3}px;"
-                      + (" font-style: italic;" if italic else ""))
-    return lbl
+    return note_label(text, size + 3, color, italic)
 
 
 def _row(*items, stretch=True):
@@ -656,6 +655,32 @@ class DirectInputPanel(QWidget):
 
         return category_data
 
+    def _clear_groups(self):
+        for _, _, box in self.groups:
+            box.setParent(None)
+            box.deleteLater()
+        self._hint_labels.clear()
+        self.groups = []
+
+    _CONFIG = ('col_value_label', 'col_unc_label', 'col_id_var', 'col_id_label',
+               'col_extra_var', 'col_extra_label', 'is_ratio_var', 'uncertainty_type')
+
+    def state(self):
+        """The pasted groups and the column settings, for a session file."""
+        return dict(groups=[[n.get(), t.toPlainText()] for n, t, _ in self.groups],
+                    **{k: getattr(self, k).get() for k in self._CONFIG})
+
+    def set_state(self, st):
+        for k in self._CONFIG:
+            if k in st:
+                getattr(self, k).set(st[k])
+        self._clear_groups()
+        for name, text in st.get('groups') or [['C1', '']]:
+            self.add_group(name)
+            self.groups[-1][1].setPlainText(text)
+        self._update_hints()
+        self._refresh_counts()
+
     def load_example(self):
         # Ar-Ar example: Grain ID + Power % + Value + Uncertainty
         # Sets column config to match before loading.
@@ -688,12 +713,7 @@ class DirectInputPanel(QWidget):
                 ("G9", "30", "5.6712", "0.0033"),
             ],
         }
-        for _, _, box in self.groups:
-            box.setParent(None)
-            box.deleteLater()
-        self._hint_labels.clear()
-        self.groups = []
-
+        self._clear_groups()
         for gname, rows in example.items():
             self.add_group(gname)
             _, txt, _ = self.groups[-1]
@@ -763,6 +783,7 @@ class FluxMonitorsWindow(QMainWindow):
         # What is loaded: 'table' (CSV/xlsx), 'arar' (session files), 'direct'
         self.loaded_source  = None
         self.file_source    = None   # what the File Import tab holds ('table'/'arar')
+        self.session_source = None   # where the data of a loaded session came from
         self.arar_paths     = []
         self.arar_opts      = {}
         self.input_name     = None
@@ -782,6 +803,10 @@ class FluxMonitorsWindow(QMainWindow):
         self.analysis_rows    = {}
         self.crystal_stats    = {}
         self.step_group_stats = {}
+        # set while the export dialog draws the plot into its own figure
+        self._export_fig  = None
+        self._export_ax   = None
+        self._export_opts = {}
 
         self.setup_gui()
 
@@ -1265,6 +1290,15 @@ class FluxMonitorsWindow(QMainWindow):
         title.setAlignment(Qt.AlignCenter)
         title.setStyleSheet("font-size: 18px; font-weight: bold;")
         left_lay.addWidget(title)
+        b_save = QPushButton("Save session…")
+        b_save.setToolTip("The data, the options, the calibration and the manual "
+                          "exclusions, in one file.")
+        b_save.clicked.connect(self.save_session)
+        b_load = QPushButton("Load session…")
+        b_load.clicked.connect(self.load_session)
+        left_lay.addLayout(_row(b_save, b_load))
+        window_shortcuts(self, save=self.save_session, load=self.load_session,
+                         export_figure=self.export_figure, export_data=self.export_results)
 
         # Mode tabs: File Import (scrollable) and Direct Input
         mode_tabs = QTabWidget()
@@ -1352,6 +1386,8 @@ class FluxMonitorsWindow(QMainWindow):
 
     # ── plot area ──────────────────────────────────────────────────────────────
     def _clear_plot(self):
+        if self._export_fig is not None:        # drawing for the export dialog
+            return
         while self._plot_layout.count():
             w = self._plot_layout.takeAt(0).widget()
             if w is not None:
@@ -1359,6 +1395,8 @@ class FluxMonitorsWindow(QMainWindow):
                 w.deleteLater()
 
     def _plot_message(self, text, size=12):
+        if self._export_fig is not None:
+            return
         lbl = QLabel(text)
         lbl.setAlignment(Qt.AlignCenter)
         lbl.setWordWrap(True)
@@ -1373,7 +1411,7 @@ class FluxMonitorsWindow(QMainWindow):
 
         def rewrap(_event=None):
             width_px = fig.get_figwidth() * fig.dpi
-            char_px = 0.6 * fontsize * fig.dpi / 72
+            char_px = 0.6 * st.get_fontsize() * fig.dpi / 72
             st.set_text(head + '\n' + textwrap.fill(note, max(40, int(0.95 * width_px / char_px))))
         rewrap()
         fig._rewrap = rewrap
@@ -1382,14 +1420,341 @@ class FluxMonitorsWindow(QMainWindow):
         except AttributeError:          # matplotlib < 3.6
             fig.tight_layout(rect=[0, 0, 1, 0.88])
 
+    def _new_figure(self, figsize, dpi=100):
+        """The figure a plot is drawn on: a new one for the window, or the
+        export dialog's (cleared) while it renders."""
+        if self._export_fig is not None:
+            self._export_fig.clear()
+            self._export_fig._rewrap = None
+            return self._export_fig
+        return Figure(figsize=figsize, dpi=dpi)
+
+    def _grid_cols(self, n, most):
+        """Columns for a grid of n panels: up to *most*, and on an export page
+        no more than fit at about 5 cm a column."""
+        cols = min(n, most)
+        if self._export_fig is not None:
+            cols = min(cols, max(1, int(self._export_fig.get_figwidth() / 2.0)))
+        return cols
+
     def _show_figure(self, fig):
+        if fig is self._export_fig:
+            return None
         canvas = FigureCanvas(fig)
         if hasattr(fig, '_rewrap'):
             canvas.mpl_connect('resize_event', fig._rewrap)
         canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        # zoom and pan, as on the plots of the other tools
+        self._toolbar = NavigationToolbar2QT(canvas, self.plot_frame)
+        self._plot_layout.addWidget(self._toolbar)
         self._plot_layout.addWidget(canvas)
         canvas.draw()
         return canvas
+
+    # ── Figure export: the dialog shared with the other tools ────────────
+    def _plot_shown(self):
+        """True when the Plots tab shows a plot (not a message)."""
+        return any(isinstance(self._plot_layout.itemAt(i).widget(), FigureCanvas)
+                   for i in range(self._plot_layout.count()))
+
+    def _categories(self):
+        return sorted((self.results or {}).get('ratio4039_results', {}),
+                      key=self._natural_sort_key)
+
+    def _category_options(self, depends=None):
+        """A tick box per category: those drawn (in panels, or one page each)."""
+        return [export.Option(f'cat_{k}', cat, 'bool', True, group='Categories',
+                              depends=depends, ident=cat)
+                for k, cat in enumerate(self._categories())]
+
+    def _chosen_categories(self, opts):
+        return [cat for k, cat in enumerate(self._categories())
+                if opts.get(f'cat_{k}', True)]
+
+    def _export_options(self, batch=False):
+        """The switches of the export dialog.  batch: 'Export all categories',
+        one page per category in the view chosen there."""
+        view = self.crystal_view_var.get()
+        cats = self._categories()
+        opts = []
+        if batch:
+            opts.append(export.Option(
+                'view', 'View', 'choice',
+                default=view if view in ('all', 'crystal', 'power') else 'all',
+                values=[('all', 'All points'), ('crystal', 'By crystal'),
+                        ('power', 'By step group')]))
+        opts.append(export.Option(
+            'title', 'Title', 'choice',
+            values=[('full', 'As in the window'), ('short', 'First line only'),
+                    ('none', 'No title')],
+            tip='As in the window: the group, n, MSWD and p, and for the '
+                'crystal and step-group views the line explaining the '
+                'symbols. First line only: the group and data type, and '
+                'the name of each crystal or step group over its panel. With '
+                'several categories in panels, each panel keeps its category '
+                'and, unless No title, its mean and SE.'))
+        if batch or view == 'all':
+            opts.append(export.Option('ids', 'Crystal IDs next to the points', 'bool', True,
+                                      depends=('view', 'all') if batch else None))
+        if not batch and view == 'all' and len(cats) > 1:
+            cur = self.category_var.get()
+            opts += [
+                export.Option(
+                    'categories', 'Categories', 'choice', group='Categories',
+                    values=[('shown', f'{cur} only'),
+                            ('panels', 'Several, one panel each')],
+                    tip='One panel per category ticked below, stacked as the samples '
+                        'of the Age distribution tool: one point-number axis, one '
+                        'value axis label. Panel letters label the panels.'),
+                export.Option('columns', 'Columns', 'int', 1, lo=1, hi=6,
+                              group='Categories', depends=('categories', 'panels'),
+                              tip='1: the panels in one stack, as in the Age distribution '
+                                  'tool. More columns suit many categories.'),
+                export.Option('same_range', 'Same value range in every panel', 'bool',
+                              False, group='Categories', depends=('categories', 'panels'),
+                              tip='The positions compared on one scale (e.g. a flux '
+                                  'gradient), rather than each panel fitted to its points.'),
+            ] + self._category_options(depends=('categories', 'panels'))
+        elif batch:
+            opts += self._category_options()
+            opts.append(export.Option(
+                'batch_one_pdf', 'One PDF, one page per category', 'bool', True,
+                group='Output',
+                tip='Untick to write one file per category into a folder. PNG, SVG, '
+                    'EPS and TIFF always go that way.'))
+        axis = 'X' if view == 'groups' and not batch else 'Y'
+        opts += [
+            export.Option('v_min', f'{axis} from', 'text', group='Axis ranges',
+                          placeholder='auto'),
+            export.Option('v_max', 'to', 'text', group='Axis ranges',
+                          placeholder='auto'),
+        ]
+        return opts
+
+    def _draw_panels(self, fig, spec, data_type):
+        """The 'all points' plot of each ticked category in its own panel, laid
+        out as the samples of the Age distribution tool: panels stacked (in
+        columns if asked), one point-number axis at the bottom, one label for
+        the value axis.  What every panel shares (the data type and the points
+        averaged) is the figure's title.  Each panel's title has its category,
+        mean and SE ('First line only': no MSWD, p; 'No title': the category
+        alone), so the legends say only what the symbols are and can be merged
+        into one."""
+        opts = spec.get('options', {})
+        title = opts.get('title', 'full')
+        cats = self._chosen_categories(opts) or [self.category_var.get()]
+        n = len(cats)
+        try:
+            ncol = max(1, min(int(opts.get('columns', 1)), n))
+        except (TypeError, ValueError):
+            ncol = 1
+        nrow = math.ceil(n / ncol)
+        # characters of a title line that fit over one panel
+        fs = float(spec.get('font_scale', 1.0) or 1.0)
+        width = max(30, int(0.85 * fig.get_figwidth() * 72 / ncol / (0.55 * 9 * fs)))
+        axes, common = [], ''
+        for k, cat in enumerate(cats):
+            ax = fig.add_subplot(nrow, ncol, k + 1, sharex=axes[0] if axes else None)
+            axes.append(ax)
+            self._export_ax = ax
+            try:
+                self.create_outlier_plot(cat, data_type)
+            finally:
+                self._export_ax = None
+            hs, labels = ax.get_legend_handles_labels()
+            stats = [lab for lab in labels if ' = ' in lab]       # the mean and its SE
+            for h, lab in zip(hs, labels):
+                h.set_label(re.sub(r' \(n=\d+\)', '', lab.split(' = ')[0]))
+            if ax.get_legend() is not None:
+                ax.legend(fontsize=8)
+            head, _, rest = ax.get_title().partition('\n')
+            common = common or head.split(': ', 1)[-1]
+            lines = [cat]
+            if title != 'none':                 # the category alone with no title
+                lines += [self._wrap_items(t, width, ', ') for t in stats]
+            if title == 'full':
+                lines += [self._wrap_items(t, width) for t in rest.split('\n') if t]
+            ax.set_title('\n'.join(lines), fontsize=9)
+        if common and title != 'none':
+            fig.suptitle(common, fontsize=10)
+        ylab = axes[0].get_ylabel()
+        for k, ax in enumerate(axes):
+            ax.set_ylabel('')
+            if k + ncol < n:                    # a panel below: no x axis labels
+                ax.set_xlabel('')
+                ax.tick_params(labelbottom=False)
+        fig._panel_ylabel = fig.supylabel(ylab, fontsize=axes[0].xaxis.label.get_fontsize())
+        if opts.get('same_range'):
+            lims = [ax.get_ylim() for ax in axes]
+            for ax in axes:
+                ax.set_ylim(min(l[0] for l in lims), max(l[1] for l in lims))
+        fig._panel_grid = (nrow, ncol)
+
+    @staticmethod
+    def _wrap_items(line, width, sep=',  '):
+        """A line such as '(18/23 points,  MSWD = 0.515,  p = 0.95)' wrapped
+        between its items (split at *sep*), never inside one."""
+        out, cur = [], ''
+        for it in line.split(sep):
+            nxt = f'{cur}{sep}{it}' if cur else it
+            if cur and len(nxt) > width:
+                out.append(cur + sep.rstrip())
+                cur = it
+            else:
+                cur = nxt
+        return '\n'.join(out + [cur])
+
+    @staticmethod
+    def _panel_frame(fig, spec):
+        """Margins and gaps of the panels: the frame of a single plot
+        (export.fixed_frame), with room above each row for the panel titles,
+        between the columns for the value labels and on the left for the one
+        axis label.  Measured on the text as drawn, so it holds at any text
+        size; no layout engine, so the legends are placed as in the other
+        tools' exports."""
+        from matplotlib.backends.backend_agg import FigureCanvasAgg
+        nrow, ncol = fig._panel_grid
+        axes = fig.axes
+        export.fixed_frame(fig, spec)
+        r = FigureCanvasAgg(fig).get_renderer()
+        pt = 72.0 / fig.dpi
+        W, H = (v * 72.0 for v in fig.get_size_inches())
+        title_h = max([a.title.get_window_extent(r).height * pt for a in axes
+                       if a.get_title()] or [0.0])
+        tick_w = max((a.bbox.x0 - a.yaxis.get_tightbbox(r).x0) * pt for a in axes)
+        st = fig._suptitle
+        sup_h = st.get_window_extent(r).height * pt if st is not None and st.get_text() else 0.0
+        ylab = getattr(fig, '_panel_ylabel', None)
+        ylab_w = ylab.get_window_extent(r).width * pt if ylab is not None else 0.0
+        p = fig.subplotpars
+        left = (3.0 + ylab_w + 4.0 + tick_w + 2.0) / W
+        top = 1.0 - (4.0 + sup_h + 4.0 + title_h + 4.0) / H
+        gap_h, gap_w = title_h + 8.0, tick_w + 10.0
+        aw = ((p.right - left) * W - (ncol - 1) * gap_w) / ncol
+        ah = ((top - p.bottom) * H - (nrow - 1) * gap_h) / nrow
+        if aw > 20 and ah > 20:
+            fig.subplots_adjust(left=left, top=top, wspace=gap_w / aw, hspace=gap_h / ah)
+        if ylab is not None:
+            ylab.set_x(3.0 / W)
+
+    def _export_render(self, fig, spec, category=None):
+        """Draw the plot shown on the Plots tab into *fig* as the dialog asks;
+        with *category*, that category (a page of 'Export all categories')."""
+        opts = spec.get('options', {})
+        view = opts.get('view') or self.crystal_view_var.get()
+        data_type = self.data_type_var.get()
+        if category is None:
+            category = self.category_var.get()
+            chosen = self._chosen_categories(opts)
+            if 'view' in opts and chosen and category not in chosen:
+                category = chosen[0]            # the preview of a batch
+        keep = (self._pick_pts, self._pick_ax, getattr(self, '_pick_category', None))
+        self._export_fig, self._export_opts = fig, dict(opts)
+        try:
+            if view == 'groups':
+                self._plot_all_groups(data_type)
+            elif view == 'all' and opts.get('categories') == 'panels':
+                self._draw_panels(fig, spec, data_type)
+            elif category:
+                self._draw_category(view, category, data_type)
+        finally:
+            self._export_fig, self._export_opts = None, {}
+            self._pick_pts, self._pick_ax, self._pick_category = keep
+        groups = view == 'groups'
+        axes = fig.axes
+        title = opts.get('title', 'full')
+        if title != 'full' and not getattr(fig, '_panel_grid', None):
+            # the title over the plot: the figure's over a grid of panels, where
+            # each panel keeps the first line of its own (the crystal or group)
+            st = fig._suptitle if fig._suptitle is not None and fig._suptitle.get_text() else None
+            for t in ([st] if st is not None else [a.title for a in axes]):
+                t.set_text('' if title == 'none' else t.get_text().split('\n')[0])
+            for t in ([a.title for a in axes] if st is not None else []):
+                t.set_text(t.get_text().split('\n')[0])
+            fig._rewrap = None                # keep the note out
+        lo, hi = export.opt_float(spec, 'v_min'), export.opt_float(spec, 'v_max')
+        if lo is not None or hi is not None:
+            for a in axes:
+                get, put = (a.get_xlim, a.set_xlim) if groups else (a.get_ylim, a.set_ylim)
+                cur = get()
+                put(cur[0] if lo is None else lo, cur[1] if hi is None else hi)
+        panels = getattr(fig, '_panel_grid', None)
+        mode = spec.get('legend', 'auto')
+        if panels and len(axes) > 1 and mode in ('below', 'above', 'outside'):
+            # outside the panels: one legend for the stack, each symbol once
+            target = axes[-1] if mode == 'below' else axes[0]
+            export.merge_legends(axes, target)
+            export.place_legend(target, spec, span=mode != 'outside')
+        else:
+            for a in axes:
+                export.place_legend(a, spec)
+        export.scale_text(fig, spec.get('font_scale', 1.0),
+                          spec.get('line_scale', 1.0), spec.get('marker_scale', 1.0))
+        if callable(getattr(fig, '_rewrap', None)):
+            fig._rewrap()                     # the note wrapped at its scaled size
+        if panels:
+            self._panel_frame(fig, spec)
+        # one plot: the frame the other tools' exports use (the grids of
+        # crystals and step groups keep their constrained layout)
+        elif len(axes) == 1 and getattr(fig, 'get_layout_engine', lambda: None)() is None:
+            export.fixed_frame(fig, spec, has_title=title != 'none')
+
+    def export_figure(self):
+        """Export figure…: the plot on the Plots tab, or several categories in
+        panels, with page size, text, legend and presets set in the dialog the
+        other tools use."""
+        if not self._plot_shown():
+            QMessageBox.information(self, "Export figure",
+                                    "No plot to export: analyse the data first.")
+            return
+        view = self.crystal_view_var.get()
+        name = ('all_categories' if view == 'groups'
+                else (self.category_var.get() or 'flux_monitors'))
+        name = dfold.safe_filename(name, 'flux_monitors')
+        dlg = export.FigureExportDialog(
+            self, 'flux_monitors', [export.Panel('plot', 'Plot', fixed=True)],
+            self._export_options(), self._export_render,
+            default_name=name, defaults=dict(width_cm=17.0, height_cm=11.0))
+        dlg.exec_()
+
+    def export_all_categories(self):
+        """Export all categories…: one page per category (all points, by crystal
+        or by step group), as one PDF or one file each."""
+        if not self._categories():
+            QMessageBox.information(self, "Export all categories",
+                                    "No results to export: analyse the data first.")
+            return
+        dlg = export.FigureExportDialog(
+            self, 'flux_monitors_all', [export.Panel('plot', 'Plot', fixed=True)],
+            self._export_options(batch=True), self._export_render,
+            default_name='flux_monitors_all', batch=self._export_categories_all,
+            batch_pdf_flag='batch_one_pdf', title='Export all categories',
+            defaults=dict(width_cm=17.0, height_cm=11.0))
+        dlg.exec_()
+
+    def _export_categories_all(self, spec, path, progress):
+        """Write the page of every ticked category to *path* (a PDF, or a
+        folder with one file each).  Returns the lines to show the user."""
+        opts = spec['options']
+        one_pdf = spec.get('fmt', 'pdf') == 'pdf' and bool(opts.get('batch_one_pdf', True))
+
+        def page(cat):
+            def draw():
+                fig = Figure(figsize=export.figsize(spec), facecolor='white')
+                self._export_render(fig, spec, category=cat)
+                return (fig, spec) if fig.axes else None
+            return draw
+
+        items = [(cat, page(cat)) for cat in self._chosen_categories(opts)]
+        if not items:
+            return ['No category ticked: nothing written.']
+        written, pages, empty = export.write_pages(path, spec, items, progress, one_pdf)
+        lines = []
+        if empty:
+            lines.append('Nothing to draw in this view, left out: ' + ', '.join(empty))
+        if one_pdf and pages:
+            lines.append(f'{path}   ({pages} page{"s" if pages != 1 else ""})')
+        return lines + written
 
     # ---------------------------------------------------------------------
     # Manual exclusion tab
@@ -1807,6 +2172,8 @@ class FluxMonitorsWindow(QMainWindow):
         self.update_plot()
         self._populate_exclusion_table()
         self.export_btn.setEnabled(True)
+        self.export_fig_btn.setEnabled(True)
+        self.export_all_btn.setEnabled(True)
 
     def _clear_exclusions(self):
         """Clear manual exclusions and force-inclusions for the current category."""
@@ -2471,10 +2838,21 @@ class FluxMonitorsWindow(QMainWindow):
         self.analyze_btn.setEnabled(False)
         self.analyze_btn.clicked.connect(self.analyze_data)
         lay.addWidget(self.analyze_btn)
-        self.export_btn = QPushButton("Export results")
+        self.export_fig_btn = QPushButton("Export figure…")
+        self.export_fig_btn.setToolTip("The plot on the Plots tab, with page size, text "
+                                       "size, legend and presets, and a live preview.")
+        self.export_fig_btn.setEnabled(False)
+        self.export_fig_btn.clicked.connect(self.export_figure)
+        self.export_all_btn = QPushButton("Export all categories…")
+        self.export_all_btn.setToolTip("One page per category (all points, by crystal or "
+                                       "by step group), as one PDF or one file each.")
+        self.export_all_btn.setEnabled(False)
+        self.export_all_btn.clicked.connect(self.export_all_categories)
+        self.export_btn = QPushButton("Export XLSX / CSV…")
         self.export_btn.setEnabled(False)
         self.export_btn.clicked.connect(self.export_results)
-        lay.addWidget(self.export_btn)
+        lay.addLayout(_row(self.export_fig_btn, self.export_all_btn, self.export_btn,
+                           stretch=False))
         lay.addWidget(_note("Changing an option re-runs the analysis; exclusions are kept."))
         lay.addStretch()
 
@@ -2830,9 +3208,8 @@ class FluxMonitorsWindow(QMainWindow):
         gives τ² = s² − σ² (s² the sample variance), where ML gives
         (n−1)/n · s² − σ².
 
-        The likelihood is maximised on standardised values ((y − ȳ)/s, σ/s
-        with s the median σ), so the search tolerance means the same at any
-        scale (R ≈ 5, J ≈ 3e-3 or 1e-6 alike); τ² is scaled back by s².
+        τ² comes from arar_math.ml_overdispersion with reml=True, the same
+        likelihood fit the other tools use for overdispersion (with ML there).
 
         The SE is the usual plug-in √(1/Σw*), which does not include the
         uncertainty of τ² itself.
@@ -2845,45 +3222,7 @@ class FluxMonitorsWindow(QMainWindow):
 
         sigmas_in = [float(item[uncertainty_key]) for item in data]
         values_in = [float(item[value_key]) for item in data]
-        scale = sorted(sigmas_in)[n // 2] or (max(sigmas_in) or 1.0)
-        shift = sum(values_in) / n
-        sigmas = [s / scale for s in sigmas_in]
-        values = [(y - shift) / scale for y in values_in]
-
-        def neg_ll(tau2):
-            v  = [s**2 + tau2 for s in sigmas]
-            w  = [1.0 / x for x in v]
-            W  = sum(w)
-            mu = sum(w[i] * values[i] for i in range(n)) / W
-            return 0.5 * (sum(math.log(x) for x in v) + math.log(W)
-                          + sum(w[i] * (values[i] - mu)**2 for i in range(n)))
-
-        # Coarse scan, then golden-section refinement around the best point.
-        mean_y = sum(values) / n
-        var_y  = sum((y - mean_y)**2 for y in values) / (n - 1)
-        hi     = 20.0 * (var_y + max(s**2 for s in sigmas))
-        grid   = [0.0] + [hi * 10.0**(-k / 8.0) for k in range(80, -1, -1)]
-        f      = [neg_ll(t) for t in grid]
-        k      = min(range(len(grid)), key=f.__getitem__)
-        if k == 0:
-            tau2 = 0.0
-        else:
-            lo, up = grid[k - 1], grid[min(k + 1, len(grid) - 1)]
-            gr = (math.sqrt(5.0) - 1.0) / 2.0
-            c, d = up - gr * (up - lo), lo + gr * (up - lo)
-            for _ in range(200):
-                if neg_ll(c) < neg_ll(d):
-                    up = d
-                else:
-                    lo = c
-                c, d = up - gr * (up - lo), lo + gr * (up - lo)
-                if up - lo < 1e-14 * (1.0 + up):
-                    break
-            tau2 = 0.5 * (lo + up)
-            if neg_ll(tau2) >= neg_ll(0.0):
-                tau2 = 0.0
-
-        tau2 = tau2 * scale ** 2            # back to the units of the data
+        tau2 = ml_overdispersion(values_in, sigmas_in, reml=True)
         tau = math.sqrt(tau2)
         w   = [1.0 / (s**2 + tau2) for s in sigmas_in]
         W   = sum(w)
@@ -2967,8 +3306,12 @@ class FluxMonitorsWindow(QMainWindow):
             self._plot_message("No data for selected type")
             return
 
-        fig = Figure(figsize=(10, 6), dpi=100)
-        ax  = fig.add_subplot(111)
+        if self._export_ax is not None:         # one panel of an export
+            ax = self._export_ax
+            fig = ax.figure
+        else:
+            fig = self._new_figure((10, 6))
+            ax  = fig.add_subplot(111)
 
         nan = float('nan')
         all_points     = plot_data.get('all_points', [])
@@ -3037,7 +3380,7 @@ class FluxMonitorsWindow(QMainWindow):
                                 label=lbl, zorder=z)
                     first = False
                     for x, p in zip(xs, sel):
-                        gid = _grain_label(p)
+                        gid = _grain_label(p) if self._export_opts.get('ids', True) else ''
                         if gid:
                             ax.annotate(gid, (x, p['value']), fontsize=6, ha='left',
                                         va='center', xytext=(5, 0),
@@ -3126,7 +3469,8 @@ class FluxMonitorsWindow(QMainWindow):
 
         canvas = self._show_figure(fig)
         # Click a point to cycle it default → exclude → force-include → default.
-        canvas.mpl_connect('button_press_event', self._on_plot_click)
+        if canvas is not None:
+            canvas.mpl_connect('button_press_event', self._on_plot_click)
 
     def _on_plot_click(self, event):
         """Click the nearest data point on the outlier plot to cycle its state."""
@@ -3134,6 +3478,8 @@ class FluxMonitorsWindow(QMainWindow):
         pts = getattr(self, '_pick_pts', None)
         if ax is None or not pts or event.inaxes is not ax or event.xdata is None:
             return
+        if getattr(self, '_toolbar', None) is not None and self._toolbar.mode:
+            return                        # zooming or panning, not picking
         trans = ax.transData.transform
         best, best_d = None, 1e9
         for (x, y, sid) in pts:
@@ -3208,7 +3554,7 @@ class FluxMonitorsWindow(QMainWindow):
         rows.sort(key=lambda t: t[1])   # order groups by their mean value
         tier_lbl = "REML" if use_reml else "WM, SE × √MSWD above the W&C limit"
 
-        fig = Figure(figsize=(9, max(3.0, 0.45 * len(rows) + 1.6)), dpi=100)
+        fig = self._new_figure((9, max(3.0, 0.45 * len(rows) + 1.6)))
         ax  = fig.add_subplot(111)
         ys  = list(range(len(rows)))
         for y, (cat, m, se, n, mswd) in zip(ys, rows):
@@ -3246,10 +3592,13 @@ class FluxMonitorsWindow(QMainWindow):
         category = self.category_var.get()
         if not category or not data_type:
             return
+        self._draw_category(view_mode, category, data_type)
 
-        if view_mode == 'crystal' and self.raw_category_data.get(category):
+    def _draw_category(self, view, category, data_type):
+        """One category in the 'all' (points), 'crystal' or 'power' view."""
+        if view == 'crystal' and self.raw_category_data.get(category):
             self._plot_by_crystal(category, data_type)
-        elif view_mode == 'power' and self.raw_category_data.get(category):
+        elif view == 'power' and self.raw_category_data.get(category):
             self._plot_by_power_step(category, data_type)
         else:
             self.create_outlier_plot(category, data_type)
@@ -3347,9 +3696,9 @@ class FluxMonitorsWindow(QMainWindow):
         ref = self._category_reference(category, f)
 
         n = len(panels)
-        ncols = min(5, n)
+        ncols = self._grid_cols(n, 5)
         nrows = math.ceil(n / ncols)
-        fig = Figure(figsize=(max(10, ncols * 2.8), max(4, nrows * 3.0)), dpi=90)
+        fig = self._new_figure((max(10, ncols * 2.8), max(4, nrows * 3.0)), dpi=90)
         for idx, (gid, steps) in enumerate(panels):
             ax = fig.add_subplot(nrows, ncols, idx + 1)
             for i, t in enumerate(steps, start=1):
@@ -3419,9 +3768,9 @@ class FluxMonitorsWindow(QMainWindow):
         groups = stats['groups']
         n_g = len(groups)
         npan = n_g + (1 if n_g >= 2 else 0)
-        ncols = min(npan, 6)
+        ncols = self._grid_cols(npan, 6)
         nrows = math.ceil(npan / ncols)
-        fig = Figure(figsize=(max(10, ncols * 2.6), max(4.5, nrows * 3.4)), dpi=90)
+        fig = self._new_figure((max(10, ncols * 2.6), max(4.5, nrows * 3.4)), dpi=90)
         colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd',
                   '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
 
@@ -3643,9 +3992,10 @@ class FluxMonitorsWindow(QMainWindow):
         exclusions are kept either way)."""
         if not self._options_valid(show=True):
             return
-        if self.loaded_source == 'direct' and self.raw_category_data:
+        if self.loaded_source in ('direct', 'session') and self.raw_category_data:
+            what = 'Direct input' if self.loaded_source == 'direct' else 'session'
             try:
-                self._run_analysis('=== RE-ANALYSIS of the Direct input data (exclusions kept) ===')
+                self._run_analysis(f'=== RE-ANALYSIS of the {what} data (exclusions kept) ===')
                 self.log('\nAnalysis complete.')
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Error analysing data: {str(e)}")
@@ -3690,6 +4040,135 @@ class FluxMonitorsWindow(QMainWindow):
         finally:
             self.analyze_btn.setEnabled(True)
 
+    def closeEvent(self, event):
+        release_figures(self)       # before Qt deletes the canvases (macOS)
+        super().closeEvent(event)
+
+    # ---------------------------------------------------------------------
+    # Sessions
+    # ---------------------------------------------------------------------
+
+    _SESSION_FILTER = 'Flux monitors session (*.json);;All (*)'
+    _SESSION_FORMAT = 'SimplAr flux monitors 1'
+
+    def _session_vars(self):
+        """The options a session keeps, by name."""
+        return dict(
+            error_filter=self.use_error_filter_var, error_limit=self.error_threshold_var,
+            nmad=self.use_nmad_var, nmad_k=self.nmad_k_var,
+            mswd=self.use_mswd_var, mswd_rule=self.mswd_rule_var,
+            mswd_limit=self.mswd_threshold_var, mswd_discordant=self.mswd_discordant_var,
+            reml=self.use_reml_var, display_sigma=self.display_sigma_var,
+            crystal_mode=self.crystal_mode_var, step_groups=self.step_group_var,
+            import_sigma=self.import_sigma_var)
+
+    def save_session(self):
+        """Save session…: the data as analysed, the options, the calibration and
+        the manual exclusions, so the analysis can be reopened as it is."""
+        if not self.raw_category_data or not self.results:
+            QMessageBox.information(self, "Save session",
+                                    "Nothing to save yet: analyse the data first.")
+            return
+        path, _ = dfold.get_save_file_name(self, "Save session", "flux_monitors_session.json",
+                                           self._SESSION_FILTER)
+        if not path:
+            return
+        if not os.path.splitext(path)[1]:
+            path += '.json'
+        src = (self.session_source if self.loaded_source == 'session' else self.loaded_source)
+        st = dict(
+            format=self._SESSION_FORMAT,
+            data=self.raw_category_data,
+            source=src, input_name=self.input_name,
+            value_is_ratio=self.value_is_ratio, value_label=self.value_label,
+            arar_files=[os.path.basename(p) for p in self.arar_paths] if src == 'arar' else [],
+            arar_opts=self.arar_opts if src == 'arar' else {},
+            exclusions=self.manual_exclusions,
+            inclusions={c: sorted(v) for c, v in self.manual_inclusions.items()},
+            options={k: v.get() for k, v in self._session_vars().items()},
+            calibration=dict(name=self.calib_var.get(), std_age=self.std_age_var.get(),
+                             std_age_err=self.std_age_err_var.get(),
+                             lam=self.lambda_var.get(), lam_err=self.lambda_err_var.get(),
+                             monitor=self.monitor_combo.keys()['monitor'], route=self._route),
+            view=dict(category=self.category_var.get(), data_type=self.data_type_var.get(),
+                      view=self._view_label_var.get(), zoom=self.zoom_mode_var.get()),
+            direct_input=self.direct_input.state() if src == 'direct' else None)
+
+        def plain(v):                     # numpy numbers from a pandas table
+            return v.item() if hasattr(v, 'item') else str(v)
+        try:
+            with open(path, 'w', encoding='utf-8') as f:
+                json.dump(st, f, indent=1, ensure_ascii=False, default=plain)
+        except OSError as e:
+            QMessageBox.warning(self, "Save session", f"Could not write the file:\n{e}")
+            return
+        self.log(f"Session saved: {path}")
+
+    def load_session(self):
+        """Load session…: reopen a saved analysis with its options, calibration
+        and manual exclusions."""
+        path, _ = dfold.get_open_file_name(self, "Load session", "", self._SESSION_FILTER)
+        if not path:
+            return
+        try:
+            with open(path, encoding='utf-8') as f:
+                st = json.load(f)
+            if st.get('format') != self._SESSION_FORMAT or not st.get('data'):
+                raise ValueError('not a Flux monitors session')
+            data = {str(c): list(rows) for c, rows in st['data'].items()}
+        except (OSError, ValueError, AttributeError, TypeError) as e:
+            QMessageBox.warning(self, "Load session", f"Could not read the session:\n{e}")
+            return
+        opts = st.get('options') or {}
+        for k, var in self._session_vars().items():
+            if k in opts:
+                var.set(opts[k])
+        cal = st.get('calibration') or {}
+        self._applying_preset = True          # the fields as saved, not a preset's
+        try:
+            if cal.get('name'):
+                self.calib_var.set(cal['name'])
+            for k, var in (('std_age', self.std_age_var), ('std_age_err', self.std_age_err_var),
+                           ('lam', self.lambda_var), ('lam_err', self.lambda_err_var)):
+                if k in cal:
+                    var.set(cal[k])
+        finally:
+            self._applying_preset = False
+        self.monitor_combo.set_monitor(cal.get('monitor') or 'FCs')
+        self._route = cal.get('route')
+        self._show_route()
+        if st.get('direct_input'):
+            self.direct_input.set_state(st['direct_input'])
+
+        self.file_source = None               # the file tab's file is not this data
+        self.session_source = st.get('source')
+        self.arar_paths = list(st.get('arar_files') or [])
+        self.arar_opts = dict(st.get('arar_opts') or {})
+        self._set_loaded_data(data, 'direct' if st.get('source') == 'direct' else 'session',
+                              st.get('value_is_ratio', True), st.get('value_label'),
+                              st.get('input_name'))
+        self.manual_exclusions = {c: dict(v) for c, v in (st.get('exclusions') or {}).items()}
+        self.manual_inclusions = {c: set(v) for c, v in (st.get('inclusions') or {}).items()}
+        view = st.get('view') or {}
+        self.data_type_var.set(view.get('data_type') or self.data_type_var.get())
+        self.category_var.set(view.get('category') or '')
+        if view.get('view') in self._VIEWS:
+            self._view_label_var.set(view['view'])
+            self.crystal_view_var.set(self._VIEWS[view['view']])
+        self.zoom_mode_var.set(view.get('zoom') or 'adaptive')
+        self._rerun_timer.stop()
+        if not self._options_valid(show=True):
+            return
+        try:
+            self._run_analysis(f"=== SESSION: {os.path.basename(path)} ===")
+        except Exception as e:
+            QMessageBox.critical(self, "Load session", f"Error analysing the data: {e}")
+            return
+        self._rerun_timer.stop()
+        n = sum(len(v) for v in data.values())
+        self._set_current_data(f"session {os.path.basename(path)}, {n} points in "
+                               f"{len(data)} groups")
+
     # ---------------------------------------------------------------------
     # Export
     # ---------------------------------------------------------------------
@@ -3704,22 +4183,28 @@ class FluxMonitorsWindow(QMainWindow):
     }
 
     def export_results(self):
+        """Export XLSX / CSV…: the workbook has the results, the constants and
+        notes laid out as in the other tools' exports, and a sheet each for the
+        points, steps, crystals and step groups; a CSV holds the constants, the
+        results table and the analysis settings."""
         if not self.results:
-            QMessageBox.critical(self, "Error", "No results to export")
+            QMessageBox.warning(self, "Export", "No results to export: analyse the data first.")
             return
+        path, flt = dfold.get_save_file_name(self, "Export results", "flux_monitors.xlsx",
+                                             export.save_filter())
+        if not path:
+            return
+        path = export.ensure_ext(path, flt)
         try:
-            output_file, _ = dfold.get_save_file_name(
-                self, "Save Results As", "flux_monitors.xlsx",
-                "Excel files (*.xlsx);;All files (*)")
-            if not output_file:
-                return
-            if not os.path.splitext(output_file)[1]:
-                output_file += '.xlsx'
-            self._write_results_xlsx(output_file)
-            QMessageBox.information(self, "Success", f"Results exported to:\n{output_file}")
-            self.log(f'Exported: {output_file}')
+            if path.lower().endswith('.xlsx'):
+                self._write_results_xlsx(path)
+            else:
+                self._write_results_csv(path)
         except Exception as e:
-            QMessageBox.critical(self, "Error", f"Error exporting: {str(e)}")
+            QMessageBox.critical(self, "Export", f"Could not write the file:\n{e}")
+            return
+        QMessageBox.information(self, "Export", f"Saved:\n{path}")
+        self.log(f'Exported: {path}')
 
     def _summary_rows(self):
         """(header, rows) of the Results sheet, one row per category."""
@@ -3780,13 +4265,15 @@ class FluxMonitorsWindow(QMainWindow):
 
     def _parameter_lines(self):
         crit = ([f"Data: {self.input_name or os.path.basename(self.input_file or '') or 'Unknown'}"])
-        if self.loaded_source == 'arar':
+        src = (getattr(self, 'session_source', None) if self.loaded_source == 'session'
+               else self.loaded_source)
+        if src == 'arar':
             crit.append(f"Ar-Ar files: {', '.join(os.path.basename(p) for p in self.arar_paths)}")
             crit.append(f"Categories: {'irradiation position' if self.arar_opts.get('group_by') == 'position' else 'file'};"
                         f" crystals: {ARAR_CRYSTAL_RULES.get(self.arar_opts.get('crystal_rule'), '')}")
             crit.append("Step errors read at 1σ; steps excluded in the files loaded as "
                         "manual exclusions")
-        elif self.loaded_source == 'table':
+        elif src == 'table':
             sm = getattr(self, 'import_sigma_var', None)
             crit.append(f"Errors in file: {'±2σ (halved)' if sm and sm.get() == '2sigma' else '±1σ'}")
         if self.value_is_ratio:
@@ -3818,22 +4305,71 @@ class FluxMonitorsWindow(QMainWindow):
                 else '; no discordance test')
              if self.use_mswd_var.get() else "MSWD rejection: off"),
             "Order of rejection: relative-error filter, NMAD, MSWD.",
-            "",
-            "NOTES",
-            "SE values are 1σ unless the column says 2σ.",
-            "Reported = REML random-effects mean and SE when REML is ticked, else the weighted "
-            "mean with SE × √MSWD when the MSWD exceeds the Wendt & Carl limit.",
-            "MSWD 95% limit: Wendt & Carl (1991), 1 + 2√(2/(n−1)); above it the scatter is "
-            "significant overdispersion and only then is the SE multiplied by √MSWD.",
+        ]
+        return crit
+
+    def _notes_rows(self, sheets=()):
+        """Rows of the Notes sheet: what each sheet holds, then how the
+        numbers are reported."""
+        about = {
+            'Results': 'One row per category: the weighted mean and REML mean of its points, '
+                       'the value reported' + (' and its J' if self.value_is_ratio else '')
+                       + '. Below the table, how the data were analysed.',
+            'Constants': 'The calibration J is calculated on.',
+            'Points': 'Every point averaged in each category, with its status and the reason '
+                      'for any rejection or exclusion.',
+            'Steps': 'Every measured step, when the points averaged are not the steps.',
+            'Crystals': 'The total gas of each step-heated crystal and the statistics of its steps.',
+            'Step groups': 'The steps grouped by laser power or step number, and the comparison '
+                           'of the group means.',
+        }
+        rows = [['ABOUT THIS FILE']]
+        rows += [[f'Sheet "{sh}"', about[sh]] for sh in sheets if sh in about]
+        rows += [
+            [],
+            ['CONVENTIONS'],
+            ['Uncertainties', 'SE values are 1σ unless the column says 2σ.'],
+            ['Reported', 'The REML random-effects mean and SE when REML is ticked, else the '
+                         'weighted mean with SE × √MSWD when the MSWD exceeds the Wendt & Carl '
+                         'limit.'],
+            ['MSWD 95% limit', 'Wendt & Carl (1991), 1 + 2√(2/(n−1)); above it the scatter is '
+                               'significant overdispersion and only then is the SE multiplied '
+                               'by √MSWD.'],
         ]
         if self.value_is_ratio:
-            crit.append("J = (e^(λt) − 1)/R of the reported R. Its error is from R only: the FC age "
-                        "and λ errors are shared by every J on this calibration and belong in the "
-                        "external tier of the ages, not here.")
+            rows.append(['J', 'J = (e^(λt) − 1)/R of the reported R. Its error is from R only: the '
+                              'FC age and λ errors are shared by every J on this calibration and '
+                              'belong in the external tier of the ages, not here.'])
         if self.crystal_stats or self.crystal_mode_var.get() == 'crystal':
-            crit.append("Total gas of a step-heated crystal: R = Σ fᵢRᵢ, fᵢ = ³⁹Ar fraction, "
-                        "σ = √Σ fᵢ²σᵢ²; without ³⁹Ar the inverse-variance mean of its steps.")
-        return crit
+            rows.append(['Total gas', 'Of a step-heated crystal: R = Σ fᵢRᵢ, fᵢ = ³⁹Ar fraction, '
+                                      'σ = √Σ fᵢ²σᵢ²; without ³⁹Ar the inverse-variance mean of '
+                                      'its steps.'])
+        return rows
+
+    def _constants_rows(self):
+        """The constants block shared with the other tools' exports (R mode)."""
+        if not self.value_is_ratio:
+            return []
+        return [['CONSTANTS'], ['Constant', 'Value', 'Note']] + \
+            export.constants_rows(self._monitor_cfg())
+
+    def _write_results_csv(self, path):
+        import csv
+        header, rows = self._summary_rows()
+        with open(path, 'w', newline='', encoding='utf-8-sig') as fh:
+            w = csv.writer(fh)              # constants first, as in the other tools
+            if self.value_is_ratio:
+                w.writerows(self._constants_rows())
+                w.writerow([])
+            w.writerow(['FLUX MONITOR RESULTS'])
+            w.writerow(header)
+            for r in rows:
+                w.writerow(['' if isinstance(v, float) and not math.isfinite(v) else v
+                            for v in r])
+            w.writerow([])
+            w.writerow(['ANALYSIS PARAMETERS'])
+            for line in self._parameter_lines():
+                w.writerow([line])
 
     def _write_results_xlsx(self, path):
         from openpyxl import Workbook
@@ -3858,17 +4394,17 @@ class FluxMonitorsWindow(QMainWindow):
         wb = Workbook()
         ws = wb.active
         ws.title = "Results"
-        ws.cell(row=1, column=1, value="WEIGHTED MEAN RESULTS").font = bold
+        ws.cell(row=1, column=1, value="FLUX MONITOR RESULTS").font = bold
         ws.cell(row=2, column=1, value=f"Run: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}")
         header, rows = self._summary_rows()
         end = table(ws, 4, header, rows, widths={1: 18, 2: 30, 8: 14, 11: 20, 18: 20, 19: 50})
         r0 = end + 1
         ws.cell(row=r0, column=1, value="ANALYSIS PARAMETERS").font = bold
         for i, line in enumerate(self._parameter_lines(), start=1):
-            c = ws.cell(row=r0 + i, column=1, value=line)
-            if line == "NOTES":
-                c.font = bold
+            ws.cell(row=r0 + i, column=1, value=line)
         ws.freeze_panes = "B5"
+        if self.value_is_ratio:
+            export.write_sheet(wb.create_sheet("Constants"), self._constants_rows(), bold)
 
         # Points: what was averaged in each category, with its status
         ratio = self.value_is_ratio
@@ -3956,8 +4492,8 @@ class FluxMonitorsWindow(QMainWindow):
             table(ws5, 1, gh, grow, widths={1: 16, 2: 14, 3: 18, 15: 22})
             ws5.freeze_panes = "A2"
 
+        export.write_sheet(wb.create_sheet("Notes"), self._notes_rows(wb.sheetnames), bold)
         wb.save(path)
-        self.log(f"Exported (xlsx, {len(wb.sheetnames)} sheets: {', '.join(wb.sheetnames)})")
 
 
 def main():
@@ -3966,6 +4502,7 @@ def main():
     dfold.use_tool('flux_monitors')
     force_light(app)
     no_wheel_on_dropdowns(app)
+    report_errors()
     win = FluxMonitorsWindow()
     win.show()
     sys.exit(app.exec_())

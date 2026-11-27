@@ -34,12 +34,12 @@ from arar_math import (
     LAMBDA_DEFAULT, STD_AGE_DEFAULT, STD_AGE_ERR,
     FC_PRESETS, paired_lambda, force_light, no_wheel_on_dropdowns, DEFAULT_FC_INDEX,
     fc_ingrowth, mswd_critical, mswd_classify, mono_font,
-    calibration_notes, edited_standards_note,
 )
 from standards import MonitorCombo, route_line
 from calibration_dialog import CalibrationDialog
 from arar_math import (route_cfg, route_from_cfg, route_text, monitor_ingrowth,
-                       monitor_mismatch_note, STANDARD_IDS, monitor_keys)
+                       monitor_mismatch_note, STANDARD_IDS, monitor_keys, calibration_for,
+                       SHORTCUTS, enable_table_copy, release_figures, report_errors)
 import data_folders as dfold
 import export
 
@@ -336,10 +336,35 @@ class SimplePlotWidget(QWidget):
     def show_page(self, k):
         if not self._pages:
             return
+        self._page = k
         for j, b in enumerate(self._page_btns):
             b.setChecked(j == k)
         self._pages[k][1]()
         self.canvas.draw_idle()
+
+    def render_into(self, fig, spec):
+        """Draw the page shown into *fig* for the export dialog, with the
+        legend, text, line and marker sizes it sets, and the note above the
+        plot when it is asked for."""
+        keep = (self.figure, getattr(self, '_note_text', None),
+                getattr(self, '_below_note', None))
+        self.figure = fig
+        try:
+            self._pages[getattr(self, '_page', 0)][1]()
+            for ax in fig.axes:
+                export.place_legend(ax, spec)
+            fs = float(spec.get('font_scale', 1.0) or 1.0)
+            export.scale_text(fig, fs, spec.get('line_scale', 1.0),
+                              spec.get('marker_scale', 1.0))
+            note = getattr(self, '_note_text', None)
+            if note and spec.get('options', {}).get('note', True):
+                self._note(note[0], note[1] * fs)      # rewrapped at its new size
+            elif note:
+                fig.suptitle('')
+                if getattr(self, '_below_note', None):
+                    self._below_note(1.0 - 8.0 / (fig.get_figheight() * 72))
+        finally:
+            self.figure, self._note_text, self._below_note = keep
 
     def _on_scroll(self, event):
         if not event.inaxes:
@@ -658,7 +683,8 @@ class SimplePlotWidget(QWidget):
             ax.view_init(elev=15, azim=30)
 
         self.figure.subplots_adjust(left=0.0, right=1.0, top=0.91, bottom=0.0)
-        self.canvas.draw()
+        if self.figure is self.canvas.figure:       # not while drawing an export
+            self.canvas.draw()
 
 
 # ── Disk configuration widget ────────────────────────────────────────────────
@@ -746,6 +772,7 @@ class DiskWidget(QWidget):
         font.setBold(True)
         self.table_widget.horizontalHeader().setFont(font)
         self.table_widget.setMinimumHeight(400)
+        enable_table_copy(self.table_widget, read_only=False)
 
         header = self.table_widget.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeToContents)
@@ -1139,13 +1166,14 @@ class FluxRegressionCalculator(QMainWindow):
     def _cal_cfg(self):
         if getattr(self, '_route', None):
             return route_cfg(self._route)
+        # no route chosen yet: the hidden fields, with the errors of the
+        # preset they match (a λ error of 0 would read as a custom λ)
         try:
-            c = dict(stdAgeMa=float(self.standard_age_edit.text()),
-                     stdAgeErrMa=float(self.standard_age_err_edit.text()),
-                     lambdaYr=float(self.lambda_edit.text()), lambdaErrYr=0.0)
+            c = calibration_for(float(self.standard_age_edit.text()),
+                                float(self.lambda_edit.text()),
+                                float(self.standard_age_err_edit.text()))
         except ValueError:
-            c = dict(stdAgeMa=FC_AGE_DEFAULT, stdAgeErrMa=FC_AGE_ERROR_DEFAULT,
-                     lambdaYr=DECAY_CONSTANT, lambdaErrYr=0.0)
+            c = calibration_for(FC_AGE_DEFAULT, DECAY_CONSTANT, FC_AGE_ERROR_DEFAULT)
         c.update(self.monitor_combo.keys())
         return c
 
@@ -1415,13 +1443,14 @@ class FluxRegressionCalculator(QMainWindow):
         # Irradiation name + flux-config export (for the Plateau & isochron and Age distribution tools)
         irr_row = QHBoxLayout()
         irr_row.addWidget(QLabel("Irradiation:"))
-        self.irradiation_edit = QLineEdit("9E11-25")
+        self.irradiation_edit = QLineEdit()
+        self.irradiation_edit.setPlaceholderText("e.g. 9E11-25")
         self.irradiation_edit.setToolTip(
             "Name of this irradiation. Holes on the same disk of one irradiation\n"
             "share J covariance; different disks or irradiations are independent.\n"
             "Used to match samples when loading into the Plateau & isochron and Age distribution tools.")
         irr_row.addWidget(self.irradiation_edit)
-        self.export_flux_btn = QPushButton("Export flux config (.jflux)")
+        self.export_flux_btn = QPushButton("Export flux config (.jflux)…")
         self.export_flux_btn.setToolTip(
             "Write a per-disk J + cross-hole covariance file (joint Monte Carlo)\n"
             "that the Plateau & isochron and Age distribution tools load to combine same-disk samples\n"
@@ -1466,11 +1495,17 @@ class FluxRegressionCalculator(QMainWindow):
         self.compare_methods_btn = QPushButton("Compare methods")
         self.compare_methods_btn.clicked.connect(self.compare_regression_methods)
         self.compare_methods_btn.setEnabled(False)
-        self.export_btn = QPushButton("Export results")
+        self.export_fig_btn = QPushButton("Export figure…")
+        self.export_fig_btn.setToolTip("The plot shown, with page size, text size, legend "
+                                       "and presets, and a live preview.")
+        self.export_fig_btn.clicked.connect(self.export_figure)
+        self.export_fig_btn.setEnabled(False)
+        self.export_btn = QPushButton("Export XLSX / CSV…")
         self.export_btn.clicked.connect(self.export_results)
         self.export_btn.setEnabled(False)
 
         advanced_controls.addWidget(self.compare_methods_btn)
+        advanced_controls.addWidget(self.export_fig_btn)
         advanced_controls.addWidget(self.export_btn)
         calc_layout.addLayout(advanced_controls)
 
@@ -1517,23 +1552,32 @@ class FluxRegressionCalculator(QMainWindow):
         extrap_group.setLayout(extrap_layout)
         return extrap_group
 
+    def closeEvent(self, event):
+        release_figures(self)       # before Qt deletes the canvases (macOS)
+        super().closeEvent(event)
+
     def create_menu_bar(self):
-        """The File and Configuration menus."""
+        """The File, Export, Configuration and Help menus."""
         menubar = self.menuBar()
 
-        # File menu
+        def act(menu, label, slot, key=None):
+            a = QAction(label, self)
+            if key:
+                a.setShortcut(SHORTCUTS.get(key, key))
+            a.triggered.connect(lambda _=False: slot())
+            menu.addAction(a)
+            return a
+
         file_menu = menubar.addMenu('File')
-        save_action = QAction('Save session', self)
-        save_action.setShortcut('Ctrl+S')
-        save_action.triggered.connect(self.save_session)
-        file_menu.addAction(save_action)
-        load_action = QAction('Load session', self)
-        load_action.setShortcut('Ctrl+O')
-        load_action.triggered.connect(self.load_session)
-        file_menu.addAction(load_action)
-        import_fm_action = QAction('Import Flux monitors export (.xlsx)…', self)
-        import_fm_action.triggered.connect(lambda: self.import_flux_monitors_export())
-        file_menu.addAction(import_fm_action)
+        act(file_menu, 'Import Flux monitors export…', self.import_flux_monitors_export, 'Ctrl+I')
+        file_menu.addSeparator()
+        act(file_menu, 'Save session…', self.save_session, 'save')
+        act(file_menu, 'Load session…', self.load_session, 'load')
+
+        export_menu = menubar.addMenu('Export')
+        act(export_menu, 'Export figure…', self.export_figure, 'export_figure')
+        act(export_menu, 'Export XLSX / CSV…', self.export_results, 'export_data')
+        act(export_menu, 'Export flux config (.jflux)…', self.export_flux_config)
 
         # Configuration menu
         config_menu = menubar.addMenu('Configuration')
@@ -1559,6 +1603,7 @@ class FluxRegressionCalculator(QMainWindow):
         self.results_widget.setMinimumHeight(350)
         header = self.results_widget.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeToContents)
+        enable_table_copy(self.results_widget)
 
     def _update_results_table_headers(self):
         """Update results table column headers to reflect the current output sigma.
@@ -1846,6 +1891,7 @@ class FluxRegressionCalculator(QMainWindow):
             processed_disk_data = self._process_regression_results(all_enabled_disk_data)
 
             self.export_btn.setEnabled(True)
+            self.export_fig_btn.setEnabled(True)
             self.predict_disk_btn.setEnabled(True)
             self.export_flux_btn.setEnabled(True)
 
@@ -2113,6 +2159,7 @@ class FluxRegressionCalculator(QMainWindow):
             self._last_complex_3d      = False
 
             self.export_btn.setEnabled(True)
+            self.export_fig_btn.setEnabled(True)
             self.predict_disk_btn.setEnabled(True)
             self.export_flux_btn.setEnabled(True)
 
@@ -3214,6 +3261,7 @@ class FluxRegressionCalculator(QMainWindow):
         self.hole_display_table.setHorizontalHeaderLabels(["Hole #", "X (cm)", "Y (cm)"])
         self.hole_display_table.setMaximumHeight(300)
         self.hole_display_table.setAlternatingRowColors(True)
+        enable_table_copy(self.hole_display_table)
         disk_layout.addWidget(self.hole_display_table)
 
         self.disk_selector.currentTextChanged.connect(self._update_disk_display)
@@ -3601,34 +3649,14 @@ class FluxRegressionCalculator(QMainWindow):
         self.compare_methods_btn.setEnabled(False)
 
     def _export_constants_rows(self):
-        """[name, value, note] rows of the constants block of the results export."""
+        """[name, value, note] rows of the constants block of the results export:
+        the calibration as every tool's export gives it, then the regression."""
         reg = getattr(self, 'regression_info', {})
         model = {'individual': 'one plane per disk', '3d': '3D'}.get(reg.get('type'), '')
         if reg.get('complex_3d'):
             model = '3D with interaction terms'
-        cal = self._cal_cfg()
-        rec = cal.get('route') or {}
-        std = rec.get('standard', 'FCs')
-        rows = [['Calibration', route_text(cal), 'monitor → R values → calibration · λ']] if rec else []
-        rows += [
-            [f'{std} age (Ma)' if rec else 'FC age (Ma)', self.standard_age_edit.text(),
-             f'calibration of {std}' if rec else 'Fish Canyon sanidine (FCs) calibration'],
-            ['  ± (Ma, 1σ)', self.standard_age_err_edit.text(), ''],
-            ['40K decay constant λ (1/yr)', self.lambda_edit.text(), 'total (ε + β)'],
-        ]
-        try:
-            _cfg = dict(stdAgeMa=float(self.standard_age_edit.text()),
-                        stdAgeErrMa=float(self.standard_age_err_edit.text()),
-                        lambdaYr=float(self.lambda_edit.text()))
-            rows += [['  Note', n, ''] for n in calibration_notes(_cfg)]
-        except ValueError:
-            pass
-        if edited_standards_note():
-            rows.append(['Standards', edited_standards_note(), ''])
-        mk = self.monitor_combo.keys()
-        if mk['monitor'] != 'FCs':
-            rows += [['Flux monitor', mk['monitor'], 'R values are the measured ratios of this monitor'],
-                     [f"  R({mk['monitor']}/FCs)", f"{mk['monitorR']:.8g}", f"± {mk['monitorRErr']:.3g} (1σ)"]]
+        rows = export.constants_rows(
+            self._cal_cfg(), monitor_note='R values are the measured ratios of this monitor')
         rows += [
             ['Regression on', 'R (40Ar*/39ArK)' if self.regression_mode == MODE_R else 'J', ''],
             ['Model', model, ''],
@@ -3656,30 +3684,67 @@ class FluxRegressionCalculator(QMainWindow):
                              if scale != 1.0 else f'{dof} degrees of freedom'])
         return rows
 
+    def export_figure(self):
+        """Export figure…: the plot shown, with page size, text, legend and
+        presets set in the dialog the other tools use."""
+        pw = self.plot_widget
+        if not pw._pages:
+            QMessageBox.information(self, "Export figure",
+                                    "No plot to export: calculate a regression first.")
+            return
+        page = pw._pages[getattr(pw, '_page', 0)][0]
+        irr = self.irradiation_edit.text().strip() or 'flux_regression'
+        opts = [export.Option(
+            'note', 'Note above the plot', 'bool', True,
+            tip='The line explaining the plot. For the stack it gives how much the '
+                'bend of the disks is exaggerated.')]
+        dlg = export.FigureExportDialog(
+            self, 'flux_regression', [export.Panel('plot', 'Plot', fixed=True)], opts,
+            pw.render_into, default_name=dfold.safe_filename(f'{irr}_{page}'.replace(' ', '_')),
+            defaults=dict(width_cm=17.0, height_cm=15.0))
+        dlg.exec_()
+
     def export_results(self):
         """Export the results table and the constants behind it (.xlsx or .csv),
         laid out as the exports of the other tools."""
+        t = self.results_widget
+        if t.rowCount() == 0:
+            QMessageBox.information(self, "Export",
+                                    "No results to export: calculate a regression first.")
+            return
+        irr = self.irradiation_edit.text().strip()
+        filename, flt = dfold.get_save_file_name(
+            self, "Export results", (irr or "flux_regression") + ".xlsx", export.save_filter())
+        if not filename:
+            return
+        filename = export.ensure_ext(filename, flt)
+        header = [t.horizontalHeaderItem(i).text() for i in range(t.columnCount())]
+        table = []
+        for row in range(t.rowCount()):
+            cells = [t.item(row, col).text() if t.item(row, col) else ""
+                     for col in range(t.columnCount())]
+            table.append(["" if c == "N/A" else c for c in cells])
+        results = [['FLUX REGRESSION RESULTS' + (f', {irr}' if irr else '')], header] + table
+        constants = ([['CONSTANTS'], ['Constant', irr or 'Irradiation', 'Note']]
+                     + self._export_constants_rows())
+        notes = [['ABOUT THIS FILE'],
+                 ['Sheet "Results"', 'One row per hole: the measured J and R of a monitor, '
+                                     'the fitted (plane) J and R at every hole, and the '
+                                     'residual of each monitor. "Type" says which value '
+                                     'the hole uses.'],
+                 ['Sheet "Constants"', 'The calibration J is calculated on, and how the '
+                                       'regression was made.'],
+                 [],
+                 ['CONVENTIONS'],
+                 ['Uncertainties', f'Errors are {self.output_sigma}σ, as set under '
+                                   f'"Errors reported at".'],
+                 ['J', 'J = (e^(λt) − 1)/R. Its error does not include the monitor age or '
+                       'λ: those are shared by every J on this calibration and belong in the '
+                       'external tier of the ages.'],
+                 []]
         try:
-            irr = self.irradiation_edit.text().strip()
-            filename, flt = dfold.get_save_file_name(
-                self, "Export results", (irr or "flux_regression") + ".xlsx", export.save_filter())
-            if not filename:
-                return
-            filename = export.ensure_ext(filename, flt)
-
-            t = self.results_widget
-            header = [t.horizontalHeaderItem(i).text() for i in range(t.columnCount())]
-            table = []
-            for row in range(t.rowCount()):
-                cells = [t.item(row, col).text() if t.item(row, col) else ""
-                         for col in range(t.columnCount())]
-                table.append(["" if c == "N/A" else c for c in cells])
-            results = [['FLUX REGRESSION RESULTS' + (f', {irr}' if irr else '')], header] + table
-            constants = ([['CONSTANTS'], ['Constant', irr or 'Irradiation', 'Note']]
-                         + self._export_constants_rows())
-
             if filename.lower().endswith('.xlsx'):
-                export.write_xlsx(filename, results, constants=constants)
+                export.write_xlsx(filename, results, notes=notes, constants=constants)
             else:
                 import csv
                 with open(filename, 'w', newline='', encoding='utf-8-sig') as fh:
@@ -3687,10 +3752,10 @@ class FluxRegressionCalculator(QMainWindow):
                     w.writerows(constants)
                     w.writerow([])
                     w.writerows(results)
-            QMessageBox.information(self, "Success", f"Results exported to {filename}")
-
         except Exception as e:
-            QMessageBox.critical(self, "Error", f"Export failed: {str(e)}")
+            QMessageBox.critical(self, "Export", f"Could not write the file:\n{e}")
+            return
+        QMessageBox.information(self, "Export", f"Saved:\n{filename}")
 
     def save_session(self):
         try:
@@ -3752,10 +3817,10 @@ class FluxRegressionCalculator(QMainWindow):
             with open(filename, 'w', encoding='utf-8') as f:
                 json.dump(session, f, indent=2)
 
-            QMessageBox.information(self, "Success", f"Session saved to {filename}")
+            QMessageBox.information(self, "Save session", f"Session saved:\n{filename}")
 
         except Exception as e:
-            QMessageBox.critical(self, "Error", f"Save failed: {str(e)}")
+            QMessageBox.critical(self, "Save session", f"Could not save the session:\n{e}")
 
     def import_flux_monitors_export(self, path=None):
         """Fill the monitor holes from a Flux monitors export (.xlsx).
@@ -4004,10 +4069,10 @@ class FluxRegressionCalculator(QMainWindow):
 
             self._update_button_states()
             self.update_interface_for_disk_count()
-            QMessageBox.information(self, "Success", f"Session loaded from {filename}")
+            QMessageBox.information(self, "Load session", f"Session loaded:\n{filename}")
 
         except Exception as e:
-            QMessageBox.critical(self, "Error", f"Load failed: {str(e)}")
+            QMessageBox.critical(self, "Load session", f"Could not read the session:\n{e}")
 
     def model_summary_text(self):
         """Return a summary of the current Monte Carlo configuration and regression models."""
@@ -4054,6 +4119,7 @@ def main():
     dfold.use_tool('flux_regression')
     force_light(app)
     no_wheel_on_dropdowns(app)
+    report_errors()
     window = FluxRegressionCalculator()
     window.show()
     sys.exit(app.exec_())

@@ -1235,8 +1235,10 @@ def build_about_html(base_dir):
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName("SimplAr")
-    from arar_math import no_wheel_on_dropdowns
+    from arar_math import no_wheel_on_dropdowns, force_light, report_errors
+    force_light(app)
     no_wheel_on_dropdowns(app)
+    report_errors()
     launcher = ToolLauncher()
     launcher.show()
     sys.exit(app.exec_())

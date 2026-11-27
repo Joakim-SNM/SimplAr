@@ -89,7 +89,9 @@ from calibration_dialog import CalibrationDialog
 from standards import route_line
 from arar_math import (route_from_cfg, route_text, monitor_ingrowth, ROUTE_KEYS, set_route,
                        sync_route, flux_hole_rstd, to_fcs_r, from_fcs_r, cfg_monitor,
-                       calibration_notes, monitor_mismatch_note)
+                       calibration_notes, monitor_mismatch_note, release_figures,
+                       alpha_label as _alpha_label, enable_table_copy as _enable_table_copy,
+                       SHORTCUTS, report_errors)
 import export
 import data_folders as dfold
 
@@ -100,16 +102,6 @@ _AGEMODE_LABEL = {
     'ratio_J':     'R mode (insert J)',
     'ratio_R_std': 'R mode',
 }
-
-def _alpha_label(i):
-    """Step label for index i: A … Z, AA, AB, …"""
-    s = ''
-    i += 1
-    while i > 0:
-        i, r = divmod(i - 1, 26)
-        s = chr(65 + r) + s
-    return s
-
 
 # --------------------------------------------------------------------------
 # Plateau finder
@@ -2804,40 +2796,6 @@ class _StackFluxHost(FluxHost):
         self.win._recompute_all_sessions()
 
 
-def _copy_table_selection(t):
-    """Copy the selected cells of a QTableWidget to the clipboard as TSV."""
-    rngs = t.selectedRanges()
-    if not rngs:
-        it = t.currentItem()
-        if it:
-            QApplication.clipboard().setText(it.text())
-        return
-    rmin = min(r.topRow() for r in rngs);    rmax = max(r.bottomRow() for r in rngs)
-    cmin = min(r.leftColumn() for r in rngs); cmax = max(r.rightColumn() for r in rngs)
-    lines = []
-    for r in range(rmin, rmax + 1):
-        row = []
-        for c in range(cmin, cmax + 1):
-            it = t.item(r, c)
-            row.append(it.text() if (it and it.isSelected()) else '')
-        lines.append('\t'.join(row))
-    QApplication.clipboard().setText('\n'.join(lines))
-
-
-def _enable_table_copy(t):
-    """Make a QTableWidget's cells freely selectable and Ctrl/Cmd-C copyable,
-    and clear any initial selection so it doesn't open fully highlighted."""
-    from PyQt5.QtWidgets import QShortcut
-    from PyQt5.QtGui import QKeySequence
-    t.setSelectionMode(QAbstractItemView.ContiguousSelection)
-    t.setSelectionBehavior(QAbstractItemView.SelectItems)
-    t.setEditTriggers(QAbstractItemView.NoEditTriggers)
-    sc = QShortcut(QKeySequence.Copy, t)
-    sc.activated.connect(lambda tt=t: _copy_table_selection(tt))
-    t.clearSelection()
-    t.setCurrentCell(-1, -1)
-
-
 def _fit_table_height(t, max_rows=None):
     """Size a QTableWidget to show its rows without an internal scrollbar
     (or up to max_rows, then scroll)."""
@@ -3434,22 +3392,26 @@ class PlateauWindow(QMainWindow):
         mb = self.menuBar()
 
         fm = mb.addMenu('File')
-        fm.addAction(self._act('Import file…',         self._import_dispatch, 'Ctrl+O'))
-        fm.addAction(self._act('Paste from Clipboard', self._paste_dispatch,  'Ctrl+V'))
+        self._act_import = self._act('Import file…', self._import_dispatch, 'Ctrl+I')
+        self._act_paste = self._act('Paste from clipboard', self._paste_dispatch, 'Ctrl+V')
+        self._act_save = self._act('Save session…', self._save_dispatch, SHORTCUTS['save'])
+        self._act_load = self._act('Load session(s)…', self._load_dispatch, SHORTCUTS['load'])
+        fm.addAction(self._act_import)
+        fm.addAction(self._act_paste)
         fm.addSeparator()
-        fm.addAction(self._act('Save…',                self._save_dispatch,   'Ctrl+S'))
-        fm.addAction(self._act('Load…',                self._load_dispatch))
+        fm.addAction(self._act_save)
+        fm.addAction(self._act_load)
 
         vm = mb.addMenu('View')
         vm.addAction(self._act('Error breakdown (pie)…', self._show_error_breakdown))
 
         em = mb.addMenu('Export')
-        em.addAction(self._act('Export figure…  (layout + preview)', self.export_figure,
-                               'Ctrl+E'))
-        em.addAction(self._act('Export all sessions as PDF…',    self.export_all_pdf))
-        em.addAction(self._act('Export all samples…  (spectrum + isochrons)', self.export_all_samples))
+        em.addAction(self._act('Export figure…', self.export_figure,
+                               SHORTCUTS['export_figure']))
+        em.addAction(self._act('Export all samples…', self.export_all_samples))
         em.addSeparator()
-        em.addAction(self._act('Export data (XLSX / CSV)',              self.export_csv))
+        em.addAction(self._act('Export XLSX / CSV…', self.export_csv,
+                               SHORTCUTS['export_data']))
 
         # ── Central widget ────────────────────────────────────────────────────
         cw = QWidget()
@@ -3664,7 +3626,7 @@ class PlateauWindow(QMainWindow):
         bh = QGridLayout()
         bh.setHorizontalSpacing(4)
         bh.setVerticalSpacing(3)
-        self._btn_paste  = QPushButton("Paste clipboard")
+        self._btn_paste  = QPushButton("Paste from clipboard")
         self._btn_import = QPushButton("Import file…")
         self._btn_reset  = QPushButton("Reset all selections")
         self._btn_reset.setToolTip(
@@ -3852,7 +3814,7 @@ class PlateauWindow(QMainWindow):
         btn_eimg = QPushButton("Export figure…")
         btn_eimg.setToolTip("Choose which panels go in the figure, how tall each one is, "
                             "the page size, text size and legend, with a live preview.")
-        btn_ecsv = QPushButton("Save XLSX / CSV")
+        btn_ecsv = QPushButton("Export XLSX / CSV…")
         btn_ecsv.setToolTip("The step data and plateau of the open sample, or of all "
                             "loaded samples in one file (asked first).")
         for b, fn in [(btn_eimg, self.export_figure),
@@ -3862,13 +3824,11 @@ class PlateauWindow(QMainWindow):
             bh3.addWidget(b)
         dv.addLayout(bh3)
 
-        btn_eall = QPushButton("Save all sessions as PDF…")
-        btn_eall.clicked.connect(self.export_all_pdf)
-        btn_eall.setStyleSheet("font-size:10px;")
-        dv.addWidget(btn_eall)
         btn_eiso = QPushButton("Export all samples…")
         btn_eiso.setToolTip("One page per sample: the age spectrum with the inverse and "
-                            "normal isochron underneath. Choose panels, size and text.")
+                            "normal isochron underneath, as one PDF or one file each. "
+                            "Choose panels, size and text; untick Isochrons for the "
+                            "spectra alone.")
         btn_eiso.clicked.connect(self.export_all_samples)
         btn_eiso.setStyleSheet("font-size:10px;")
         dv.addWidget(btn_eiso)
@@ -4232,9 +4192,10 @@ class PlateauWindow(QMainWindow):
 
     # ── helpers ───────────────────────────────────────────────────────────────
 
-    @staticmethod
-    def _act(label, slot, shortcut=None):
-        a = QAction(label)
+    def _act(self, label, slot, shortcut=None):
+        # parented to the window: an action without a parent is deleted as
+        # soon as this returns, leaving the menu empty
+        a = QAction(label, self)
         a.triggered.connect(slot)
         if shortcut:
             a.setShortcut(shortcut)
@@ -5237,14 +5198,7 @@ class PlateauWindow(QMainWindow):
 
     # ─── Window close ────────────────────────────────────────────────────────
     def closeEvent(self, event):
-        # Explicitly clear matplotlib figures before Qt tears down the widgets.
-        # This prevents the FigureCanvasQTAgg destructor from accessing already-
-        # deleted Qt objects, which causes SIGABRT (exit code 6) on macOS.
-        for canvas in (self.canvas, self.overlay_canvas, self.isochron_canvas):
-            try:
-                canvas.fig.clf()
-            except Exception:
-                pass
+        release_figures(self)
         super().closeEvent(event)
 
     # ─── Events ───────────────────────────────────────────────────────────────
@@ -6598,11 +6552,18 @@ class PlateauWindow(QMainWindow):
             2 if self._isochron_mode else idx)
         self._mode_stack.setCurrentIndex(idx)
 
-        # Sidebar button labels
-        self._btn_save.setText("Save stack…"    if enabled else "Save session…")
-        self._btn_load.setText("Load stack…"    if enabled else "Load session(s)…")
-        self._btn_paste.setText("Paste+ add aliquot" if enabled else "Paste clipboard")
-        self._btn_import.setText("Load .ararpt file(s)…" if enabled else "Import file…")
+        # Sidebar button and File menu labels
+        for btn, act, txt in (
+                (self._btn_save, self._act_save,
+                 "Save stack…" if enabled else "Save session…"),
+                (self._btn_load, self._act_load,
+                 "Load stack…" if enabled else "Load session(s)…"),
+                (self._btn_paste, self._act_paste,
+                 "Paste+ add aliquot" if enabled else "Paste from clipboard"),
+                (self._btn_import, self._act_import,
+                 "Load .ararpt file(s)…" if enabled else "Import file…")):
+            btn.setText(txt)
+            act.setText(txt)
         # Reset works on every loaded plateau, in stack mode as in single mode
         self._btn_reset.setVisible(True)
 
@@ -6977,14 +6938,7 @@ class PlateauWindow(QMainWindow):
             ]
         return o
 
-    @staticmethod
-    def _opt_float(spec, key):
-        """A numeric export option, or None when the field is blank."""
-        try:
-            txt = str(spec['options'].get(key, '')).strip().replace(',', '.')
-            return float(txt) if txt else None
-        except (TypeError, ValueError):
-            return None
+    _opt_float = staticmethod(export.opt_float)
 
     def _export_steps(self, spec):
         """Steps for the export, with Ca/K inverted to K/Ca when asked and the
@@ -7624,10 +7578,8 @@ class PlateauWindow(QMainWindow):
         """Write one page per chosen sample (spectrum + isochrons, see the
         dialog) to *path*: a PDF, or a folder with one file per sample.
         Returns the lines to show the user."""
-        from matplotlib.backends.backend_pdf import PdfPages
         opts = spec['options']
-        fmt = spec.get('fmt', 'pdf')
-        one_pdf = fmt == 'pdf' and bool(opts.get('batch_one_pdf', True))
+        one_pdf = spec.get('fmt', 'pdf') == 'pdf' and bool(opts.get('batch_one_pdf', True))
 
         self._carousel_save_current()
         stack_slots = self._stack_slots() if self._stack_mode else None
@@ -7641,56 +7593,32 @@ class PlateauWindow(QMainWindow):
             slots = [(0, self._carousel_slot_from_current())]
 
         saved = self._single_state()
-        written, no_iso, used, pages = [], [], set(), 0
-        pdf = None
+        no_iso = []
+
+        def page(k, slot):
+            def draw():
+                self._iso_load_slot(slot, saved['cfg'])
+                s2 = self._iso_batch_spec(spec)
+                if not any(s.get('iso_nx') is not None or s.get('iso_ix') is not None
+                           for s in self.raw_steps):
+                    no_iso.append(slot.get('title') or f'Sample {k + 1}')
+                    s2['panels'] = [dict(p, on=False) if p['id'] == 'iso' else p
+                                    for p in spec['panels']]
+                fig = Figure(figsize=export.figsize(s2), facecolor='white')
+                self._export_render(fig, s2)
+                return fig, s2
+            return draw
+
+        items = [(slot.get('title') or f'Sample {k + 1}', page(k, slot)) for k, slot in slots]
         try:
             self._stack_mode = False     # each session is drawn as a single sample
-            with matplotlib.rc_context(export.EDITABLE_TEXT):
-                if one_pdf:
-                    pdf = PdfPages(path)
-                for si, (k, slot) in enumerate(slots):
-                    title = slot.get('title') or f'Sample {k + 1}'
-                    if progress(si, len(slots), f'{title}   ({si + 1} of {len(slots)})'):
-                        break
-                    self._iso_load_slot(slot, saved['cfg'])
-                    s2 = self._iso_batch_spec(spec)
-                    if not any(s.get('iso_nx') is not None or s.get('iso_ix') is not None
-                               for s in self.raw_steps):
-                        no_iso.append(title)
-                        s2['panels'] = [dict(p, on=False) if p['id'] == 'iso' else p
-                                        for p in spec['panels']]
-                    fig = Figure(figsize=export.figsize(s2), facecolor='white')
-                    self._export_render(fig, s2)
-                    if pdf is not None:
-                        export.finish_figure(fig, s2)
-                        tr = bool(s2.get('transparent'))
-                        pdf.savefig(fig, dpi=int(s2.get('dpi', 1200)),
-                                    facecolor='none' if tr else 'white', transparent=tr,
-                                    bbox_inches='tight', pad_inches=0.05)
-                        pages += 1
-                    else:
-                        base = re.sub(r'[^\w.+-]+', '_', title).strip('_') \
-                            or f'sample_{k + 1}'
-                        name, n_ = base, 1
-                        while name in used:
-                            n_ += 1
-                            name = f'{base}_{n_}'
-                        used.add(name)
-                        fp = os.path.join(path, f'{name}.{fmt}')
-                        export.save_figure(fig, fp, s2)
-                        written.append(fp)
-                progress(len(slots), len(slots), '')
+            written, pages, _ = export.write_pages(path, spec, items, progress, one_pdf)
         finally:
-            if pdf is not None:
-                # the fonts are written when the file is closed, so the
-                # editable-text setting must still be on then
-                with matplotlib.rc_context(export.EDITABLE_TEXT):
-                    pdf.close()
             self._restore_single_state(saved)
         lines = []
         if no_iso:
             lines.append('No isochron data, spectrum only: ' + ', '.join(no_iso))
-        if pdf is not None and pages:
+        if one_pdf and pages:
             lines.append(f'{path}   ({pages} page{"s" if pages != 1 else ""})')
         return lines + written
 
@@ -7713,124 +7641,6 @@ class PlateauWindow(QMainWindow):
             defaults=dict(width_cm=21.0, height_cm=24.0))
         dlg.exec_()
         self._queue_redraw()
-
-    def export_all_pdf(self):
-        """Export every loaded aliquot (carousel) as one page in a multi-page PDF.
-
-        Iterates self._carousel without touching the UI, renders each slot's
-        spectrum directly via canvas.redraw(), and saves to PdfPages.  The
-        currently displayed slot is restored exactly as found.
-        """
-        from matplotlib.backends.backend_pdf import PdfPages
-
-        n = len(self._carousel)
-        if self._stack_mode or self._isochron_mode:
-            QMessageBox.information(
-                self, "Export all",
-                "Export all sessions is only available in single-session (carousel) mode.")
-            return
-        if n == 0 and not self.raw_steps:
-            QMessageBox.information(self, "Export all", "No sessions loaded.")
-            return
-
-        # Build the list of slots to export:
-        # carousel active → all carousel slots; single session → wrap current data
-        if n >= 1:
-            slots_to_export = self._carousel
-            first_title = (self._carousel[0].get('title', '') or 'plateaus').replace(' ', '_')
-        else:
-            slots_to_export = [{'title': self.title_edit.text(),
-                                 'raw_steps': self.raw_steps,
-                                 'cfg': self.cfg.copy(),
-                                 'plateau': self.plateau}]
-            first_title = (self.title_edit.text() or 'plateau').replace(' ', '_')
-
-        # ── Ask for save path ────────────────────────────────────────────────
-        path, _ = dfold.get_save_file_name(
-            self, "Export all sessions as PDF",
-            first_title + '_all.pdf', 'PDF (*.pdf)')
-        if not path:
-            return
-
-        # ── Snapshot current state (to restore after export) ─────────────────
-        saved_raw       = copy.deepcopy(self.raw_steps)
-        saved_cfg       = self.cfg.copy()
-        saved_steps_c   = list(self.steps_c)
-        saved_plateau   = self.plateau
-        saved_pset      = set(self.pset)
-        saved_flux_hole = getattr(self, '_sp_flux_hole', None)
-        saved_title     = self.title_edit.text()
-        saved_idx       = self._carousel_idx
-
-        display_1sigma, _, _ = self._disp()
-        n_exp    = len(slots_to_export)
-        _success = False
-
-        try:
-            with PdfPages(path) as pdf:
-                for i, slot in enumerate(slots_to_export):
-                    # Load slot data into instance variables (no Qt widget updates)
-                    self.raw_steps     = copy.deepcopy(slot['raw_steps'])
-                    self.cfg           = saved_cfg.copy()   # keep shared UI settings…
-                    self.cfg.update(slot['cfg'])            # …then overlay per-slot cfg
-                    self._sp_flux_hole = slot.get('flux_hole')  # per-slot flux assignment
-
-                    eff          = self._effective_single_cfg()
-                    steps        = _compute_steps_with_age_mode(self.raw_steps, eff)
-                    self.steps_c = add_cumulative(steps)
-                    self.plateau = find_plateau(self.steps_c, eff)
-                    self.pset    = set(self.plateau['ois']) if self.plateau else set()
-                    title        = slot.get('title', '') or f'Aliquot {i + 1}'
-                    age_range    = self._compute_age_range()
-                    age_dec      = self.cfg.get('ageDec', 2)
-
-                    # Tag non-plateau steps as excluded so they render red in the PDF
-                    steps_pdf = []
-                    for j, s in enumerate(self.steps_c):
-                        s2 = dict(s)
-                        if self.pset and j not in self.pset and s2.get('status', 'normal') == 'normal':
-                            s2['status'] = 'excluded'
-                        steps_pdf.append(s2)
-
-                    self.canvas._lam = self.cfg.get('lambdaYr', LAMBDA_DEFAULT)
-                    self.canvas.redraw(
-                        steps_pdf, self.plateau, self.pset,
-                        age_range, title,
-                        display_1sigma=display_1sigma, age_dec=age_dec)
-                    pdf.savefig(self.canvas.fig, facecolor='white')
-
-            _success = True
-
-        except Exception as exc:
-            QMessageBox.critical(self, "Export error", str(exc))
-
-        finally:
-            # ── Restore original state unconditionally ───────────────────────
-            self.raw_steps         = saved_raw
-            self.cfg               = saved_cfg
-            self.steps_c           = saved_steps_c
-            self.plateau           = saved_plateau
-            self.pset              = saved_pset
-            self._sp_flux_hole     = saved_flux_hole
-            self._carousel_idx     = saved_idx
-            self.title_edit.blockSignals(True)
-            self.title_edit.setText(saved_title)
-            self.title_edit.blockSignals(False)
-            # Redraw the canvas with the original slot's content
-            try:
-                age_range = self._compute_age_range()
-                self.canvas.redraw(
-                    self.steps_c, self.plateau, self.pset,
-                    age_range, saved_title,
-                    display_1sigma=display_1sigma,
-                    age_dec=saved_cfg.get('ageDec', 2))
-            except Exception:
-                pass
-
-        if _success:
-            QMessageBox.information(
-                self, "Export OK",
-                f"Saved {n_exp} page{'s' if n_exp != 1 else ''} to:\n{path}")
 
     # ─── Isochron age helper ──────────────────────────────────────────────────
     def _calc_isochron_result(self, steps, is_inverse, J, lam, cfg=None):
@@ -7998,7 +7808,7 @@ class PlateauWindow(QMainWindow):
                     finally:
                         self._restore_single_state(_saved)
                 _sink.set_raw_items(_raw_items)
-            QMessageBox.information(self, "Export OK", f"Saved:\n{path}")
+            QMessageBox.information(self, "Export", f"Saved:\n{path}")
         except Exception as exc:
             QMessageBox.critical(self, "Export error", str(exc))
 
@@ -10239,7 +10049,7 @@ class PlateauWindow(QMainWindow):
                             _write_matrix('', _mx[_mkey])
 
                 w.writerow([])
-            QMessageBox.information(self, 'Export OK', f'Saved:\n{path}')
+            QMessageBox.information(self, 'Export', f'Saved:\n{path}')
         except Exception as e:
             QMessageBox.critical(self, 'Export error', str(e))
 
@@ -10318,6 +10128,7 @@ def main():
     dfold.use_tool('plateau_isochron')
     force_light(app)   # shared light palette, same as the other tools
     no_wheel_on_dropdowns(app)
+    report_errors()
     win = PlateauWindow()
     win.show()
     ret = app.exec_()

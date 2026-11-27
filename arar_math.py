@@ -2030,6 +2030,30 @@ def no_wheel_on_dropdowns(app):
     app.installEventFilter(app._no_wheel)
 
 
+def report_errors():
+    """An error in what a button does is shown in a message and the window
+    stays open.  Without this, PyQt5 ends the program on any exception that
+    is not caught, and the unsaved work in the window is lost."""
+    import sys
+    import traceback
+
+    def hook(etype, value, tb):
+        traceback.print_exception(etype, value, tb)
+        if issubclass(etype, KeyboardInterrupt):
+            return
+        try:
+            from PyQt5.QtCore import QThread
+            from PyQt5.QtWidgets import QApplication, QMessageBox
+            app = QApplication.instance()
+            if app is None or QThread.currentThread() is not app.thread():
+                return                  # a worker thread: no dialog from there
+            QMessageBox.critical(QApplication.activeWindow(), 'Error',
+                                 f'{etype.__name__}: {value}\n\nThis action was not completed.')
+        except Exception:
+            pass
+    sys.excepthook = hook
+
+
 def force_light(app):
     """Force a light Fusion palette so the app never follows macOS dark mode."""
     from PyQt5.QtGui import QPalette, QColor
@@ -2092,6 +2116,121 @@ def mono_font(size=9):
             f = QFont(family)
     f.setPointSize(size)
     return f
+
+
+def note_label(text, size=11, color='#555', italic=False):
+    """A small grey wrapped label for explanations under a field."""
+    from PyQt5.QtWidgets import QLabel
+    lab = QLabel(text)
+    lab.setWordWrap(True)
+    lab.setStyleSheet(f'color:{color}; font-size:{size}px;'
+                      + (' font-style:italic;' if italic else ''))
+    return lab
+
+
+def alpha_label(i):
+    """Step label for index i: 0 → A … 25 → Z, 26 → AA, AB, …"""
+    s = ''
+    i += 1
+    while i > 0:
+        i, r = divmod(i - 1, 26)
+        s = chr(65 + r) + s
+    return s
+
+
+def copy_table_selection(t, headers=True):
+    """Copy the selected cells of a QTableWidget to the clipboard as
+    tab-separated text (pastes into Excel).  With whole columns selected,
+    or the whole table, the column headings come first."""
+    from PyQt5.QtWidgets import QApplication, QComboBox
+    rngs = t.selectedRanges()
+    if not rngs:
+        it = t.currentItem()
+        if it:
+            QApplication.clipboard().setText(it.text())
+        return
+    rmin = min(r.topRow() for r in rngs)
+    rmax = max(r.bottomRow() for r in rngs)
+    cmin = min(r.leftColumn() for r in rngs)
+    cmax = max(r.rightColumn() for r in rngs)
+    lines = []
+    if headers and rmin == 0 and rmax == t.rowCount() - 1:
+        head = [t.horizontalHeaderItem(c).text() if t.horizontalHeaderItem(c) else ''
+                for c in range(cmin, cmax + 1)]
+        if any(head):
+            lines.append('\t'.join(head))
+    for r in range(rmin, rmax + 1):
+        row = []
+        for c in range(cmin, cmax + 1):
+            w = t.cellWidget(r, c)
+            it = t.item(r, c)
+            sel = any(g.topRow() <= r <= g.bottomRow() and g.leftColumn() <= c <= g.rightColumn()
+                      for g in rngs)
+            if not sel:
+                row.append('')
+            elif isinstance(w, QComboBox):
+                row.append(w.currentText())
+            else:
+                row.append(it.text() if it else '')
+        lines.append('\t'.join(row))
+    QApplication.clipboard().setText('\n'.join(lines))
+
+
+def enable_table_copy(t, read_only=True):
+    """Ctrl/Cmd-C copies the selected cells of a QTableWidget (see
+    copy_table_selection).  read_only: cells are not editable, any block of
+    them can be selected, and the table opens with nothing selected."""
+    from PyQt5.QtWidgets import QShortcut, QAbstractItemView
+    from PyQt5.QtGui import QKeySequence
+    from PyQt5.QtCore import Qt
+    if read_only:
+        t.setSelectionMode(QAbstractItemView.ContiguousSelection)
+        t.setSelectionBehavior(QAbstractItemView.SelectItems)
+        t.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        t.clearSelection()
+        t.setCurrentCell(-1, -1)
+    sc = QShortcut(QKeySequence.Copy, t)
+    sc.setContext(Qt.WidgetWithChildrenShortcut)
+    sc.activated.connect(lambda tt=t: copy_table_selection(tt))
+    t._copy_shortcut = sc
+
+
+def release_figures(widget):
+    """Clear the matplotlib figures of every canvas in *widget* before Qt tears
+    the window down.  Without it the canvas destructor can reach Qt objects
+    that are already deleted, which aborts Python on macOS (exit code 6).
+    Called from the closeEvent of each tool's window."""
+    try:
+        from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg
+    except ImportError:
+        return
+    for c in widget.findChildren(FigureCanvasQTAgg):
+        try:
+            c.figure.clf()
+        except Exception:
+            pass
+
+
+SHORTCUTS = {'save': 'Ctrl+S', 'load': 'Ctrl+O', 'export_figure': 'Ctrl+E',
+             'export_data': 'Ctrl+Shift+E'}
+
+
+def window_shortcuts(window, **slots):
+    """The keyboard shortcuts every tool shares (SHORTCUTS), bound on a main
+    window that has no menu carrying them: save (the session), load (a
+    session), export_figure and export_data.  Pass the slots a tool has.
+    A tool with a menu puts the same keys on its menu actions instead."""
+    from PyQt5.QtWidgets import QShortcut
+    from PyQt5.QtGui import QKeySequence
+    out = []
+    for name, slot in slots.items():
+        if slot is None:
+            continue
+        sc = QShortcut(QKeySequence(SHORTCUTS[name]), window)
+        sc.activated.connect(slot)
+        out.append(sc)
+    window._shortcuts = out
+    return out
 
 
 # --------------------------------------------------------------------------

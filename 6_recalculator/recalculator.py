@@ -32,7 +32,7 @@ import numpy as np
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QTabWidget, QLabel, QComboBox, QCheckBox, QPushButton, QTableWidget,
-    QTableWidgetItem, QHeaderView, QGroupBox, QMessageBox, QAbstractItemView,
+    QTableWidgetItem, QHeaderView, QGroupBox, QMessageBox,
     QDialog, QDialogButtonBox, QLineEdit, QSpinBox, QPlainTextEdit, QSplitter,
     QFormLayout,
 )
@@ -53,7 +53,9 @@ import export
 import standards as stdlib
 from flux_dialog import FluxAssignDialog, FluxHost
 from calibration_dialog import CalibrationDialog
-from arar_math import route_cfg, route_text, cfg_monitor, position_ident
+from arar_math import (route_cfg, route_text, cfg_monitor, position_ident, note_label,
+                       copy_table_selection, enable_table_copy, window_shortcuts,
+                       report_errors)
 
 
 # ---------------------------------------------------------------------------
@@ -152,13 +154,6 @@ def _fmt(v, dec):
 # Widgets
 # ---------------------------------------------------------------------------
 
-def _note(text):
-    lab = QLabel(text)
-    lab.setWordWrap(True)
-    lab.setStyleSheet('color:#555; font-size:11px;')
-    return lab
-
-
 class PasteTable(QTableWidget):
     """Editable table that takes tab-separated text from Excel (Ctrl+V) and
     copies the selection back (Ctrl+C).  Combo cells are left alone."""
@@ -183,23 +178,7 @@ class PasteTable(QTableWidget):
             super().keyPressEvent(e)
 
     def copy(self):
-        idx = self.selectedIndexes()
-        if not idx:
-            return
-        rows = sorted({i.row() for i in idx})
-        cols = sorted({i.column() for i in idx})
-        lines = []
-        for r in rows:
-            cells = []
-            for c in cols:
-                w = self.cellWidget(r, c)
-                if isinstance(w, QComboBox):
-                    cells.append(w.currentText())
-                else:
-                    it = self.item(r, c)
-                    cells.append(it.text() if it else '')
-            lines.append('\t'.join(cells))
-        QApplication.clipboard().setText('\n'.join(lines))
+        copy_table_selection(self, headers=False)
 
     def paste(self, text=None):
         text = QApplication.clipboard().text() if text is None else text
@@ -251,7 +230,7 @@ class CalibrationBox(QGroupBox):
         # kept for the code and sessions that read them; set from the dialog
         self.full = QCheckBox('Full decay-constant uncertainty (Min et al., 2000)')
         self.full.setVisible(False)
-        self.info = _note('')
+        self.info = note_label('')
         g.addWidget(b, 0, 0)
         g.addWidget(self.route_lbl, 0, 1)
         g.addWidget(self.info, 1, 0, 1, 2)
@@ -348,7 +327,7 @@ class SourceDialog(QDialog):
         f.addRow('Age the authors used (Ma)', self.age)
         f.addRow('Decay constant they used', self.lam)
         f.addRow('', self.lam_val)
-        f.addRow(_note('The monitor age and λ as printed in the publication. They only need '
+        f.addRow(note_label('The monitor age and λ as printed in the publication. They only need '
                        'to reproduce the published ages; whether they were right does not matter.'))
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.accepted.connect(self._ok)
@@ -461,7 +440,7 @@ class RecalcTab(QWidget):
         self.src = SourceCombo()
         self.src.setToolTip('The monitor the authors used, the age they gave it and their '
                             'decay constant. "Other…" for a combination not in the list.')
-        self.src_info = _note('')
+        self.src_info = note_label('')
         self.r_combo = QComboBox()
         self.r_label = QLabel('R to FCs')
         sg.addWidget(QLabel('Monitor and constants'), 0, 0)
@@ -493,7 +472,7 @@ class RecalcTab(QWidget):
             opts.addSpacing(10)
         opts.addStretch()
         for txt, fn in [('Paste', lambda: self.inp.paste()), ('Clear', self.clear),
-                        ('Export…', self.export)]:
+                        ('Export XLSX / CSV…', self.export)]:
             b = QPushButton(txt)
             b.clicked.connect(fn)
             opts.addWidget(b)
@@ -506,7 +485,7 @@ class RecalcTab(QWidget):
         ll.addWidget(QLabel('Published ages'))
         self.inp = PasteTable(IN_COLS, 20)
         ll.addWidget(self.inp)
-        ll.addWidget(_note('Paste from Excel with Ctrl+V (Cmd+V). ± internal includes the J '
+        ll.addWidget(note_label('Paste from Excel with Ctrl+V (Cmd+V). ± internal includes the J '
                            'uncertainty. Give J % (1σ) with either error and the other is '
                            'calculated; with neither, the analytical error is carried alone.'))
         split.addWidget(left)
@@ -517,10 +496,10 @@ class RecalcTab(QWidget):
         self.out = QTableWidget(0, len(OUT_COLS))
         self.out.setHorizontalHeaderLabels(OUT_COLS)
         self.out.verticalHeader().setVisible(False)
-        self.out.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        enable_table_copy(self.out)
         self.out.horizontalHeader().setStretchLastSection(True)
         rl.addWidget(self.out)
-        self.status = _note('')
+        self.status = note_label('')
         rl.addWidget(self.status)
         split.addWidget(right)
         split.setSizes([480, 640])
@@ -1014,7 +993,7 @@ class CombineTab(QWidget):
         for txt, fn in [('Paste', lambda: self.table.paste()), ('Load files…', self.load_files),
                         ('Add row', self.add_row),
                         ('Remove row', self.remove_rows), ('Clear', self.clear),
-                        ('Export…', self.export)]:
+                        ('Export XLSX / CSV…', self.export)]:
             b = QPushButton(txt)
             b.clicked.connect(fn)
             if txt == 'Load files…':
@@ -1033,7 +1012,7 @@ class CombineTab(QWidget):
         self.out = QTableWidget(0, 5)
         self.out.setHorizontalHeaderLabels(['Sample', 'Age', '± analytical', '± internal', '± external'])
         self.out.verticalHeader().setVisible(False)
-        self.out.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        enable_table_copy(self.out)
         bl.addWidget(self.out, 1)
         self.report = QPlainTextEdit()
         self.report.setReadOnly(True)
@@ -1041,7 +1020,7 @@ class CombineTab(QWidget):
         split.addWidget(bottom)
         split.setSizes([330, 260])
         v.addWidget(split, 1)
-        v.addWidget(_note('Each row is recalculated from the calibration it was published on to the '
+        v.addWidget(note_label('Each row is recalculated from the calibration it was published on to the '
                           'one above, then the ages are combined. Without a .jflux, ages on the same '
                           'disk in Position share their J error. The calibration terms are shared '
                           'by all ages, and the R of a monitor by every age on that monitor.'))
@@ -1506,7 +1485,7 @@ class RecalculatorWindow(QMainWindow):
         v = QVBoxLayout(central)
         v.setContentsMargins(6, 6, 6, 6)
         bar = QHBoxLayout()
-        for txt, fn in [('Open session…', self.load_session), ('Save session…', self.save_session),
+        for txt, fn in [('Save session…', self.save_session), ('Load session…', self.load_session),
                         ('Standards…', self.open_standards)]:
             b = QPushButton(txt)
             b.clicked.connect(fn)
@@ -1519,6 +1498,8 @@ class RecalculatorWindow(QMainWindow):
         self.tabs.addTab(self.recalc_tab, 'Recalculate')
         self.tabs.addTab(self.combine_tab, 'Combine')
         v.addWidget(self.tabs, 1)
+        window_shortcuts(self, save=self.save_session, load=self.load_session,
+                         export_data=lambda: self.tabs.currentWidget().export())
 
     def export_tables(self, consts, rows, name):
         path, flt = dfold.get_save_file_name(self, 'Export', dfold.safe_filename(name) + '.xlsx',
@@ -1597,7 +1578,7 @@ class RecalculatorWindow(QMainWindow):
             QMessageBox.warning(self, 'Save session', str(e))
 
     def load_session(self):
-        path, _ = dfold.get_open_file_name(self, 'Open session', '',
+        path, _ = dfold.get_open_file_name(self, 'Load session', '',
                                            'Recalculator session (*.arrc);;All (*)')
         if not path:
             return
@@ -1607,7 +1588,7 @@ class RecalculatorWindow(QMainWindow):
             self.recalc_tab.set_state(st.get('recalculate') or {})
             self.combine_tab.set_state(st.get('combine') or {})
         except (OSError, ValueError, KeyError, TypeError) as e:
-            QMessageBox.warning(self, 'Open session', f'Could not read the session:\n{e}')
+            QMessageBox.warning(self, 'Load session', f'Could not read the session:\n{e}')
 
 
 def main():
@@ -1616,6 +1597,7 @@ def main():
     dfold.use_tool('recalculator')
     force_light(app)
     no_wheel_on_dropdowns(app)
+    report_errors()
     win = RecalculatorWindow()
     win.show()
     sys.exit(app.exec_())

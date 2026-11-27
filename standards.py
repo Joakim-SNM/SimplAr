@@ -581,10 +581,8 @@ def _g(v, sig=12):
 
 
 def _note(text):
-    lab = QLabel(text)
-    lab.setWordWrap(True)
-    lab.setStyleSheet('color:#555; font-size:11px;')
-    return lab
+    from arar_math import note_label      # arar_math imports this module
+    return note_label(text, 11)
 
 
 def _flip(ratio):
@@ -1587,8 +1585,9 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName('Standards')
     force_light(app)
-    from arar_math import no_wheel_on_dropdowns
+    from arar_math import no_wheel_on_dropdowns, report_errors
     no_wheel_on_dropdowns(app)
+    report_errors()
     dlg = StandardsEditor()
     dlg.show()
     sys.exit(app.exec_())

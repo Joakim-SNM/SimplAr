@@ -145,7 +145,7 @@ def _g(v, sig=8):
     return f'{f:.{sig}g}'
 
 
-def constants_rows(cfg, constants=None, metas=(), atm=None, extra=()):
+def constants_rows(cfg, constants=None, metas=(), atm=None, extra=(), monitor_note=None):
     """Rows [name, value, note] describing every constant behind the numbers.
 
     cfg        the effective cfg of the data (λ, FC, J, R standard ...)
@@ -155,6 +155,9 @@ def constants_rows(cfg, constants=None, metas=(), atm=None, extra=()):
     metas      step_meta() dicts, for the irradiation time estimate
     atm        atmospheric 40Ar/36Ar used by the tools when the file has none
     extra      more [name, value, note] rows to append
+    monitor_note  what the R values are, for a monitor other than the
+               calibration's standard, when they are not converted to it (the
+               flux tools report the measured R of the monitor)
     """
     c = constants or {}
     rows = []
@@ -187,14 +190,16 @@ def constants_rows(cfg, constants=None, metas=(), atm=None, extra=()):
         add('Standards', _ed, '')
     mon, R_m, s_m = cfg_monitor(cfg)
     if rec and (mon != std or rec.get('steps')):
-        add('Flux monitor', mon, f'R standard values are on {std}: measured R / R({mon}/{std})')
+        add('Flux monitor', mon, monitor_note
+            or f'R standard values are on {std}: measured R / R({mon}/{std})')
         add(f'  R({mon}/{std})', _g(R_m, 8), 'product of the steps in the Calibration row')
         try:
             add(f'  {mon} age (Ma)', _g(monitor_age(cfg), 8), 'on this calibration')
         except (ValueError, ZeroDivisionError, OverflowError):
             pass
     elif not rec and mon != 'FCs':
-        add('Flux monitor', mon, 'R standard values are FCs-equivalent: measured R / R(monitor/FCs)')
+        add('Flux monitor', mon, monitor_note
+            or 'R standard values are FCs-equivalent: measured R / R(monitor/FCs)')
         add(f'  R({mon}/FCs)', _g(R_m, 8), f'± {_g(s_m, 4)} (1σ)')
         try:
             add(f'  {mon} age (Ma)', _g(monitor_age(cfg), 8), 'on this calibration')
@@ -710,6 +715,9 @@ def _write_sheet(ws, rows, bold_font, widths_cap=44):
         ws.column_dimensions[ws.cell(row=1, column=c).column_letter].width = wd
 
 
+write_sheet = _write_sheet      # for a tool that writes its own workbook
+
+
 def split_constants(rows):
     """(constants rows, remaining rows): the CONSTANTS block (title row up to
     its closing blank row) is taken out of the results rows."""
@@ -1029,10 +1037,12 @@ def _update_store(change):
 PRESET_GROUPS = (
     ('plateau', 'plateau_stack', 'plateau_all_samples', 'plateau_isochron'),
     ('ageprob', 'ageprob_mixture'),
+    ('flux_monitors', 'flux_monitors_all'),
 )
 KIND_LABELS = {'plateau': 'single', 'plateau_stack': 'stack',
                'plateau_all_samples': 'all samples', 'plateau_isochron': 'isochron',
-               'ageprob': 'distribution', 'ageprob_mixture': 'mixture'}
+               'ageprob': 'distribution', 'ageprob_mixture': 'mixture',
+               'flux_monitors': 'figure', 'flux_monitors_all': 'all categories'}
 
 
 def _preset_group(host_key):
@@ -1289,6 +1299,40 @@ def place_legend(ax, spec, **kw):
     return new
 
 
+def merge_legends(axes, target, last=None):
+    """Move the legends of *axes* into one on *target*, keeping each entry
+    once: one legend for a stack of panels.  last(label) True puts that entry
+    after the others."""
+    handles, labels, first = [], [], None
+    for a in axes:
+        lg = a.get_legend()
+        if lg is None:
+            continue
+        first = first or lg
+        hs = list(getattr(lg, 'legend_handles', None)
+                  or getattr(lg, 'legendHandles', []))
+        for h, t in zip(hs, lg.get_texts()):
+            if t.get_text() not in labels:
+                handles.append(h)
+                labels.append(t.get_text())
+    if first is None:
+        return
+    if last is not None:
+        order = sorted(range(len(labels)), key=lambda i: bool(last(labels[i])))
+        handles = [handles[i] for i in order]
+        labels = [labels[i] for i in order]
+    kw = {}
+    if first.get_texts():
+        kw['prop'] = first.get_texts()[0].get_fontproperties()
+    if first.get_title().get_text():
+        kw['title'] = first.get_title().get_text()
+        kw['title_fontsize'] = first.get_title().get_fontsize()
+    for a in axes:
+        if a.get_legend() is not None:
+            a.get_legend().remove()
+    target.legend(handles=handles, labels=labels, **kw)
+
+
 def pad_names(names, size, gap=2.0, prop=None):
     """Pad *names* so that whatever follows them starts at the same x in
     the normal (proportional) legend font.
@@ -1463,6 +1507,37 @@ def figsize(spec, page=0):
     return max(2.0, w) * CM, max(2.0, h) * CM
 
 
+def opt_float(spec, key):
+    """A numeric export option (an axis limit, say), or None when blank."""
+    try:
+        txt = str(spec['options'].get(key, '')).strip().replace(',', '.')
+        return float(txt) if txt else None
+    except (TypeError, ValueError):
+        return None
+
+
+def fixed_frame(fig, spec, has_title=False):
+    """Place the plot frame from the page size, text size and title only.
+
+    tight_layout() fits the frame around whatever surrounds it, so a longer
+    legend (below or beside the plot) or wider tick labels shrink the diagram.
+    These margins (points, grown with the text size) depend on the settings
+    alone, so two figures with the same settings get frames of exactly the
+    same size.  A legend outside the frame, or a label that needs more room,
+    still goes in the file: the export crops to the drawing, so it extends
+    the file instead of squeezing the plot."""
+    fs = float(spec.get('font_scale', 1.0) or 1.0)
+    w_pt, h_pt = (float(v) * 72.0 for v in fig.get_size_inches())
+    left, bottom = 20.0 + 26.0 * fs, 19.0 + 21.0 * fs
+    right = 10.0 + 7.0 * fs
+    top = (16.0 + 10.0 * fs) if has_title else (8.0 + 6.0 * fs)
+    l, r = left / w_pt, 1.0 - right / w_pt
+    b, t = bottom / h_pt, 1.0 - top / h_pt
+    if r - l < 0.2 or t - b < 0.2:          # a tiny page: keep some plot
+        l, r, b, t = 0.15, 0.97, 0.15, 0.92
+    fig.subplots_adjust(left=l, right=r, bottom=b, top=t)
+
+
 # settings page 2 can override; None in the spec means "same as page 1"
 _P2_KEYS = ('font_scale', 'line_scale', 'marker_scale', 'legend', 'legend_cols',
             'legend_scale')
@@ -1495,6 +1570,58 @@ def save_figure(fig, path, spec, page=0):
                     facecolor='none' if spec.get('transparent') else 'white',
                     edgecolor='none', transparent=bool(spec.get('transparent')),
                     bbox_inches='tight', pad_inches=0.05)
+
+
+def write_pages(path, spec, items, progress, one_pdf):
+    """The figures of a batch export ('Export all ...'), one per item: the
+    pages of one PDF (*path* is the file) or one file each in the folder
+    *path*, named after the item.
+
+    items     (name, draw) pairs; draw() returns (figure, spec of that page),
+              or None when the item has nothing to draw
+    progress  progress(i, n, label) of the export dialog; True = cancelled
+    Returns (files written, pages in the PDF, names with nothing drawn)."""
+    from matplotlib.backends.backend_pdf import PdfPages
+    fmt = spec.get('fmt', 'pdf')
+    written, used, skipped, pages = [], set(), [], 0
+    pdf = None
+    try:
+        with matplotlib.rc_context(EDITABLE_TEXT):
+            if one_pdf:
+                pdf = PdfPages(path)
+            for i, (name, draw) in enumerate(items):
+                if progress(i, len(items), f'{name}   ({i + 1} of {len(items)})'):
+                    break
+                got = draw()
+                if got is None:
+                    skipped.append(name)
+                    continue
+                fig, s2 = got
+                if pdf is not None:
+                    finish_figure(fig, s2)
+                    tr = bool(s2.get('transparent'))
+                    pdf.savefig(fig, dpi=int(s2.get('dpi', 1200)),
+                                facecolor='none' if tr else 'white', transparent=tr,
+                                bbox_inches='tight', pad_inches=0.05)
+                    pages += 1
+                else:
+                    base = re.sub(r'[^\w.+-]+', '_', str(name)).strip('_') or f'page_{i + 1}'
+                    stem, k = base, 1
+                    while stem in used:
+                        k += 1
+                        stem = f'{base}_{k}'
+                    used.add(stem)
+                    fp = os.path.join(path, f'{stem}.{fmt}')
+                    save_figure(fig, fp, s2)
+                    written.append(fp)
+            progress(len(items), len(items), '')
+    finally:
+        if pdf is not None:
+            # the fonts are written when the file is closed, so the
+            # editable-text setting must still be on then
+            with matplotlib.rc_context(EDITABLE_TEXT):
+                pdf.close()
+    return written, pages, skipped
 
 
 # --------------------------------------------------------------------------

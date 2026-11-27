@@ -120,8 +120,60 @@ def test_window_and_export():
     w._run_analysis('test')
     assert w.crystal_info_lbl.text() == '45 crystals, 33 fusion, 12 step-heated (3 steps).', \
         w.crystal_info_lbl.text()
+    import export as ex
+    from matplotlib.figure import Figure
     for label, key in w._VIEWS.items():
         w._view_label_var.set(label); w.crystal_view_var.set(key); w.update_plot()
+        shown_w = [w._plot_layout.itemAt(i).widget() for i in range(w._plot_layout.count())]
+        for title in ('full', 'short', 'none'):
+            sp = ex.default_spec([ex.Panel('plot', 'Plot')], w._export_options())
+            sp['options'].update(title=title, v_min='5.5')
+            fig = Figure(figsize=ex.figsize(sp))
+            w._export_render(fig, sp)
+            ex.save_figure(fig, os.path.join(tempfile.mkdtemp(), 'f.png'), dict(sp, dpi=60))
+            lim = fig.axes[0].get_xlim() if key == 'groups' else fig.axes[0].get_ylim()
+            assert lim[0] == 5.5, (key, lim)
+            head = (fig.axes[0].title if key in ('all', 'groups') else fig._suptitle).get_text()
+            assert (title == 'none') == (not head), (key, title, head)
+            if key != 'groups':                 # one line there anyway
+                assert (title == 'full') == ('\n' in head), (key, title, head)
+            if key == 'crystal':
+                assert fig.axes[0].get_title() == 'G1' if title != 'full' else \
+                    fig.axes[0].get_title().startswith('G1\n'), fig.axes[0].get_title()
+        assert shown_w == [w._plot_layout.itemAt(i).widget()      # the window keeps its plot
+                           for i in range(w._plot_layout.count())]
+    ok('Export figure: every view, its title and value range; the window keeps its plot')
+
+    # several categories, one panel each; panel letters; every category on its own page
+    w._view_label_var.set('All points'); w.crystal_view_var.set('all'); w.update_plot()
+    cats = w._categories()
+    for cols, legend in ((1, 'auto'), (2, 'below')):
+        sp = ex.default_spec([ex.Panel('plot', 'Plot')], w._export_options())
+        sp.update(letters='tl', legend=legend)
+        sp['options'].update(categories='panels', columns=cols, same_range=True)
+        fig = Figure(figsize=ex.figsize(sp))
+        w._export_render(fig, sp)
+        ex.finish_figure(fig, sp)
+        assert [a.get_title().split('\n')[0] for a in fig.axes] == cats
+        letters = [t.get_text() for a in fig.axes for t in a.texts if len(t.get_text()) == 1]
+        assert letters == ['A', 'B', 'C'][:len(cats)], letters
+        assert len({a.get_ylim() for a in fig.axes}) == 1, 'same value range'
+        assert sum(a.get_legend() is not None for a in fig.axes) == (
+            len(cats) if legend == 'auto' else 1)
+        ex.save_figure(fig, os.path.join(tempfile.mkdtemp(), 'p.png'), dict(sp, dpi=60))
+    ok('categories in panels, laid out as the Age distribution stack, with panel letters')
+    d = tempfile.mkdtemp()
+    for view in ('all', 'crystal', 'power'):
+        sp = ex.default_spec([ex.Panel('plot', 'Plot')], w._export_options(batch=True))
+        sp['options'].update(view=view, **{'cat_1': False})
+        lines = w._export_categories_all(sp, os.path.join(d, f'{view}.pdf'), lambda *a: False)
+        assert lines == [os.path.join(d, f'{view}.pdf') + f'   ({len(cats) - 1} pages)'], lines
+        sp['options']['batch_one_pdf'] = False
+        sp.update(fmt='png', dpi=40)
+        files = w._export_categories_all(sp, os.path.join(d, view), lambda *a: False) \
+            if os.makedirs(os.path.join(d, view)) is None else None
+        assert [os.path.basename(f) for f in files] == [f'{c}.png' for c in cats if c != cats[1]]
+    ok('Export all categories: one page each, in each view, as one PDF or one file each')
     d = tempfile.mkdtemp()
     w.arar_paths = synth.write_arar_files(d)
     w.arar_opts = dict(crystal_rule='auto', group_by='position')
@@ -135,14 +187,57 @@ def test_window_and_export():
     w._write_results_xlsx(path)
     from openpyxl import load_workbook
     sheets = load_workbook(path).sheetnames
-    assert sheets[:3] == ['Results', 'Points', 'Steps'], sheets
+    assert sheets[:4] == ['Results', 'Constants', 'Points', 'Steps'] and sheets[-1] == 'Notes', sheets
+    rows, calib = _fr().read_flux_monitors_export(path)
+    assert [r['category'] for r in rows] == cats and calib.startswith('Calibration for J:'), calib
+    csv_path = os.path.join(d, 'out.csv')
+    w._write_results_csv(csv_path)
+    with open(csv_path, encoding='utf-8-sig') as fh:
+        text = fh.read()
+    assert text.startswith('CONSTANTS') and 'FLUX MONITOR RESULTS' in text \
+        and 'ANALYSIS PARAMETERS' in text
     assert not shown, shown
     print(f"  ok  {len(cats)} positions from .arar files; sheets {', '.join(sheets)}")
+
+    # a session: data, options, calibration and manual exclusions come back
+    cat = cats[0]
+    sid = w.raw_category_data[cat][0]['sample_id']
+    w.manual_exclusions.setdefault(cat, {})[sid] = 'manual'
+    w.use_reml_var.set(False); w.crystal_mode_var.set('crystal')
+    w._run_analysis('test')
+    want = w._summary_rows()
+    sp = os.path.join(d, 'session.json')
+    fm.dfold.get_save_file_name = lambda *a, **k: (sp, '')
+    fm.dfold.get_open_file_name = lambda *a, **k: (sp, '')
+    w.save_session()
+    w2 = window()
+    w2.load_session()
+    assert not shown, shown
+    def same(a, b):          # the result rows, NaN equal to NaN
+        return a[0] == b[0] and all(
+            x == y or (isinstance(x, float) and math.isnan(x) and math.isnan(y))
+            for ra, rb in zip(a[1], b[1]) for x, y in zip(ra, rb)) and len(a[1]) == len(b[1])
+
+    assert same(w2._summary_rows(), want)
+    assert w2.manual_exclusions[cat][sid] == 'manual'
+    assert w2.use_reml_var.get() is False and w2.crystal_mode_var.get() == 'crystal'
+    assert w2.calib_var.get() == w.calib_var.get() and w2.lambda_var.get() == w.lambda_var.get()
+    assert any(l.startswith('Ar-Ar files: ') for l in w2._parameter_lines())
+    w2.analyze_data()                       # runs the session's data again
+    assert not shown and same(w2._summary_rows(), want), shown
+    ok('a saved session reopens with its data, options, calibration and exclusions')
 
 
 # --------------------------------------------------------------------------
 # Flux regression reads an .xlsx export of the Flux monitors tool.
 # --------------------------------------------------------------------------
+
+def _fr():
+    spec = importlib.util.spec_from_file_location(
+        'flux_regression', os.path.join(ROOT, '3_flux_regression', 'flux_regression.py'))
+    fr = importlib.util.module_from_spec(spec); spec.loader.exec_module(fr)
+    return fr
+
 
 def test_flux_regression_import():
     """Flux regression reads an .xlsx export of the Flux monitors tool."""
@@ -573,6 +668,21 @@ def test_flux_regression_views():
         assert len([a for a in pw.figure.axes if a.get_title()]) == 3
         pw.figure.canvas.draw()
     ok('simple and complex 3D: the stack, and one map per disk')
+    import export as ex
+    from matplotlib.figure import Figure
+    screen = pw.figure
+    for k in range(2):
+        pw.show_page(k)
+        for note in (True, False):
+            sp = ex.default_spec([ex.Panel('plot', 'Plot')], [ex.Option('note', '', 'bool', True)])
+            sp.update(font_scale=1.3)
+            sp['options']['note'] = note
+            fig = Figure(figsize=ex.figsize(sp))
+            pw.render_into(fig, sp)
+            ex.save_figure(fig, os.path.join(tempfile.mkdtemp(), 'f.png'), dict(sp, dpi=60))
+            assert bool(fig._suptitle and fig._suptitle.get_text()) == note
+    assert pw.figure is screen and pw.canvas.figure is screen and pw._note_text
+    ok('Export figure: each view, with and without the note; the window keeps its plot')
     # selected cells are cleared with Delete; hole numbers and coordinates stay
     from PyQt5.QtGui import QKeyEvent
     from PyQt5.QtCore import QEvent, Qt as _Qt

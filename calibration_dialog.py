@@ -13,17 +13,14 @@ from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QFormLayout, QGroupBox, QComb
                              QCheckBox, QLabel, QLineEdit, QPushButton, QWidget,
                              QDialogButtonBox)
 
-from arar_math import (route_cfg, route_from_cfg, route_text, route_options, custom_route,
+from arar_math import (note_label, route_cfg, route_from_cfg, route_text, route_options, custom_route,
                        monitor_ingrowth, monitor_age, ROUTE_KEYS, STANDARD_IDS, STANDARDS,
                        reload_standards, cfg_monitor, calibration_notes,
                        LAMBDA_DEFAULT, LAMBDA_ERR)
 
 
 def _note(text):
-    lab = QLabel(text)
-    lab.setWordWrap(True)
-    lab.setStyleSheet('color:#555; font-size:10px;')
-    return lab
+    return note_label(text, 10)
 
 
 class CalibrationDialog(QDialog):

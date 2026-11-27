@@ -42,7 +42,7 @@ from standards import MonitorCombo, route_line as _route_line
 from calibration_dialog import CalibrationDialog
 from arar_math import (route_cfg as _route_cfg, route_from_cfg as _route_from_cfg,
                        route_text as _route_text, monitor_age as _monitor_age,
-                       STANDARD_IDS as _STANDARD_IDS)
+                       STANDARD_IDS as _STANDARD_IDS, alpha_label as _alpha_label)
 
 
 def _monitor_calibration(t_m, lam, err, monitor):
@@ -122,15 +122,6 @@ _MASS_N_KEY = 12
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
-
-def _alpha_label(i: int) -> str:
-    """0→'A', 25→'Z', 26→'AA', …"""
-    s = ""; i += 1
-    while i > 0:
-        i, r = divmod(i - 1, 26)
-        s = chr(65 + r) + s
-    return s
-
 
 def _order_steps(steps: list) -> None:
     """Put the steps in the order they were run and label them A, B, … in that
@@ -1157,8 +1148,10 @@ def main():
 
     # ── read file (or pick it) ────────────────────────────────────────────────
     _app = QApplication.instance() or QApplication(sys.argv)   # keep a reference
-    from arar_math import no_wheel_on_dropdowns
+    from arar_math import no_wheel_on_dropdowns, force_light, report_errors
+    force_light(_app)
     no_wheel_on_dropdowns(_app)
+    report_errors()
     dfold.use_tool('data_converter')
 
     input_path = args.input
